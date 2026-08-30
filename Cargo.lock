@@ -20,3 +20,11 @@ dependencies = [
 [[package]]
 name = "shinrai-money"
 version = "0.1.0"
+
+[[package]]
+name = "shinrai-orders"
+version = "0.1.0"
+dependencies = [
+ "shinrai-instruments",
+ "shinrai-ledger",
+]

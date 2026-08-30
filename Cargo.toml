@@ -4,11 +4,13 @@ members = [
     "crates/domain/money",
     "crates/domain/instruments",
     "crates/domain/ledger",
+    "crates/domain/orders",
 ]
 default-members = [
     "crates/domain/money",
     "crates/domain/instruments",
     "crates/domain/ledger",
+    "crates/domain/orders",
 ]
 
 [workspace.package]
@@ -20,6 +22,7 @@ version = "0.1.0"
 [workspace.dependencies]
 shinrai-money = { path = "crates/domain/money", version = "0.1.0" }
 shinrai-instruments = { path = "crates/domain/instruments", version = "0.1.0" }
+shinrai-ledger = { path = "crates/domain/ledger", version = "0.1.0" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
