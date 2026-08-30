@@ -7,8 +7,10 @@ members = [
     "crates/domain/orders",
     "crates/domain/market-data",
     "crates/protocols/market-data",
+    "crates/protocols/md-fanout",
     "crates/testing/exchange-simulator",
     "crates/domain/paper",
+    "crates/services/market-data-gateway",
 ]
 default-members = [
     "crates/domain/money",
@@ -17,8 +19,10 @@ default-members = [
     "crates/domain/orders",
     "crates/domain/market-data",
     "crates/protocols/market-data",
+    "crates/protocols/md-fanout",
     "crates/testing/exchange-simulator",
     "crates/domain/paper",
+    "crates/services/market-data-gateway",
 ]
 
 [workspace.package]
@@ -34,9 +38,18 @@ shinrai-ledger = { path = "crates/domain/ledger", version = "0.1.0" }
 shinrai-orders = { path = "crates/domain/orders", version = "0.1.0" }
 shinrai-market-data = { path = "crates/domain/market-data", version = "0.1.0" }
 shinrai-md-protocol = { path = "crates/protocols/market-data", version = "0.1.0" }
+shinrai-md-fanout = { path = "crates/protocols/md-fanout", version = "0.1.0" }
 shinrai-exchange-simulator = { path = "crates/testing/exchange-simulator", version = "0.1.0" }
 proptest = "1.6"
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+tokio = { version = "1.47", default-features = false, features = [
+    "macros",
+    "rt-multi-thread",
+    "net",
+    "time",
+] }
+axum = { version = "0.8", features = ["ws"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

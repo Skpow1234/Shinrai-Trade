@@ -1,0 +1,15 @@
+[package]
+name = "shinrai-md-fanout"
+description = "Client market-data fanout: sessions, bounded queues, authn, heartbeats"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = { workspace = true }
+shinrai-instruments = { workspace = true }
+shinrai-market-data = { workspace = true }
