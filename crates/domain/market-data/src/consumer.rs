@@ -153,10 +153,14 @@ impl MdConsumerState {
     }
 
     fn mark_applied(&mut self, instrument: InstrumentId, record: MdRecord) {
-        if matches!(record.kind(), MdKind::Trade | MdKind::Bbo | MdKind::Snapshot) {
+        if matches!(
+            record.kind(),
+            MdKind::Trade | MdKind::Bbo | MdKind::Snapshot
+        ) {
             self.last_price.insert(instrument, record.price());
         }
-        self.next_seq.insert(instrument, record.seq().saturating_add(1));
+        self.next_seq
+            .insert(instrument, record.seq().saturating_add(1));
         self.applied += 1;
         self.status.entry(instrument).or_insert(FeedStatus::Healthy);
     }

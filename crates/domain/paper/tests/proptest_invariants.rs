@@ -1,12 +1,12 @@
 //! Property tests over the paper trading loop.
 
+use proptest::prelude::*;
 use shinrai_exchange_simulator::{FaultConfig, FillPolicy};
 use shinrai_instruments::{aapl, phase1_master, PriceTicks, QuantityLots};
 use shinrai_ledger::AccountId;
 use shinrai_money::{Currency, Money};
 use shinrai_orders::{ClientOrderId, OrderId, Side};
 use shinrai_paper::{PaperEngine, SubmitRequest};
-use proptest::prelude::*;
 
 fn funded_engine(faults: FaultConfig) -> (PaperEngine, AccountId) {
     let mut engine = PaperEngine::new(phase1_master(), faults);
@@ -118,9 +118,9 @@ fn run_actions(actions: &[Action], faults: FaultConfig) {
 }
 
 prop_compose! {
+    // AAPL tick is 1 scaled unit ($0.01), so any integer in range is on-grid.
     fn arb_price()(scaled in 5_000_i64..=50_000_i64) -> i64 {
-        // AAPL tick = 1 scaled unit ($0.01)
-        (scaled / 1) * 1
+        scaled
     }
 }
 

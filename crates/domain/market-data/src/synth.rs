@@ -53,7 +53,11 @@ impl SyntheticFeed {
     /// # Errors
     ///
     /// Returns validation errors (should not happen).
-    pub fn record_trades(seed: u64, instrument_id: InstrumentId, count: usize) -> Result<MdJournal, MdError> {
+    pub fn record_trades(
+        seed: u64,
+        instrument_id: InstrumentId,
+        count: usize,
+    ) -> Result<MdJournal, MdError> {
         let mut feed = Self::new(seed, instrument_id, 10_000);
         let mut journal = MdJournal::new();
         for _ in 0..count {

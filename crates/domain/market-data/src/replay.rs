@@ -22,9 +22,7 @@ pub fn replay(journal: &MdJournal) -> ReplayReport {
     let mut outcomes = Vec::with_capacity(journal.len());
     for record in journal.records() {
         // Validation errors should not occur in stored journals; panic in tests.
-        let outcome = state
-            .apply(*record)
-            .unwrap_or(ApplyOutcome::Duplicate);
+        let outcome = state.apply(*record).unwrap_or(ApplyOutcome::Duplicate);
         outcomes.push(outcome);
     }
     let digest = state_digest(&state);
@@ -65,12 +63,15 @@ mod tests {
     #[test]
     fn gap_marks_degraded_and_skips_apply() {
         let inst = InstrumentId::from_u64(1);
-        let journal = MdJournal::from_records([trade(inst, 1, 100), trade(inst, 3, 102)])
-            .expect("j");
+        let journal =
+            MdJournal::from_records([trade(inst, 1, 100), trade(inst, 3, 102)]).expect("j");
         let report = replay(&journal);
         assert!(matches!(
             report.outcomes[1],
-            ApplyOutcome::GapDetected { expected: 2, got: 3 }
+            ApplyOutcome::GapDetected {
+                expected: 2,
+                got: 3
+            }
         ));
         assert!(matches!(
             report.state.feed_status(inst),
@@ -101,8 +102,8 @@ mod tests {
     #[test]
     fn duplicate_ignored() {
         let inst = InstrumentId::from_u64(1);
-        let journal = MdJournal::from_records([trade(inst, 1, 100), trade(inst, 1, 999)])
-            .expect("j");
+        let journal =
+            MdJournal::from_records([trade(inst, 1, 100), trade(inst, 1, 999)]).expect("j");
         let report = replay(&journal);
         assert_eq!(report.outcomes[1], ApplyOutcome::Duplicate);
         assert_eq!(report.state.duplicate_count(), 1);
