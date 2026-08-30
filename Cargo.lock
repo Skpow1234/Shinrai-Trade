@@ -3,5 +3,12 @@
 version = 4
 
 [[package]]
+name = "shinrai-instruments"
+version = "0.1.0"
+dependencies = [
+ "shinrai-money",
+]
+
+[[package]]
 name = "shinrai-money"
 version = "0.1.0"

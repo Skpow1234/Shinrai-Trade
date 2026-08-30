@@ -2,9 +2,11 @@
 resolver = "2"
 members = [
     "crates/domain/money",
+    "crates/domain/instruments",
 ]
 default-members = [
     "crates/domain/money",
+    "crates/domain/instruments",
 ]
 
 [workspace.package]
@@ -12,6 +14,9 @@ edition = "2021"
 license = "MIT"
 rust-version = "1.90"
 version = "0.1.0"
+
+[workspace.dependencies]
+shinrai-money = { path = "crates/domain/money", version = "0.1.0" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
