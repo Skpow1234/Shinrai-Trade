@@ -1,0 +1,15 @@
+[package]
+name = "shinrai-md-protocol"
+description = "Vendor market-data adapters: normalize, record raw, supervise gaps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = { workspace = true }
+shinrai-instruments = { workspace = true }
+shinrai-market-data = { workspace = true }

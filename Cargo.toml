@@ -6,6 +6,7 @@ members = [
     "crates/domain/ledger",
     "crates/domain/orders",
     "crates/domain/market-data",
+    "crates/protocols/market-data",
     "crates/testing/exchange-simulator",
     "crates/domain/paper",
 ]
@@ -15,6 +16,7 @@ default-members = [
     "crates/domain/ledger",
     "crates/domain/orders",
     "crates/domain/market-data",
+    "crates/protocols/market-data",
     "crates/testing/exchange-simulator",
     "crates/domain/paper",
 ]
@@ -31,8 +33,10 @@ shinrai-instruments = { path = "crates/domain/instruments", version = "0.1.0" }
 shinrai-ledger = { path = "crates/domain/ledger", version = "0.1.0" }
 shinrai-orders = { path = "crates/domain/orders", version = "0.1.0" }
 shinrai-market-data = { path = "crates/domain/market-data", version = "0.1.0" }
+shinrai-md-protocol = { path = "crates/protocols/market-data", version = "0.1.0" }
 shinrai-exchange-simulator = { path = "crates/testing/exchange-simulator", version = "0.1.0" }
 proptest = "1.6"
+serde_json = "1.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
