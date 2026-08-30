@@ -68,4 +68,22 @@ mod tests {
         let d2 = state_digest(&s);
         assert_eq!(d1, d2);
     }
+
+    #[test]
+    fn first_venue_sequence_need_not_be_one() {
+        let mut s = MdConsumerState::new();
+        let inst = InstrumentId::from_u64(1);
+        let outcome = s
+            .apply(MdRecord::new(
+                inst,
+                50_000,
+                0,
+                MdKind::Trade,
+                PriceTicks::from_scaled(100),
+            ))
+            .expect("apply");
+        assert_eq!(outcome, crate::consumer::ApplyOutcome::Applied);
+        assert_eq!(s.expected_seq(inst), 50_001);
+        assert!(s.is_synced(inst));
+    }
 }

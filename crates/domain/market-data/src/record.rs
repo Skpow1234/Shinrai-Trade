@@ -56,7 +56,7 @@ impl MdRecord {
         self.instrument_id
     }
 
-    /// Per-instrument sequence (starts at 1).
+    /// Per-instrument vendor sequence (must be positive).
     #[must_use]
     pub const fn seq(self) -> u64 {
         self.seq

@@ -37,10 +37,27 @@ impl MdConsumerState {
         Self::default()
     }
 
-    /// Expected next sequence for an instrument (1 if unseen).
+    /// Expected next sequence for an instrument.
+    ///
+    /// Returns `1` if the instrument has never been applied. Venue feeds whose
+    /// first sequence is not `1` still apply on first sight (see [`Self::apply`]).
     #[must_use]
     pub fn expected_seq(&self, instrument_id: InstrumentId) -> u64 {
         self.next_seq.get(&instrument_id).copied().unwrap_or(1)
+    }
+
+    /// Returns true if at least one sequenced record has been applied.
+    #[must_use]
+    pub fn is_synced(&self, instrument_id: InstrumentId) -> bool {
+        self.next_seq.contains_key(&instrument_id)
+    }
+
+    /// Marks the feed degraded until a snapshot arrives (disconnect / resume).
+    pub fn mark_degraded(&mut self, instrument_id: InstrumentId) {
+        let missing_from = self.next_seq.get(&instrument_id).copied().unwrap_or(1);
+        self.gaps += 1;
+        self.status
+            .insert(instrument_id, FeedStatus::Degraded { missing_from });
     }
 
     /// Feed status (healthy if unseen).
@@ -78,6 +95,7 @@ impl MdConsumerState {
 
     /// Applies one record using strict in-order policy:
     ///
+    /// - First record for an instrument (any `seq > 0`) → apply, unless degraded
     /// - `seq == expected` → apply (unless degraded and not snapshot)
     /// - `seq < expected` → duplicate, ignore
     /// - `seq > expected` → gap, mark degraded, do not apply
@@ -90,8 +108,14 @@ impl MdConsumerState {
     pub fn apply(&mut self, record: MdRecord) -> Result<ApplyOutcome, MdError> {
         record.validate()?;
         let instrument = record.instrument_id();
-        let expected = self.expected_seq(instrument);
         let current = self.feed_status(instrument);
+        let synced = self.next_seq.contains_key(&instrument);
+
+        if !synced {
+            return self.apply_unsynced(instrument, record, current);
+        }
+
+        let expected = self.expected_seq(instrument);
 
         if record.seq() < expected {
             self.duplicates += 1;
@@ -115,7 +139,6 @@ impl MdConsumerState {
                 self.gaps += 1;
                 return Ok(ApplyOutcome::IgnoredDegraded);
             }
-            // seq == expected but still degraded without snapshot
             return Ok(ApplyOutcome::IgnoredDegraded);
         }
 
@@ -135,6 +158,33 @@ impl MdConsumerState {
 
         self.mark_applied(instrument, record);
         Ok(ApplyOutcome::Applied)
+    }
+
+    fn apply_unsynced(
+        &mut self,
+        instrument: InstrumentId,
+        record: MdRecord,
+        current: FeedStatus,
+    ) -> Result<ApplyOutcome, MdError> {
+        match current {
+            FeedStatus::Degraded { missing_from } if record.kind() == MdKind::Snapshot => {
+                if record.seq() < missing_from {
+                    return Err(MdError::InvalidSnapshot {
+                        instrument_id: instrument,
+                        expected: missing_from,
+                        snapshot_seq: record.seq(),
+                    });
+                }
+                self.mark_applied(instrument, record);
+                self.status.insert(instrument, FeedStatus::Healthy);
+                Ok(ApplyOutcome::SnapshotRecovered)
+            }
+            FeedStatus::Degraded { .. } => Ok(ApplyOutcome::IgnoredDegraded),
+            FeedStatus::Healthy => {
+                self.mark_applied(instrument, record);
+                Ok(ApplyOutcome::Applied)
+            }
+        }
     }
 
     /// Instrument ids with any tracked state, sorted for stable digests.
@@ -184,4 +234,43 @@ pub enum ApplyOutcome {
     IgnoredDegraded,
     /// Snapshot restored healthy feed.
     SnapshotRecovered,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::record::MdRecord;
+    use shinrai_instruments::PriceTicks;
+
+    fn trade(seq: u64) -> MdRecord {
+        MdRecord::new(
+            InstrumentId::from_u64(1),
+            seq,
+            0,
+            MdKind::Trade,
+            PriceTicks::from_scaled(100),
+        )
+    }
+
+    #[test]
+    fn unsynced_ticks_ignored_until_snapshot() {
+        let inst = InstrumentId::from_u64(1);
+        let mut s = MdConsumerState::new();
+        s.mark_degraded(inst);
+        let skipped = s.apply(trade(9_000)).expect("skip");
+        assert_eq!(skipped, ApplyOutcome::IgnoredDegraded);
+        let snap = MdRecord::new(
+            inst,
+            9_000,
+            0,
+            MdKind::Snapshot,
+            PriceTicks::from_scaled(100),
+        );
+        assert_eq!(
+            s.apply(snap).expect("snap"),
+            ApplyOutcome::SnapshotRecovered
+        );
+        assert_eq!(s.feed_status(inst), FeedStatus::Healthy);
+        assert_eq!(s.expected_seq(inst), 9_001);
+    }
 }
