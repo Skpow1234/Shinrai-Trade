@@ -153,6 +153,11 @@ impl OrderStore {
     pub fn get(&self, id: OrderId) -> Result<&Order, OrderError> {
         self.orders.get(&id).ok_or(OrderError::UnknownOrder { id })
     }
+
+    /// All orders in undefined order (for invariant checks).
+    pub fn orders(&self) -> impl Iterator<Item = &Order> {
+        self.orders.values()
+    }
 }
 
 #[cfg(test)]
