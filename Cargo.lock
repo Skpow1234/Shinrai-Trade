@@ -3,6 +3,15 @@
 version = 4
 
 [[package]]
+name = "shinrai-exchange-simulator"
+version = "0.1.0"
+dependencies = [
+ "shinrai-instruments",
+ "shinrai-ledger",
+ "shinrai-orders",
+]
+
+[[package]]
 name = "shinrai-instruments"
 version = "0.1.0"
 dependencies = [

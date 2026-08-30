@@ -5,12 +5,14 @@ members = [
     "crates/domain/instruments",
     "crates/domain/ledger",
     "crates/domain/orders",
+    "crates/testing/exchange-simulator",
 ]
 default-members = [
     "crates/domain/money",
     "crates/domain/instruments",
     "crates/domain/ledger",
     "crates/domain/orders",
+    "crates/testing/exchange-simulator",
 ]
 
 [workspace.package]
@@ -23,6 +25,7 @@ version = "0.1.0"
 shinrai-money = { path = "crates/domain/money", version = "0.1.0" }
 shinrai-instruments = { path = "crates/domain/instruments", version = "0.1.0" }
 shinrai-ledger = { path = "crates/domain/ledger", version = "0.1.0" }
+shinrai-orders = { path = "crates/domain/orders", version = "0.1.0" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
