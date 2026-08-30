@@ -1,6 +1,6 @@
 //! Deterministic synthetic tick generator (seeded LCG).
 
-use shinrai_instruments::{InstrumentId, PriceTicks};
+use shinrai_instruments::{InstrumentId, PriceTicks, QuantityLots};
 
 use crate::error::MdError;
 use crate::journal::MdJournal;
@@ -46,6 +46,7 @@ impl SyntheticFeed {
             MdKind::Trade,
             PriceTicks::from_scaled(self.price),
         )
+        .with_qty(QuantityLots::from_lots(1))
     }
 
     /// Records `count` synthetic trades into a new journal.

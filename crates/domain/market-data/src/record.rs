@@ -1,6 +1,6 @@
 //! Normalized market-data records.
 
-use shinrai_instruments::{InstrumentId, PriceTicks};
+use shinrai_instruments::{InstrumentId, PriceTicks, QuantityLots};
 
 /// Kind of market-data message (Phase 1 subset).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -25,6 +25,7 @@ pub struct MdRecord {
     ts_logical: u64,
     kind: MdKind,
     price: PriceTicks,
+    qty: QuantityLots,
 }
 
 impl MdRecord {
@@ -47,7 +48,14 @@ impl MdRecord {
             ts_logical,
             kind,
             price,
+            qty: QuantityLots::from_lots(0),
         }
+    }
+
+    /// Sets trade quantity (lot units). Ignored for non-trade kinds in charts.
+    #[must_use]
+    pub const fn with_qty(self, qty: QuantityLots) -> Self {
+        Self { qty, ..self }
     }
 
     /// Instrument.
@@ -78,6 +86,12 @@ impl MdRecord {
     #[must_use]
     pub const fn price(self) -> PriceTicks {
         self.price
+    }
+
+    /// Trade quantity in lot units (`0` when unknown or not a print).
+    #[must_use]
+    pub const fn qty(self) -> QuantityLots {
+        self.qty
     }
 
     /// Validates sequence is non-zero.

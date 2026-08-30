@@ -1,4 +1,4 @@
-//! Market-data journal, gap detection, and deterministic replay.
+//! Market-data journal, gap detection, deterministic replay, and OHLCV bars.
 //!
 //! On a sequence gap the feed is marked **degraded** and messages are not
 //! applied until a snapshot restores continuity. Replay is deterministic:
@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+mod bar;
 mod checksum;
 mod consumer;
 mod error;
@@ -13,6 +14,8 @@ mod journal;
 mod record;
 mod replay;
 mod synth;
+
+pub use bar::{BarAggregator, BarInterval, BarStore, OhlcvBar};
 
 pub use checksum::state_digest;
 pub use consumer::{ApplyOutcome, FeedStatus, MdConsumerState};

@@ -1,7 +1,7 @@
 //! Coinbase Exchange public market-data adapter.
 
 use serde_json::{json, Value};
-use shinrai_instruments::{ExternalId, InstrumentId, InstrumentMaster, PriceTicks};
+use shinrai_instruments::{ExternalId, InstrumentId, InstrumentMaster, PriceTicks, QuantityLots};
 use shinrai_market_data::{MdKind, MdRecord};
 
 use crate::error::ProviderError;
@@ -52,7 +52,7 @@ impl MarketDataVendor for CoinbaseExchange {
         json!({
             "type": "subscribe",
             "product_ids": product_ids,
-            "channels": ["ticker", "heartbeat"],
+            "channels": ["ticker", "heartbeat", "matches"],
         })
         .to_string()
         .into_bytes()
@@ -89,18 +89,15 @@ impl MarketDataVendor for CoinbaseExchange {
                 let seq = json_u64(&value, "sequence")?;
                 let price = json_str(&value, "price")?;
                 let ticks = Self::price_ticks(master, instrument_id, price)?;
+                let qty = optional_qty(master, instrument_id, &value)?;
                 let kind = if msg_type == "ticker" {
                     MdKind::Bbo
                 } else {
                     MdKind::Trade
                 };
-                Ok(DecodedFrame::Record(MdRecord::new(
-                    instrument_id,
-                    seq,
-                    ts_logical,
-                    kind,
-                    ticks,
-                )))
+                Ok(DecodedFrame::Record(
+                    MdRecord::new(instrument_id, seq, ts_logical, kind, ticks).with_qty(qty),
+                ))
             }
             _ => Ok(DecodedFrame::Control),
         }
@@ -125,6 +122,24 @@ impl MarketDataVendor for CoinbaseExchange {
             MdKind::Snapshot,
             ticks,
         ))
+    }
+}
+
+fn optional_qty(
+    master: &InstrumentMaster,
+    instrument_id: InstrumentId,
+    value: &Value,
+) -> Result<QuantityLots, ProviderError> {
+    let size = value
+        .get("size")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("last_size").and_then(Value::as_str));
+    match size {
+        None => Ok(QuantityLots::from_lots(0)),
+        Some(decimal) => {
+            let instrument = master.get(instrument_id)?;
+            Ok(instrument.qty_to_lots(decimal)?)
+        }
     }
 }
 
@@ -217,6 +232,22 @@ mod tests {
         let text = String::from_utf8(msg).expect("utf8");
         assert!(text.contains("heartbeat"));
         assert!(text.contains("ticker"));
+        assert!(text.contains("matches"));
         assert!(text.contains("BTC-USD"));
+    }
+
+    #[test]
+    fn match_carries_lot_quantity() {
+        let vendor = CoinbaseExchange;
+        let master = phase1_master();
+        let raw = br#"{"type":"match","sequence":9,"product_id":"BTC-USD","price":"65000.12","size":"0.01"}"#;
+        let frame = vendor.decode_stream(raw, 1, &master).expect("decode");
+        match frame {
+            DecodedFrame::Record(record) => {
+                assert_eq!(record.kind(), MdKind::Trade);
+                assert_eq!(record.qty().lots(), 1_000_000);
+            }
+            other => panic!("expected record, got {other:?}"),
+        }
     }
 }

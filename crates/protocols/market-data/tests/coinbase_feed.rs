@@ -1,7 +1,7 @@
 //! Coinbase Exchange adapter against recorded vendor JSON.
 
 use shinrai_instruments::{btc_usd, phase1_master};
-use shinrai_market_data::{FeedStatus, MdKind};
+use shinrai_market_data::{BarAggregator, BarInterval, FeedStatus, MdKind};
 use shinrai_md_protocol::{
     CoinbaseExchange, DecodedFrame, FeedSupervisor, MarketDataVendor, SupervisorEvent,
 };
@@ -52,4 +52,31 @@ fn snapshot_then_ticker_then_heartbeat() {
     );
     assert_eq!(sup.raw().len(), 3);
     assert_eq!(vendor.websocket_url(), CoinbaseExchange::WS_URL);
+}
+
+#[test]
+fn recorded_match_aggregates_ohlcv() {
+    let vendor = CoinbaseExchange;
+    let master = phase1_master();
+    let raw = include_str!("fixtures/match.json");
+    let DecodedFrame::Record(record) = vendor
+        .decode_stream(raw.as_bytes(), 60, &master)
+        .expect("decode")
+    else {
+        panic!("match must decode to a record");
+    };
+    assert_eq!(record.kind(), MdKind::Trade);
+    assert_eq!(record.qty().lots(), 1_000_000);
+
+    let mut agg = BarAggregator::new([BarInterval::MINUTE]);
+    agg.apply(record).expect("bar");
+    agg.close_open();
+    let bar = agg
+        .store()
+        .get(btc_usd().id(), BarInterval::MINUTE, 60)
+        .expect("closed");
+    assert_eq!(bar.open().scaled(), 6_500_012);
+    assert_eq!(bar.close().scaled(), 6_500_012);
+    assert_eq!(bar.volume().lots(), 1_000_000);
+    assert_eq!(bar.trade_count(), 1);
 }

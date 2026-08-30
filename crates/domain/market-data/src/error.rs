@@ -11,6 +11,12 @@ pub enum MdError {
     InvalidSequence,
     /// Instrument id was invalid for this operation.
     InvalidInstrument,
+    /// Bar interval duration was zero.
+    InvalidInterval,
+    /// Quantity was negative or volume overflowed.
+    InvalidQuantity,
+    /// Arithmetic overflowed.
+    Overflow,
     /// Snapshot sequence is not ahead of the degraded gap.
     InvalidSnapshot {
         /// Instrument.
@@ -27,6 +33,9 @@ impl fmt::Display for MdError {
         match self {
             Self::InvalidSequence => f.write_str("sequence must be positive"),
             Self::InvalidInstrument => f.write_str("invalid instrument"),
+            Self::InvalidInterval => f.write_str("bar interval must be positive"),
+            Self::InvalidQuantity => f.write_str("quantity must be non-negative"),
+            Self::Overflow => f.write_str("arithmetic overflow"),
             Self::InvalidSnapshot {
                 instrument_id,
                 expected,
