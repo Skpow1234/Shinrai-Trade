@@ -1,0 +1,13 @@
+[package]
+name = "shinrai-market-data"
+description = "Append-only market-data journal with gap detection and deterministic replay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+shinrai-instruments = { workspace = true }

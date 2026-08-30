@@ -15,3 +15,6 @@ shinrai-instruments = { workspace = true }
 shinrai-ledger = { workspace = true }
 shinrai-money = { workspace = true }
 shinrai-orders = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
