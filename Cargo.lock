@@ -37,3 +37,14 @@ dependencies = [
  "shinrai-instruments",
  "shinrai-ledger",
 ]
+
+[[package]]
+name = "shinrai-paper"
+version = "0.1.0"
+dependencies = [
+ "shinrai-exchange-simulator",
+ "shinrai-instruments",
+ "shinrai-ledger",
+ "shinrai-money",
+ "shinrai-orders",
+]
