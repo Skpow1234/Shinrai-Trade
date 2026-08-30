@@ -1,1 +1,16 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local / private docs
 .cursorrules
+docs/design.md
+docs/objectives-expanded.md
