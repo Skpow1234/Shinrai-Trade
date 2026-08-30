@@ -3,10 +3,12 @@ resolver = "2"
 members = [
     "crates/domain/money",
     "crates/domain/instruments",
+    "crates/domain/ledger",
 ]
 default-members = [
     "crates/domain/money",
     "crates/domain/instruments",
+    "crates/domain/ledger",
 ]
 
 [workspace.package]
@@ -17,6 +19,7 @@ version = "0.1.0"
 
 [workspace.dependencies]
 shinrai-money = { path = "crates/domain/money", version = "0.1.0" }
+shinrai-instruments = { path = "crates/domain/instruments", version = "0.1.0" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
