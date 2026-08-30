@@ -1,6 +1,6 @@
 [package]
 name = "shinrai-market-data"
-description = "Append-only market-data journal with gap detection and deterministic replay"
+description = "Market-data journal, gap detection, replay, and OHLCV bars"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,3 +11,6 @@ workspace = true
 
 [dependencies]
 shinrai-instruments = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
