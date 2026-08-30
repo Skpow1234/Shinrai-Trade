@@ -1,7 +1,7 @@
 //! Vendor-agnostic decode and snapshot contracts.
 
 use shinrai_instruments::{InstrumentId, InstrumentMaster};
-use shinrai_market_data::MdRecord;
+use shinrai_market_data::{BookEvent, MdRecord};
 
 use crate::error::ProviderError;
 
@@ -56,6 +56,8 @@ pub enum DecodedFrame {
     },
     /// Sequenced normalized record.
     Record(MdRecord),
+    /// L2 snapshot or delta.
+    Book(BookEvent),
     /// Subscribe ack, vendor error, or other non-market payload.
     Control,
 }
@@ -99,4 +101,17 @@ pub trait MarketDataVendor {
         product_id: &str,
         master: &InstrumentMaster,
     ) -> Result<MdRecord, ProviderError>;
+
+    /// Decodes a REST/WS L2 snapshot body.
+    ///
+    /// # Errors
+    ///
+    /// Returns decode / mapping errors.
+    fn decode_book_snapshot(
+        &self,
+        raw: &[u8],
+        ts_logical: u64,
+        product_id: &str,
+        master: &InstrumentMaster,
+    ) -> Result<BookEvent, ProviderError>;
 }

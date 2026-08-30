@@ -367,6 +367,32 @@ impl LotSpec {
         Ok(QuantityLots::from_lots(scaled / self.step_scaled))
     }
 
+    /// Converts a market-data size into lots. Zero is allowed (delete a level);
+    /// order min/max are not applied.
+    ///
+    /// # Errors
+    ///
+    /// Returns parse / step-alignment errors. Negative sizes are rejected.
+    pub fn size_to_lots(&self, decimal: &str) -> Result<QuantityLots, InstrumentError> {
+        let scaled = parse_scaled(decimal, self.qty_scale)?;
+        if scaled == 0 {
+            return Ok(QuantityLots::from_lots(0));
+        }
+        if scaled < 0 {
+            return Err(InstrumentError::QuantityBelowMin {
+                scaled,
+                min_scaled: 0,
+            });
+        }
+        if scaled.rem_euclid(self.step_scaled) != 0 {
+            return Err(InstrumentError::QuantityOffGrid {
+                scaled,
+                step_scaled: self.step_scaled,
+            });
+        }
+        Ok(QuantityLots::from_lots(scaled / self.step_scaled))
+    }
+
     /// Converts a major-unit decimal quantity into [`QuantityLots`].
     ///
     /// # Errors
@@ -521,5 +547,13 @@ mod tests {
         let q = lots.qty_to_lots("0.00000001").expect("ok");
         assert_eq!(q.lots(), 1);
         assert_eq!(lots.lots_to_qty(q).expect("fmt"), "0.00000001");
+    }
+
+    #[test]
+    fn size_zero_deletes_book_level() {
+        let lots = LotSpec::new(8, 1, 1, None, 1).expect("lots");
+        assert_eq!(lots.size_to_lots("0").expect("z").lots(), 0);
+        assert_eq!(lots.size_to_lots("0.00000000").expect("z8").lots(), 0);
+        assert!(lots.qty_to_lots("0").is_err());
     }
 }

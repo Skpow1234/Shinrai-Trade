@@ -2,7 +2,9 @@
 
 use serde_json::{json, Value};
 use shinrai_instruments::{ExternalId, InstrumentId, InstrumentMaster, PriceTicks, QuantityLots};
-use shinrai_market_data::{MdKind, MdRecord};
+use shinrai_market_data::{
+    BookChange, BookDelta, BookEvent, BookLevel, BookSide, BookSnapshot, MdKind, MdRecord,
+};
 
 use crate::error::ProviderError;
 use crate::vendor::{DecodedFrame, MarketDataVendor, SnapshotSpec, VendorId};
@@ -52,7 +54,7 @@ impl MarketDataVendor for CoinbaseExchange {
         json!({
             "type": "subscribe",
             "product_ids": product_ids,
-            "channels": ["ticker", "heartbeat", "matches"],
+            "channels": ["ticker", "heartbeat", "matches", "level2"],
         })
         .to_string()
         .into_bytes()
@@ -60,7 +62,7 @@ impl MarketDataVendor for CoinbaseExchange {
 
     fn snapshot_spec(&self, product_id: &str) -> SnapshotSpec {
         SnapshotSpec::get(format!(
-            "{}/products/{product_id}/book?level=1",
+            "{}/products/{product_id}/book?level=2",
             Self::REST_ORIGIN
         ))
     }
@@ -99,6 +101,24 @@ impl MarketDataVendor for CoinbaseExchange {
                     MdRecord::new(instrument_id, seq, ts_logical, kind, ticks).with_qty(qty),
                 ))
             }
+            "snapshot" => {
+                let product_id = json_str(&value, "product_id")?;
+                Ok(DecodedFrame::Book(decode_book_value(
+                    &value, ts_logical, product_id, master,
+                )?))
+            }
+            "l2update" => {
+                let product_id = json_str(&value, "product_id")?;
+                let instrument_id = Self::resolve_product(master, product_id)?;
+                let seq = value.get("sequence").and_then(json_u64_opt);
+                let changes = decode_changes(master, instrument_id, &value)?;
+                Ok(DecodedFrame::Book(BookEvent::Delta(BookDelta::new(
+                    instrument_id,
+                    seq,
+                    ts_logical,
+                    changes,
+                ))))
+            }
             _ => Ok(DecodedFrame::Control),
         }
     }
@@ -122,6 +142,17 @@ impl MarketDataVendor for CoinbaseExchange {
             MdKind::Snapshot,
             ticks,
         ))
+    }
+
+    fn decode_book_snapshot(
+        &self,
+        raw: &[u8],
+        ts_logical: u64,
+        product_id: &str,
+        master: &InstrumentMaster,
+    ) -> Result<BookEvent, ProviderError> {
+        let value: Value = serde_json::from_slice(raw).map_err(|_| ProviderError::InvalidJson)?;
+        decode_book_value(&value, ts_logical, product_id, master)
     }
 }
 
@@ -152,11 +183,104 @@ fn json_str<'a>(value: &'a Value, field: &'static str) -> Result<&'a str, Provid
 
 fn json_u64(value: &Value, field: &'static str) -> Result<u64, ProviderError> {
     let cell = value.get(field).ok_or(ProviderError::MissingField(field))?;
+    json_u64_opt(cell).ok_or(ProviderError::MissingField(field))
+}
+
+fn json_u64_opt(cell: &Value) -> Option<u64> {
     match cell {
-        Value::Number(n) => n.as_u64().ok_or(ProviderError::MissingField(field)),
-        Value::String(s) => s.parse().map_err(|_| ProviderError::MissingField(field)),
-        _ => Err(ProviderError::MissingField(field)),
+        Value::Number(n) => n.as_u64(),
+        Value::String(s) => s.parse().ok(),
+        _ => None,
     }
+}
+
+fn decode_book_value(
+    value: &Value,
+    ts_logical: u64,
+    product_id: &str,
+    master: &InstrumentMaster,
+) -> Result<BookEvent, ProviderError> {
+    let instrument_id = CoinbaseExchange::resolve_product(master, product_id)?;
+    let seq = value.get("sequence").and_then(json_u64_opt).unwrap_or(1);
+    if seq == 0 {
+        return Err(ProviderError::MissingField("sequence"));
+    }
+    let bids = decode_levels(master, instrument_id, value, "bids")?;
+    let asks = decode_levels(master, instrument_id, value, "asks")?;
+    Ok(BookEvent::Snapshot(BookSnapshot::new(
+        instrument_id,
+        seq,
+        ts_logical,
+        bids,
+        asks,
+    )))
+}
+
+fn decode_levels(
+    master: &InstrumentMaster,
+    instrument_id: InstrumentId,
+    value: &Value,
+    side: &'static str,
+) -> Result<Vec<BookLevel>, ProviderError> {
+    let Some(rows) = value.get(side).and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    let instrument = master.get(instrument_id)?;
+    let mut levels = Vec::new();
+    for row in rows {
+        let pair = row.as_array().ok_or(ProviderError::MissingField(side))?;
+        let price = pair
+            .first()
+            .and_then(Value::as_str)
+            .ok_or(ProviderError::MissingField(side))?;
+        let qty_text = pair
+            .get(1)
+            .and_then(Value::as_str)
+            .ok_or(ProviderError::MissingField(side))?;
+        let ticks = instrument.price_to_ticks(price)?;
+        let qty = instrument.size_to_lots(qty_text)?;
+        if qty.lots() > 0 {
+            levels.push(BookLevel::new(ticks, qty));
+        }
+    }
+    Ok(levels)
+}
+
+fn decode_changes(
+    master: &InstrumentMaster,
+    instrument_id: InstrumentId,
+    value: &Value,
+) -> Result<Vec<BookChange>, ProviderError> {
+    let rows = value
+        .get("changes")
+        .and_then(Value::as_array)
+        .ok_or(ProviderError::MissingField("changes"))?;
+    let instrument = master.get(instrument_id)?;
+    let mut changes = Vec::new();
+    for row in rows {
+        let pair = row
+            .as_array()
+            .ok_or(ProviderError::MissingField("changes"))?;
+        let side = match pair.first().and_then(Value::as_str) {
+            Some("buy") => BookSide::Bid,
+            Some("sell") => BookSide::Ask,
+            _ => return Err(ProviderError::MissingField("side")),
+        };
+        let price = pair
+            .get(1)
+            .and_then(Value::as_str)
+            .ok_or(ProviderError::MissingField("price"))?;
+        let qty_text = pair
+            .get(2)
+            .and_then(Value::as_str)
+            .ok_or(ProviderError::MissingField("size"))?;
+        changes.push(BookChange::new(
+            side,
+            instrument.price_to_ticks(price)?,
+            instrument.size_to_lots(qty_text)?,
+        ));
+    }
+    Ok(changes)
 }
 
 fn snapshot_price(value: &Value) -> Result<&str, ProviderError> {
@@ -233,7 +357,35 @@ mod tests {
         assert!(text.contains("heartbeat"));
         assert!(text.contains("ticker"));
         assert!(text.contains("matches"));
+        assert!(text.contains("level2"));
         assert!(text.contains("BTC-USD"));
+    }
+
+    #[test]
+    fn book_snapshot_and_l2update() {
+        let vendor = CoinbaseExchange;
+        let master = phase1_master();
+        let raw =
+            br#"{"sequence":10,"bids":[["65000.10","1.0",1]],"asks":[["65000.12","0.01",1]]}"#;
+        let BookEvent::Snapshot(snap) = vendor
+            .decode_book_snapshot(raw, 0, "BTC-USD", &master)
+            .expect("snap")
+        else {
+            panic!("snapshot");
+        };
+        assert_eq!(snap.seq(), 10);
+        assert_eq!(snap.bids()[0].qty().lots(), 100_000_000);
+        assert_eq!(snap.asks()[0].qty().lots(), 1_000_000);
+
+        let upd = br#"{"type":"l2update","product_id":"BTC-USD","changes":[["buy","65000.10","0.00000000"],["sell","65000.12","0.02"]]}"#;
+        match vendor.decode_stream(upd, 1, &master).expect("upd") {
+            DecodedFrame::Book(BookEvent::Delta(delta)) => {
+                assert_eq!(delta.changes().len(), 2);
+                assert_eq!(delta.changes()[0].qty().lots(), 0);
+                assert_eq!(delta.changes()[1].qty().lots(), 2_000_000);
+            }
+            other => panic!("expected delta, got {other:?}"),
+        }
     }
 
     #[test]

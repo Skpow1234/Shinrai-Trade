@@ -193,6 +193,15 @@ impl Instrument {
         self.lot_spec.qty_to_lots(decimal)
     }
 
+    /// Parses a book/print size into lots (`0` is a valid empty level).
+    ///
+    /// # Errors
+    ///
+    /// Returns parse / alignment errors.
+    pub fn size_to_lots(&self, decimal: &str) -> Result<QuantityLots, InstrumentError> {
+        self.lot_spec.size_to_lots(decimal)
+    }
+
     /// Formats lots as a major-unit decimal quantity string.
     ///
     /// # Errors

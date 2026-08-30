@@ -3,11 +3,13 @@
 use std::collections::HashMap;
 
 use shinrai_instruments::{InstrumentId, InstrumentMaster};
-use shinrai_market_data::{ApplyOutcome, MdConsumerState, MdJournal, MdRecord};
+use shinrai_market_data::{
+    ApplyOutcome, BookApplyOutcome, BookEngine, BookEvent, MdConsumerState, MdJournal, MdRecord,
+};
 
 use crate::error::ProviderError;
 use crate::journal::RecordingJournal;
-use crate::vendor::{DecodedFrame, MarketDataVendor, SnapshotSpec};
+use crate::vendor::{DecodedFrame, MarketDataVendor, SnapshotSpec, VendorId};
 
 /// Commands the I/O layer must execute (no sockets in this crate).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +78,20 @@ pub enum SupervisorEvent {
         /// Logical time since last message.
         silent_for: u64,
     },
+    /// Book rebuilt from snapshot.
+    BookRebuilt {
+        /// Instrument.
+        instrument_id: InstrumentId,
+        /// Book digest after rebuild.
+        checksum: u64,
+    },
+    /// L2 delta applied.
+    BookDeltaApplied {
+        /// Instrument.
+        instrument_id: InstrumentId,
+        /// Book digest.
+        checksum: u64,
+    },
     /// Vendor control / unusable frame (still recorded raw).
     Skipped,
 }
@@ -100,6 +116,7 @@ pub struct FeedSupervisor {
     sla_logical: u64,
     reconnect_attempt: u32,
     connected: bool,
+    books: BookEngine,
 }
 
 impl FeedSupervisor {
@@ -115,6 +132,7 @@ impl FeedSupervisor {
             sla_logical,
             reconnect_attempt: 0,
             connected: false,
+            books: BookEngine::new(),
         }
     }
 
@@ -149,6 +167,12 @@ impl FeedSupervisor {
         &self.raw
     }
 
+    /// Local L2 books.
+    #[must_use]
+    pub const fn books(&self) -> &BookEngine {
+        &self.books
+    }
+
     /// Session currently connected.
     #[must_use]
     pub const fn is_connected(&self) -> bool {
@@ -168,6 +192,7 @@ impl FeedSupervisor {
         }
         for (instrument_id, product_id) in &self.subscriptions {
             self.consumer.mark_degraded(*instrument_id);
+            self.books.invalidate(*instrument_id);
             self.last_seen.insert(*instrument_id, now);
             commands.push(FeedCommand::RequestSnapshot {
                 instrument_id: *instrument_id,
@@ -183,6 +208,7 @@ impl FeedSupervisor {
         self.connected = false;
         for (instrument_id, _) in &self.subscriptions {
             self.consumer.mark_degraded(*instrument_id);
+            self.books.invalidate(*instrument_id);
         }
         self.reconnect_attempt = self.reconnect_attempt.saturating_add(1);
         vec![FeedCommand::Reconnect {
@@ -224,6 +250,7 @@ impl FeedSupervisor {
                 }
             }
             DecodedFrame::Record(record) => self.apply_record(vendor, now, raw, record),
+            DecodedFrame::Book(event) => self.apply_book(now, raw, vendor.id(), &event),
         }
     }
 
@@ -241,7 +268,12 @@ impl FeedSupervisor {
         raw: &[u8],
     ) -> Result<IngestOutcome, ProviderError> {
         let record = vendor.decode_snapshot(raw, now, product_id, master)?;
-        Ok(self.apply_record(vendor, now, raw, record))
+        let mut outcome = self.apply_record(vendor, now, raw, record);
+        if let Ok(event) = vendor.decode_book_snapshot(raw, now, product_id, master) {
+            let book_events = self.apply_book_event(&event);
+            outcome.events.extend(book_events);
+        }
+        Ok(outcome)
     }
 
     /// Emits stale alerts for silence beyond the SLA. Does not degrade sequence.
@@ -298,6 +330,7 @@ impl FeedSupervisor {
                 commands: Vec::new(),
             },
             ApplyOutcome::GapDetected { expected, got } => {
+                self.books.invalidate(instrument_id);
                 let mut commands = Vec::new();
                 if let Some(product_id) = self.product_id(instrument_id) {
                     let spec = vendor.snapshot_spec(&product_id);
@@ -327,6 +360,58 @@ impl FeedSupervisor {
         }
     }
 
+    fn apply_book(
+        &mut self,
+        now: u64,
+        raw: &[u8],
+        vendor: VendorId,
+        event: &BookEvent,
+    ) -> IngestOutcome {
+        self.raw.append(vendor, now, raw, None);
+        let instrument_id = match event {
+            BookEvent::Snapshot(s) => s.instrument_id(),
+            BookEvent::Delta(d) => d.instrument_id(),
+        };
+        self.last_seen.insert(instrument_id, now);
+        IngestOutcome {
+            events: self.apply_book_event(event),
+            commands: Vec::new(),
+        }
+    }
+
+    fn apply_book_event(&mut self, event: &BookEvent) -> Vec<SupervisorEvent> {
+        let Ok(outcome) = self.books.apply(event) else {
+            return vec![SupervisorEvent::Skipped];
+        };
+        let instrument_id = match event {
+            BookEvent::Snapshot(s) => s.instrument_id(),
+            BookEvent::Delta(d) => d.instrument_id(),
+        };
+        match outcome {
+            BookApplyOutcome::Applied { checksum } => {
+                let ev = match event {
+                    BookEvent::Snapshot(_) => SupervisorEvent::BookRebuilt {
+                        instrument_id,
+                        checksum,
+                    },
+                    BookEvent::Delta(_) => SupervisorEvent::BookDeltaApplied {
+                        instrument_id,
+                        checksum,
+                    },
+                };
+                vec![ev]
+            }
+            BookApplyOutcome::Duplicate | BookApplyOutcome::IgnoredInvalidated => {
+                vec![SupervisorEvent::Skipped]
+            }
+            BookApplyOutcome::GapInvalidated { expected, got } => vec![SupervisorEvent::Gap {
+                instrument_id,
+                expected,
+                got,
+            }],
+        }
+    }
+
     fn product_id(&self, instrument_id: InstrumentId) -> Option<String> {
         self.subscriptions
             .iter()
@@ -345,7 +430,7 @@ mod tests {
     use super::*;
     use crate::coinbase::CoinbaseExchange;
     use shinrai_instruments::{btc_usd, phase1_master};
-    use shinrai_market_data::{state_digest, FeedStatus};
+    use shinrai_market_data::{state_digest, BookEvent, BookStatus, FeedStatus};
 
     fn ready(now: u64) -> (FeedSupervisor, CoinbaseExchange, InstrumentMaster) {
         let vendor = CoinbaseExchange;
@@ -505,5 +590,54 @@ mod tests {
         }
         assert_eq!(state_digest(a.consumer()), state_digest(b.consumer()));
         assert_eq!(a.raw().len(), b.raw().len());
+    }
+
+    #[test]
+    fn l2_gap_clears_book_then_snapshot_checksum_matches() {
+        let (mut sup, vendor, master) = ready(0);
+        let body = snapshot_body(10);
+        let recovered = sup
+            .ingest_snapshot(&vendor, &master, 1, "BTC-USD", &body)
+            .expect("snap");
+        assert!(recovered
+            .events
+            .iter()
+            .any(|e| matches!(e, SupervisorEvent::BookRebuilt { .. })));
+        let book = sup.books().book(btc_usd().id()).expect("book");
+        assert_eq!(book.status(), BookStatus::Healthy);
+        let checksum = book.checksum();
+        let BookEvent::Snapshot(snap) = vendor
+            .decode_book_snapshot(&body, 1, "BTC-USD", &master)
+            .expect("decode")
+        else {
+            panic!("snap");
+        };
+        assert_eq!(checksum, snap.checksum());
+
+        sup.ingest(&vendor, &master, 2, &ticker(12));
+        assert_eq!(
+            sup.books().book(btc_usd().id()).expect("b").status(),
+            BookStatus::Invalidated
+        );
+        let skipped = sup.ingest(
+            &vendor,
+            &master,
+            3,
+            br#"{"type":"l2update","product_id":"BTC-USD","changes":[["buy","65000.10","2.0"]]}"#,
+        );
+        assert!(matches!(skipped.events[0], SupervisorEvent::Skipped));
+
+        let rebuilt = snapshot_body(12);
+        sup.ingest_snapshot(&vendor, &master, 4, "BTC-USD", &rebuilt)
+            .expect("rebuild");
+        let book = sup.books().book(btc_usd().id()).expect("book");
+        assert_eq!(book.status(), BookStatus::Healthy);
+        let BookEvent::Snapshot(snap) = vendor
+            .decode_book_snapshot(&rebuilt, 4, "BTC-USD", &master)
+            .expect("d2")
+        else {
+            panic!("snap2");
+        };
+        assert_eq!(book.checksum(), snap.checksum());
     }
 }

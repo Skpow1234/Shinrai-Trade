@@ -2,25 +2,27 @@
 
 use crate::consumer::{FeedStatus, MdConsumerState};
 
-fn mix(h: &mut u64, byte: u8) {
+pub(crate) const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325_u64;
+
+pub(crate) fn mix(h: &mut u64, byte: u8) {
     *h ^= u64::from(byte);
     *h = h.wrapping_mul(0x0100_0000_01b3);
 }
 
-fn mix_u64(h: &mut u64, v: u64) {
+pub(crate) fn mix_u64(h: &mut u64, v: u64) {
     for i in 0..8 {
         mix(h, ((v >> (i * 8)) & 0xff) as u8);
     }
 }
 
-fn mix_i64(h: &mut u64, v: i64) {
+pub(crate) fn mix_i64(h: &mut u64, v: i64) {
     mix_u64(h, v.cast_unsigned());
 }
 
 /// FNV-1a 64-bit digest of consumer state (stable cross-run).
 #[must_use]
 pub fn state_digest(state: &MdConsumerState) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let mut hash = FNV_OFFSET;
 
     mix_u64(&mut hash, state.applied_count());
     mix_u64(&mut hash, state.duplicate_count());
