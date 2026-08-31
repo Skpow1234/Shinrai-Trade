@@ -12,7 +12,9 @@ mod hub;
 mod protocol;
 mod session;
 
-pub use auth::{Authenticator, SessionClaims, StaticTokenAuth, SubjectId};
+pub use auth::{
+    Authenticator, IssuedTokens, SessionClaims, StaticTokenAuth, SubjectId, TokenAuth, TokenTtl,
+};
 pub use error::FanoutError;
 pub use hub::{resolve_symbol, ClockOutcome, CloseReason, FanoutConfig, FanoutHub};
 pub use protocol::{decode_command, encode_message, ClientCommand};

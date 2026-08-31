@@ -45,7 +45,8 @@ pub async fn get_bars(
             token: query.token.clone(),
         },
     );
-    if let Err(err) = lock_hub(&state).preview_auth(token.as_deref()) {
+    let now = crate::app::unix_logical_now();
+    if let Err(err) = lock_hub(&state).preview_auth(token.as_deref(), now) {
         return unauthorized(err);
     }
     let interval = match parse_interval(&query.interval) {
@@ -100,7 +101,8 @@ pub async fn get_trades(
             token: query.token.clone(),
         },
     );
-    if let Err(err) = lock_hub(&state).preview_auth(token.as_deref()) {
+    let now = crate::app::unix_logical_now();
+    if let Err(err) = lock_hub(&state).preview_auth(token.as_deref(), now) {
         return unauthorized(err);
     }
     let instrument_id = match resolve(&state.master, &query.symbol) {

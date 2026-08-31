@@ -128,16 +128,16 @@ impl<A: Authenticator> FanoutHub<A> {
     ///
     /// # Errors
     ///
-    /// Missing, invalid, or revoked tokens.
-    pub fn preview_auth(&self, token: Option<&str>) -> Result<(), FanoutError> {
-        self.auth.authenticate(token).map(|_| ())
+    /// Missing, invalid, revoked, or expired tokens.
+    pub fn preview_auth(&self, token: Option<&str>, now_logical: u64) -> Result<(), FanoutError> {
+        self.auth.authenticate(token, now_logical).map(|_| ())
     }
 
     /// Opens a session after authentication.
     ///
     /// # Errors
     ///
-    /// Missing, invalid, or revoked tokens.
+    /// Missing, invalid, revoked, or expired tokens.
     pub fn connect(
         &mut self,
         token: Option<&str>,
@@ -146,7 +146,7 @@ impl<A: Authenticator> FanoutHub<A> {
         let Some(token) = token.filter(|t| !t.is_empty()) else {
             return Err(FanoutError::MissingToken);
         };
-        self.auth.authenticate(Some(token))?;
+        self.auth.authenticate(Some(token), now_logical)?;
         let token = token.to_owned();
         let id = SessionId::from_u64(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
@@ -271,7 +271,7 @@ impl<A: Authenticator> FanoutHub<A> {
                     continue;
                 }
                 (
-                    self.auth.is_revoked(&session.token),
+                    self.auth.is_revoked(&session.token, now_logical),
                     now_logical.saturating_sub(session.last_activity_logical),
                     now_logical.saturating_sub(session.last_heartbeat_logical) >= hb_every,
                     session.dropped,
@@ -652,6 +652,24 @@ mod tests {
             out.last(),
             Some(ClientMessage::Error { code: "revoked" })
         ));
+    }
+
+    #[test]
+    fn expired_access_closes_within_ttl_window() {
+        use crate::auth::{TokenAuth, TokenTtl};
+        let auth = TokenAuth::new(TokenTtl::new(60, 3_600));
+        auth.register_client("cli", "sec", SubjectId::new("alice"));
+        let pair = auth
+            .issue_client_credentials("cli", "sec", 100)
+            .expect("issue");
+        // Long idle TTL so expiry (not idle) is what closes the session.
+        let mut hub = FanoutHub::new(FanoutConfig::new(64, 16, 15, 10_000), auth, phase1_master());
+        let sid = hub
+            .connect(Some(pair.access_token()), 100)
+            .expect("connect");
+        assert!(hub.on_clock(160).closed.is_empty());
+        let closed = hub.on_clock(161);
+        assert_eq!(closed.closed, vec![(sid, CloseReason::Revoked)]);
     }
 
     #[test]

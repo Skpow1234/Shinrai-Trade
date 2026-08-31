@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod app;
+mod auth_http;
 mod historical;
 mod map;
 

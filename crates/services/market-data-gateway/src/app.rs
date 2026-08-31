@@ -7,50 +7,65 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use shinrai_instruments::{btc_usd, phase1_master, InstrumentMaster};
 use shinrai_market_data::{HistoricalArchive, MdJournal, MdKind, MdRecord, SyntheticFeed};
 use shinrai_md_fanout::{
-    encode_message, ClientMessage, FanoutConfig, FanoutError, FanoutHub, MarketEvent,
-    StaticTokenAuth, SubjectId,
+    encode_message, ClientMessage, FanoutConfig, FanoutError, FanoutHub, MarketEvent, SubjectId,
+    TokenAuth, TokenTtl,
 };
 
 /// Shared gateway state (mutex only at this I/O edge).
 #[derive(Clone)]
 pub struct AppState {
-    pub(crate) hub: Arc<Mutex<FanoutHub<StaticTokenAuth>>>,
+    pub(crate) hub: Arc<Mutex<FanoutHub<TokenAuth>>>,
+    pub(crate) auth: TokenAuth,
     pub(crate) history: Arc<Mutex<HistoricalArchive>>,
     pub(crate) master: InstrumentMaster,
 }
 
-/// Process configuration (tokens are not displayed).
+/// Process configuration (tokens / secrets are not displayed).
 #[derive(Clone)]
 pub struct GatewayConfig {
-    tokens: Vec<(String, String)>,
+    static_tokens: Vec<(String, String)>,
+    clients: Vec<(String, String, String)>,
     fanout: FanoutConfig,
+    ttl: TokenTtl,
     synth: bool,
 }
 
 impl GatewayConfig {
-    /// Builds a config. Empty `tokens` is fail-closed (every connect rejected).
+    /// Builds a config. Empty clients and static tokens is fail-closed.
     #[must_use]
-    pub fn new(tokens: Vec<(String, String)>, fanout: FanoutConfig, synth: bool) -> Self {
+    pub fn new(
+        static_tokens: Vec<(String, String)>,
+        clients: Vec<(String, String, String)>,
+        fanout: FanoutConfig,
+        ttl: TokenTtl,
+        synth: bool,
+    ) -> Self {
         Self {
-            tokens,
+            static_tokens,
+            clients,
             fanout,
+            ttl,
             synth,
         }
     }
 
-    /// Reads `SHINRAI_MD_TOKENS` (`token:subject,...`) and `SHINRAI_MD_SYNTH`.
+    /// Reads env: `SHINRAI_MD_TOKENS`, `SHINRAI_MD_CLIENTS`, TTLs, synth.
     #[must_use]
     pub fn from_env() -> Self {
+        let access = env_u64("SHINRAI_MD_ACCESS_TTL").unwrap_or(60);
+        let refresh = env_u64("SHINRAI_MD_REFRESH_TTL").unwrap_or(3_600);
         Self::new(
             parse_tokens(std::env::var("SHINRAI_MD_TOKENS").ok().as_deref()),
+            parse_clients(std::env::var("SHINRAI_MD_CLIENTS").ok().as_deref()),
             FanoutConfig::default(),
+            TokenTtl::new(access, refresh),
             env_flag("SHINRAI_MD_SYNTH"),
         )
     }
@@ -65,8 +80,10 @@ impl GatewayConfig {
 impl core::fmt::Debug for GatewayConfig {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("GatewayConfig")
-            .field("token_entries", &self.tokens.len())
+            .field("static_token_entries", &self.static_tokens.len())
+            .field("client_entries", &self.clients.len())
             .field("fanout", &self.fanout)
+            .field("ttl", &self.ttl)
             .field("synth", &self.synth)
             .finish()
     }
@@ -76,9 +93,12 @@ impl AppState {
     /// Builds state from config (does not spawn the synth task).
     #[must_use]
     pub fn from_config(config: &GatewayConfig) -> Self {
-        let auth = StaticTokenAuth::new();
-        for (token, subject) in &config.tokens {
-            auth.grant(token, SubjectId::new(subject.clone()));
+        let auth = TokenAuth::new(config.ttl);
+        for (token, subject) in &config.static_tokens {
+            auth.grant_static_access(token, SubjectId::new(subject.clone()));
+        }
+        for (id, secret, subject) in &config.clients {
+            auth.register_client(id, secret, SubjectId::new(subject.clone()));
         }
         let master = phase1_master();
         let mut history = HistoricalArchive::default_intervals();
@@ -88,20 +108,35 @@ impl AppState {
         Self {
             hub: Arc::new(Mutex::new(FanoutHub::new(
                 config.fanout,
-                auth,
+                auth.clone(),
                 master.clone(),
             ))),
+            auth,
             history: Arc::new(Mutex::new(history)),
             master,
         }
     }
 
-    /// Test helper with a single granted token.
+    /// Test helper with a single static access token.
     #[must_use]
     pub fn for_test(token: &str, subject: &str) -> Self {
         Self::from_config(&GatewayConfig::new(
             vec![(token.to_owned(), subject.to_owned())],
+            Vec::new(),
             FanoutConfig::default(),
+            TokenTtl::default(),
+            false,
+        ))
+    }
+
+    /// Test helper with a client credential pair.
+    #[must_use]
+    pub fn for_test_client(client_id: &str, secret: &str, subject: &str) -> Self {
+        Self::from_config(&GatewayConfig::new(
+            Vec::new(),
+            vec![(client_id.to_owned(), secret.to_owned(), subject.to_owned())],
+            FanoutConfig::default(),
+            TokenTtl::new(60, 3_600),
             false,
         ))
     }
@@ -148,10 +183,12 @@ pub fn unix_logical_now() -> u64 {
         .unwrap_or(0)
 }
 
-/// HTTP router: health, historical REST, WebSocket.
+/// HTTP router: health, auth, historical REST, WebSocket.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/v1/auth/token", post(crate::auth_http::post_token))
+        .route("/v1/auth/revoke", post(crate::auth_http::post_revoke))
         .route("/v1/bars", get(crate::historical::get_bars))
         .route("/v1/trades", get(crate::historical::get_trades))
         .route("/v1/ws", get(ws_handler))
@@ -180,7 +217,8 @@ async fn ws_handler(
     State(state): State<AppState>,
 ) -> Response {
     let token = extract_bearer(&headers, &AuthQuery { token: query.token });
-    let preview = lock_hub(&state).preview_auth(token.as_deref());
+    let now = unix_logical_now();
+    let preview = lock_hub(&state).preview_auth(token.as_deref(), now);
     match preview {
         Ok(()) => ws.on_upgrade(move |socket| client_session(socket, state, token)),
         Err(err) => unauthorized(err),
@@ -312,13 +350,35 @@ fn parse_tokens(raw: Option<&str>) -> Vec<(String, String)> {
         .collect()
 }
 
+fn parse_clients(raw: Option<&str>) -> Vec<(String, String, String)> {
+    let Some(raw) = raw.filter(|s| !s.trim().is_empty()) else {
+        return Vec::new();
+    };
+    raw.split(',')
+        .filter_map(|part| {
+            let mut bits = part.splitn(3, ':');
+            let id = bits.next()?.trim();
+            let secret = bits.next()?.trim();
+            let subject = bits.next()?.trim();
+            if id.is_empty() || secret.is_empty() || subject.is_empty() {
+                return None;
+            }
+            Some((id.to_owned(), secret.to_owned(), subject.to_owned()))
+        })
+        .collect()
+}
+
 fn env_flag(name: &str) -> bool {
     std::env::var(name)
         .ok()
         .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
-pub(crate) fn lock_hub(state: &AppState) -> MutexGuard<'_, FanoutHub<StaticTokenAuth>> {
+fn env_u64(name: &str) -> Option<u64> {
+    std::env::var(name).ok()?.parse().ok()
+}
+
+pub(crate) fn lock_hub(state: &AppState) -> MutexGuard<'_, FanoutHub<TokenAuth>> {
     state
         .hub
         .lock()
@@ -351,14 +411,25 @@ mod tests {
     }
 
     #[test]
-    fn debug_config_hides_tokens() {
+    fn parse_clients_three_fields() {
+        assert_eq!(
+            parse_clients(Some("dev:s3cret:alice")),
+            vec![("dev".into(), "s3cret".into(), "alice".into())]
+        );
+    }
+
+    #[test]
+    fn debug_config_hides_secrets() {
         let cfg = GatewayConfig::new(
             vec![("super-secret-token".into(), "alice".into())],
+            vec![("cli".into(), "super-secret".into(), "alice".into())],
             FanoutConfig::default(),
+            TokenTtl::default(),
             false,
         );
         let rendered = format!("{cfg:?}");
         assert!(!rendered.contains("super-secret-token"));
+        assert!(!rendered.contains("super-secret"));
     }
 
     #[test]

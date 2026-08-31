@@ -11,6 +11,10 @@ pub enum FanoutError {
     InvalidToken,
     /// Token was revoked.
     RevokedToken,
+    /// Access or refresh token expired.
+    ExpiredToken,
+    /// Client id / secret rejected.
+    InvalidCredentials,
     /// Session id is not connected.
     UnknownSession,
     /// Subscription cap reached.
@@ -27,6 +31,8 @@ impl fmt::Display for FanoutError {
             Self::MissingToken => f.write_str("missing access token"),
             Self::InvalidToken => f.write_str("invalid access token"),
             Self::RevokedToken => f.write_str("access token revoked"),
+            Self::ExpiredToken => f.write_str("access token expired"),
+            Self::InvalidCredentials => f.write_str("invalid client credentials"),
             Self::UnknownSession => f.write_str("unknown session"),
             Self::TooManySubscriptions => f.write_str("subscription limit reached"),
             Self::UnknownInstrument => f.write_str("unknown instrument"),
@@ -45,6 +51,8 @@ impl FanoutError {
             Self::MissingToken => "missing_token",
             Self::InvalidToken => "invalid_token",
             Self::RevokedToken => "revoked",
+            Self::ExpiredToken => "expired",
+            Self::InvalidCredentials => "invalid_credentials",
             Self::UnknownSession => "unknown_session",
             Self::TooManySubscriptions => "too_many_subscriptions",
             Self::UnknownInstrument => "unknown_instrument",
