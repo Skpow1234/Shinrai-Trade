@@ -169,7 +169,9 @@ async fn revoke_rejects_access() {
     let bars = app
         .oneshot(
             Request::builder()
-                .uri(format!("/v1/bars?symbol=BTC-USD&interval=1m&token={access}"))
+                .uri(format!(
+                    "/v1/bars?symbol=BTC-USD&interval=1m&token={access}"
+                ))
                 .body(Body::empty())
                 .expect("req"),
         )
