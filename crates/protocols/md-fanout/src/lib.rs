@@ -14,6 +14,6 @@ mod session;
 
 pub use auth::{Authenticator, SessionClaims, StaticTokenAuth, SubjectId};
 pub use error::FanoutError;
-pub use hub::{ClockOutcome, CloseReason, FanoutConfig, FanoutHub};
+pub use hub::{resolve_symbol, ClockOutcome, CloseReason, FanoutConfig, FanoutHub};
 pub use protocol::{decode_command, encode_message, ClientCommand};
 pub use session::{ClientMessage, MarketEvent, SessionId};

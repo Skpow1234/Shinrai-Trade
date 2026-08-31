@@ -11,8 +11,8 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use shinrai_instruments::{btc_usd, phase1_master};
-use shinrai_market_data::SyntheticFeed;
+use shinrai_instruments::{btc_usd, phase1_master, InstrumentMaster};
+use shinrai_market_data::{HistoricalArchive, MdJournal, MdKind, MdRecord, SyntheticFeed};
 use shinrai_md_fanout::{
     encode_message, ClientMessage, FanoutConfig, FanoutError, FanoutHub, MarketEvent,
     StaticTokenAuth, SubjectId,
@@ -21,7 +21,9 @@ use shinrai_md_fanout::{
 /// Shared gateway state (mutex only at this I/O edge).
 #[derive(Clone)]
 pub struct AppState {
-    hub: Arc<Mutex<FanoutHub<StaticTokenAuth>>>,
+    pub(crate) hub: Arc<Mutex<FanoutHub<StaticTokenAuth>>>,
+    pub(crate) history: Arc<Mutex<HistoricalArchive>>,
+    pub(crate) master: InstrumentMaster,
 }
 
 /// Process configuration (tokens are not displayed).
@@ -78,12 +80,19 @@ impl AppState {
         for (token, subject) in &config.tokens {
             auth.grant(token, SubjectId::new(subject.clone()));
         }
+        let master = phase1_master();
+        let mut history = HistoricalArchive::default_intervals();
+        if let Ok(seed) = demo_seed_journal() {
+            let _ = history.load_journal(&seed);
+        }
         Self {
             hub: Arc::new(Mutex::new(FanoutHub::new(
                 config.fanout,
                 auth,
-                phase1_master(),
+                master.clone(),
             ))),
+            history: Arc::new(Mutex::new(history)),
+            master,
         }
     }
 
@@ -100,13 +109,31 @@ impl AppState {
     /// Publishes synthetic BTC-USD trades (local demo only).
     pub fn spawn_synth(&self) {
         let hub = Arc::clone(&self.hub);
+        let history = Arc::clone(&self.history);
         tokio::spawn(async move {
             let mut feed = SyntheticFeed::new(1, btc_usd().id(), 6_500_000);
             let mut interval = tokio::time::interval(Duration::from_millis(100));
             loop {
                 interval.tick().await;
                 let record = feed.next_trade();
-                lock(&hub).publish(MarketEvent::Tick(record));
+                let ts = unix_logical_now();
+                let record = MdRecord::new(
+                    record.instrument_id(),
+                    record.seq(),
+                    ts,
+                    MdKind::Trade,
+                    record.price(),
+                )
+                .with_qty(record.qty());
+                {
+                    let mut archive = history
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let _ = archive.ingest(record);
+                }
+                hub.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .publish(MarketEvent::Tick(record));
             }
         });
     }
@@ -121,16 +148,24 @@ pub fn unix_logical_now() -> u64 {
         .unwrap_or(0)
 }
 
-/// HTTP router: `GET /health`, `GET /v1/ws`.
+/// HTTP router: health, historical REST, WebSocket.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/v1/bars", get(crate::historical::get_bars))
+        .route("/v1/trades", get(crate::historical::get_trades))
         .route("/v1/ws", get(ws_handler))
         .with_state(state)
 }
 
 async fn health() -> Json<Value> {
     Json(json!({ "status": "ok" }))
+}
+
+/// Token query param shared by WebSocket and REST.
+#[derive(Debug, Deserialize)]
+pub struct AuthQuery {
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,97 +179,23 @@ async fn ws_handler(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> Response {
-    let token = extract_token(&headers, &query);
-    let preview = lock(&state.hub).preview_auth(token.as_deref());
+    let token = extract_bearer(&headers, &AuthQuery { token: query.token });
+    let preview = lock_hub(&state).preview_auth(token.as_deref());
     match preview {
         Ok(()) => ws.on_upgrade(move |socket| client_session(socket, state, token)),
-        Err(err) => (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "type": "error", "code": err.code() })),
-        )
-            .into_response(),
+        Err(err) => unauthorized(err),
     }
 }
 
-async fn client_session(mut socket: WebSocket, state: AppState, token: Option<String>) {
-    let now = unix_logical_now();
-    let connected = {
-        let mut hub = lock(&state.hub);
-        hub.connect(token.as_deref(), now)
-    };
-    let session_id = match connected {
-        Ok(id) => id,
-        Err(err) => {
-            let _ = send_msg(&mut socket, error_frame(err)).await;
-            return;
-        }
-    };
-    let mut tick = tokio::time::interval(Duration::from_millis(50));
-    loop {
-        tokio::select! {
-            incoming = socket.recv() => {
-                match incoming {
-                    Some(Ok(Message::Text(text))) => {
-                        let now = unix_logical_now();
-                        let msgs = {
-                            let mut hub = lock(&state.hub);
-                            let _ = hub.handle_text(session_id, text.as_bytes(), now);
-                            hub.drain(session_id)
-                        };
-                        if flush(&mut socket, &msgs).await.is_err() {
-                            break;
-                        }
-                    }
-                    Some(Ok(Message::Ping(payload))) => {
-                        if socket.send(Message::Pong(payload)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Some(Ok(Message::Close(_)) | Err(_)) | None => break,
-                    Some(Ok(Message::Pong(_) | Message::Binary(_))) => {}
-                }
-            }
-            _ = tick.tick() => {
-                let now = unix_logical_now();
-                let (msgs, closed) = {
-                    let mut hub = lock(&state.hub);
-                    let _ = hub.on_clock(now);
-                    let open = hub.is_open(session_id);
-                    let msgs = hub.drain(session_id);
-                    if !open {
-                        hub.disconnect(session_id);
-                    }
-                    (msgs, !open)
-                };
-                if flush(&mut socket, &msgs).await.is_err() {
-                    break;
-                }
-                if closed {
-                    break;
-                }
-            }
-        }
-    }
-    lock(&state.hub).disconnect(session_id);
+pub(crate) fn unauthorized(err: FanoutError) -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({ "type": "error", "code": err.code() })),
+    )
+        .into_response()
 }
 
-async fn flush(socket: &mut WebSocket, msgs: &[ClientMessage]) -> Result<(), ()> {
-    for msg in msgs {
-        send_msg(socket, encode_message(msg)).await?;
-    }
-    Ok(())
-}
-
-async fn send_msg(socket: &mut WebSocket, bytes: Vec<u8>) -> Result<(), ()> {
-    let text = String::from_utf8(bytes).map_err(|_| ())?;
-    socket.send(Message::text(text)).await.map_err(|_| ())
-}
-
-fn error_frame(err: FanoutError) -> Vec<u8> {
-    encode_message(&ClientMessage::Error { code: err.code() })
-}
-
-fn extract_token(headers: &HeaderMap, query: &WsQuery) -> Option<String> {
+pub(crate) fn extract_bearer(headers: &HeaderMap, query: &AuthQuery) -> Option<String> {
     if let Some(value) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -254,6 +215,84 @@ fn extract_token(headers: &HeaderMap, query: &WsQuery) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
+}
+
+async fn client_session(mut socket: WebSocket, state: AppState, token: Option<String>) {
+    let now = unix_logical_now();
+    let connected = {
+        let mut hub = lock_hub(&state);
+        hub.connect(token.as_deref(), now)
+    };
+    let session_id = match connected {
+        Ok(id) => id,
+        Err(err) => {
+            let _ = send_msg(&mut socket, error_frame(err)).await;
+            return;
+        }
+    };
+    let mut tick = tokio::time::interval(Duration::from_millis(50));
+    loop {
+        tokio::select! {
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(Message::Text(text))) => {
+                        let now = unix_logical_now();
+                        let msgs = {
+                            let mut hub = lock_hub(&state);
+                            let _ = hub.handle_text(session_id, text.as_bytes(), now);
+                            hub.drain(session_id)
+                        };
+                        if flush(&mut socket, &msgs).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        if socket.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                    Some(Ok(Message::Pong(_) | Message::Binary(_))) => {}
+                }
+            }
+            _ = tick.tick() => {
+                let now = unix_logical_now();
+                let (msgs, closed) = {
+                    let mut hub = lock_hub(&state);
+                    let _ = hub.on_clock(now);
+                    let open = hub.is_open(session_id);
+                    let msgs = hub.drain(session_id);
+                    if !open {
+                        hub.disconnect(session_id);
+                    }
+                    (msgs, !open)
+                };
+                if flush(&mut socket, &msgs).await.is_err() {
+                    break;
+                }
+                if closed {
+                    break;
+                }
+            }
+        }
+    }
+    lock_hub(&state).disconnect(session_id);
+}
+
+async fn flush(socket: &mut WebSocket, msgs: &[ClientMessage]) -> Result<(), ()> {
+    for msg in msgs {
+        send_msg(socket, encode_message(msg)).await?;
+    }
+    Ok(())
+}
+
+async fn send_msg(socket: &mut WebSocket, bytes: Vec<u8>) -> Result<(), ()> {
+    let text = String::from_utf8(bytes).map_err(|_| ())?;
+    socket.send(Message::text(text)).await.map_err(|_| ())
+}
+
+fn error_frame(err: FanoutError) -> Vec<u8> {
+    encode_message(&ClientMessage::Error { code: err.code() })
 }
 
 fn parse_tokens(raw: Option<&str>) -> Vec<(String, String)> {
@@ -279,9 +318,23 @@ fn env_flag(name: &str) -> bool {
         .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
-fn lock(hub: &Mutex<FanoutHub<StaticTokenAuth>>) -> MutexGuard<'_, FanoutHub<StaticTokenAuth>> {
-    hub.lock()
+pub(crate) fn lock_hub(state: &AppState) -> MutexGuard<'_, FanoutHub<StaticTokenAuth>> {
+    state
+        .hub
+        .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+pub(crate) fn lock_archive(state: &AppState) -> MutexGuard<'_, HistoricalArchive> {
+    state
+        .history
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Deterministic seed trades for historical API smoke tests.
+fn demo_seed_journal() -> Result<MdJournal, shinrai_market_data::MdError> {
+    SyntheticFeed::record_trades(42, btc_usd().id(), 120)
 }
 
 #[cfg(test)]
@@ -306,5 +359,13 @@ mod tests {
         );
         let rendered = format!("{cfg:?}");
         assert!(!rendered.contains("super-secret-token"));
+    }
+
+    #[test]
+    fn demo_seed_loads_bars() {
+        let state = AppState::for_test("t", "alice");
+        let archive = lock_archive(&state);
+        assert!(!archive.journal().is_empty());
+        assert!(!archive.bars().store().is_empty());
     }
 }

@@ -389,7 +389,11 @@ impl<A: Authenticator> FanoutHub<A> {
     }
 }
 
-fn resolve_symbol(master: &InstrumentMaster, symbol: &str) -> Result<InstrumentId, FanoutError> {
+/// Resolves a ticker or broker symbol via the instrument master.
+pub fn resolve_symbol(
+    master: &InstrumentMaster,
+    symbol: &str,
+) -> Result<InstrumentId, FanoutError> {
     let ticker = ExternalId::ticker(symbol).map_err(|_| FanoutError::UnknownInstrument)?;
     if let Ok(id) = master.resolve_alias(&ticker) {
         return Ok(id);

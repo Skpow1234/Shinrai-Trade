@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod app;
+mod historical;
 mod map;
 
 pub use app::{router, unix_logical_now, AppState, GatewayConfig};

@@ -11,6 +11,7 @@ mod book;
 mod checksum;
 mod consumer;
 mod error;
+mod historical;
 mod journal;
 mod record;
 mod replay;
@@ -25,6 +26,10 @@ pub use book::{
 pub use checksum::state_digest;
 pub use consumer::{ApplyOutcome, FeedStatus, MdConsumerState};
 pub use error::MdError;
+pub use historical::{
+    BarHistoryPage, BarHistoryQuery, HistoricalArchive, PageParams, TradeHistoryPage,
+    TradeHistoryQuery, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT,
+};
 pub use journal::MdJournal;
 pub use record::{MdKind, MdRecord};
 pub use replay::{replay, ReplayReport};
