@@ -9,7 +9,7 @@
 
 A Rust trading platform workspace: domain correctness first, then a read-only market-data path. It is **not** an exchange, does **not** hold customer funds, and does **not** accept live orders yet.
 
-The intended product is a trading application connected to a licensed broker or venue. Phase 1 proved money, instruments, an order state machine, a double-entry ledger, and a paper loop **in-process**. Phase 2 is a read-only market-data gateway (normalize, gap/degrade, bounded WebSocket fanout).
+The intended product is a trading application connected to a licensed broker or venue. Phase 1 proved money, instruments, an order state machine, a double-entry ledger, and a paper loop **in-process**. Phase 2 is a read-only market-data gateway (normalize, gap/degrade, bounded WebSocket fanout, historical bars/trades).
 
 ## Tech
 
@@ -45,7 +45,7 @@ Shinrai-Trade/
 | `shinrai-paper` | Paper loop: reserve → simulated venue → fill → settle |
 | `shinrai-md-protocol` | Coinbase Exchange decode, raw journal, feed supervisor |
 | `shinrai-md-fanout` | Sessions, authn, bounded queues, heartbeats |
-| `shinrai-md-gateway` | `GET /health`, `GET /v1/ws` |
+| `shinrai-md-gateway` | `GET /health`, `GET /v1/bars`, `GET /v1/trades`, `GET /v1/ws` |
 | `shinrai-exchange-simulator` | Scripted venue for paper tests |
 
 ## Prerequisites
@@ -91,6 +91,21 @@ curl http://127.0.0.1:8080/health
 ```
 
 Expect `{"status":"ok"}`.
+
+### Historical REST (auth required)
+
+Same token as WebSocket (`Authorization: Bearer …` or `?token=`).
+
+```bash
+# Minute bars (also: 1s / 1h / 1d, or raw seconds e.g. interval=60)
+curl "http://127.0.0.1:8080/v1/bars?symbol=BTC-USD&interval=1m&limit=10&token=dev"
+
+# Trade prints; pass next_cursor from the response for the next page
+curl "http://127.0.0.1:8080/v1/trades?symbol=BTC-USD&limit=50&token=dev"
+curl "http://127.0.0.1:8080/v1/trades?symbol=BTC-USD&limit=50&cursor=50&token=dev"
+```
+
+Optional filters: `start` / `end` (logical or Unix seconds matching the store). Prices and sizes are scaled integers (`*_scaled`, `*_lots`). Gateway startup seeds ~120 synthetic BTC-USD trades so these endpoints work without `SHINRAI_MD_SYNTH`; with synth enabled, live prints also append to the archive.
 
 ## Test
 
@@ -201,6 +216,7 @@ SHINRAI_MD_TOKENS=dev:alice SHINRAI_MD_SYNTH=1 cargo run -p shinrai-md-gateway -
 | Invalid token | Connect with `?token=nope` → 401 `invalid_token`. |
 | Queue / TTL | Defaults in fanout: queue **64** (drop oldest market-data), max **16** subs, heartbeat every **15** unix seconds, idle TTL **45** seconds. Change `FanoutConfig` in code or tests (`FanoutConfig::new(...)`) — not env yet. |
 | Automated WS path | `cargo test -p shinrai-md-gateway --test health` (health, 401, subscribe `BTC-USD`). |
+| Historical REST | `cargo test -p shinrai-md-gateway --test historical`. Domain pagination: `cargo test -p shinrai-market-data --lib historical`. |
 | Vendor decode only | `cargo test -p shinrai-md-protocol`. Swap fixtures under `crates/protocols/market-data/tests/fixtures/` if you are extending the Coinbase adapter. |
 | Paper invariants | `cargo test -p shinrai-paper --test proptest_invariants`. |
 
