@@ -9,7 +9,7 @@
 
 A Rust trading platform workspace: domain correctness first, then a read-only market-data path. It is **not** an exchange, does **not** hold customer funds, and does **not** accept live orders yet.
 
-The intended product is a trading application connected to a licensed broker or venue. Phase 1 proved money, instruments, an order state machine, a double-entry ledger, and a paper loop **in-process**. Phase 2 is a read-only market-data gateway (normalize, gap/degrade, bounded WebSocket fanout, historical bars/trades).
+The intended product is a trading application connected to a licensed broker or venue. Phase 1 proved money, instruments, an order state machine, a double-entry ledger, and a paper loop **in-process**. Phase 2 is a read-only market-data gateway (normalize, gap/degrade, bounded WebSocket fanout, historical bars/trades, short-lived auth).
 
 ## Tech
 
@@ -92,17 +92,44 @@ curl http://127.0.0.1:8080/health
 
 Expect `{"status":"ok"}`.
 
+### Authentication
+
+Short-lived access tokens (default **60s**) and rotating refresh tokens.
+
+| Env | Meaning |
+|---|---|
+| `SHINRAI_MD_CLIENTS` | `client_id:secret:subject,...` — issue via `POST /v1/auth/token` |
+| `SHINRAI_MD_TOKENS` | `token:subject,...` — non-expiring bootstrap access tokens (local demos) |
+| `SHINRAI_MD_ACCESS_TTL` | Access lifetime in seconds (default `60`) |
+| `SHINRAI_MD_REFRESH_TTL` | Refresh lifetime in seconds (default `3600`) |
+
+```bash
+# Issue
+curl -s -X POST http://127.0.0.1:8080/v1/auth/token \
+  -H 'content-type: application/json' \
+  -d '{"grant_type":"client_credentials","client_id":"dev","client_secret":"s3cret"}'
+
+# Refresh (old refresh becomes invalid; reuse revokes the token family)
+curl -s -X POST http://127.0.0.1:8080/v1/auth/token \
+  -H 'content-type: application/json' \
+  -d '{"grant_type":"refresh_token","refresh_token":"<refresh>"}'
+
+# Revoke access or refresh (sessions using that access die on the next hub clock tick, ≪ 60s)
+curl -s -X POST http://127.0.0.1:8080/v1/auth/revoke \
+  -H 'content-type: application/json' \
+  -d '{"token":"<access_or_refresh>"}'
+```
+
 ### Historical REST (auth required)
 
-Same token as WebSocket (`Authorization: Bearer …` or `?token=`).
+Same access token as WebSocket (`Authorization: Bearer …` or `?token=`).
 
 ```bash
 # Minute bars (also: 1s / 1h / 1d, or raw seconds e.g. interval=60)
-curl "http://127.0.0.1:8080/v1/bars?symbol=BTC-USD&interval=1m&limit=10&token=dev"
+curl "http://127.0.0.1:8080/v1/bars?symbol=BTC-USD&interval=1m&limit=10&token=$ACCESS"
 
 # Trade prints; pass next_cursor from the response for the next page
-curl "http://127.0.0.1:8080/v1/trades?symbol=BTC-USD&limit=50&token=dev"
-curl "http://127.0.0.1:8080/v1/trades?symbol=BTC-USD&limit=50&cursor=50&token=dev"
+curl "http://127.0.0.1:8080/v1/trades?symbol=BTC-USD&limit=50&token=$ACCESS"
 ```
 
 Optional filters: `start` / `end` (logical or Unix seconds matching the store). Prices and sizes are scaled integers (`*_scaled`, `*_lots`). Gateway startup seeds ~120 synthetic BTC-USD trades so these endpoints work without `SHINRAI_MD_SYNTH`; with synth enabled, live prints also append to the archive.
@@ -127,6 +154,7 @@ Single crate / filter:
 
 ```bash
 cargo test -p shinrai-paper --all-features
+cargo test -p shinrai-md-gateway --test auth
 cargo test -p shinrai-md-gateway --test health
 cargo test -p shinrai-md-fanout --lib overflow_drops_oldest
 cargo test -p shinrai-paper --test proptest_invariants
@@ -136,15 +164,29 @@ CI does **not** open a live Coinbase socket. Vendor tests use recorded JSON unde
 
 ## Local demo
 
-Synthetic BTC-USD ticks, one static token, default bind.
+**Recommended:** client credentials + short-lived access token.
 
 **Unix / Git Bash:**
 
 ```bash
-SHINRAI_MD_TOKENS=dev:alice SHINRAI_MD_SYNTH=1 cargo run -p shinrai-md-gateway
+SHINRAI_MD_CLIENTS=dev:s3cret:alice SHINRAI_MD_SYNTH=1 cargo run -p shinrai-md-gateway
+
+ACCESS=$(curl -s -X POST http://127.0.0.1:8080/v1/auth/token \
+  -H 'content-type: application/json' \
+  -d '{"grant_type":"client_credentials","client_id":"dev","client_secret":"s3cret"}' \
+  | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+
+websocat "ws://127.0.0.1:8080/v1/ws?token=$ACCESS"
 ```
 
-**PowerShell:**
+**Quick static token** (non-expiring; fine for local smoke tests only):
+
+```bash
+SHINRAI_MD_TOKENS=dev:alice SHINRAI_MD_SYNTH=1 cargo run -p shinrai-md-gateway
+websocat "ws://127.0.0.1:8080/v1/ws?token=dev"
+```
+
+**PowerShell (static token):**
 
 ```powershell
 $env:SHINRAI_MD_TOKENS = "dev:alice"
@@ -152,7 +194,7 @@ $env:SHINRAI_MD_SYNTH = "1"
 cargo run -p shinrai-md-gateway
 ```
 
-**cmd.exe:**
+**cmd.exe (static token):**
 
 ```bat
 set SHINRAI_MD_TOKENS=dev:alice
@@ -162,22 +204,10 @@ cargo run -p shinrai-md-gateway
 
 You should see `shinrai-md-gateway listening on 127.0.0.1:8080`.
 
-Connect (query token is for local tests; prefer `Authorization: Bearer` when you can):
+Prefer `Authorization: Bearer` when you can:
 
 ```bash
-websocat "ws://127.0.0.1:8080/v1/ws?token=dev"
-```
-
-or:
-
-```bash
-npx wscat -c "ws://127.0.0.1:8080/v1/ws?token=dev"
-```
-
-Bearer instead of query:
-
-```bash
-websocat -H "Authorization: Bearer dev" ws://127.0.0.1:8080/v1/ws
+websocat -H "Authorization: Bearer $ACCESS" ws://127.0.0.1:8080/v1/ws
 ```
 
 Then send:
@@ -209,18 +239,19 @@ SHINRAI_MD_TOKENS=dev:alice SHINRAI_MD_SYNTH=1 cargo run -p shinrai-md-gateway -
 | Goal | How |
 |---|---|
 | Different host/port | `SHINRAI_MD_BIND=0.0.0.0:9090` (or `127.0.0.1:9090`). Update the WebSocket URL. |
-| Several users | `SHINRAI_MD_TOKENS=dev:alice,other:bob` — first `:` in each pair splits token and subject. |
+| Several users | `SHINRAI_MD_CLIENTS=dev:s3cret:alice,other:pass:bob` or static `SHINRAI_MD_TOKENS=dev:alice,other:bob`. |
 | No ticks, only session frames | Omit `SHINRAI_MD_SYNTH` (or set it to anything other than `1` / `true` / `yes`). After subscribe you still get `subscribed` and periodic server `heartbeat` (includes `dropped` if the outbound queue overflowed). |
-| Fail-closed | Unset `SHINRAI_MD_TOKENS`. WebSocket connect returns **401** `{"type":"error","code":"missing_token"}` or `invalid_token`. |
+| Fail-closed | Unset both `SHINRAI_MD_TOKENS` and `SHINRAI_MD_CLIENTS`. Connect / token issue returns **401**. |
+| Auth rotation | `cargo test -p shinrai-md-gateway --test auth`. |
+| Automated WS path | `cargo test -p shinrai-md-gateway --test health` (health, 401, subscribe `BTC-USD`). |
 | Other symbols | Fixtures resolve `BTC-USD` / `BTCUSD`, `AAPL`, `ESZ5`. Synth only **publishes** BTC-USD. Subscribing to `AAPL` succeeds but you will not see synth ticks. |
 | Invalid token | Connect with `?token=nope` → 401 `invalid_token`. |
-| Queue / TTL | Defaults in fanout: queue **64** (drop oldest market-data), max **16** subs, heartbeat every **15** unix seconds, idle TTL **45** seconds. Change `FanoutConfig` in code or tests (`FanoutConfig::new(...)`) — not env yet. |
-| Automated WS path | `cargo test -p shinrai-md-gateway --test health` (health, 401, subscribe `BTC-USD`). |
+| Queue / TTL | Defaults in fanout: queue **64** (drop oldest market-data), max **16** subs, heartbeat every **15** unix seconds, idle TTL **45** seconds. Access token TTL default **60**s (`SHINRAI_MD_ACCESS_TTL`). |
 | Historical REST | `cargo test -p shinrai-md-gateway --test historical`. Domain pagination: `cargo test -p shinrai-market-data --lib historical`. |
 | Vendor decode only | `cargo test -p shinrai-md-protocol`. Swap fixtures under `crates/protocols/market-data/tests/fixtures/` if you are extending the Coinbase adapter. |
 | Paper invariants | `cargo test -p shinrai-paper --test proptest_invariants`. |
 
-Do not log tokens. Do not commit real secrets. `SHINRAI_MD_TOKENS` is a static table for Phase 2; short-lived access tokens and refresh rotation are not implemented yet.
+Do not log tokens. Do not commit real secrets. Prefer `SHINRAI_MD_CLIENTS` + short-lived access tokens; `SHINRAI_MD_TOKENS` is a non-expiring bootstrap for local smoke tests only.
 
 ## License
 
