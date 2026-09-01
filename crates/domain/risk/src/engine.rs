@@ -122,9 +122,6 @@ impl RiskEngine {
         if self.restricted.contains(&intent.instrument_id) {
             return RiskDecision::Rejected(RiskRejectReason::RestrictedInstrument);
         }
-        if intent.side != Side::Buy {
-            return RiskDecision::Rejected(RiskRejectReason::UnsupportedSide);
-        }
         let qty = intent.qty.lots();
         if qty <= 0 || qty > self.limits.max_order_qty_lots {
             return RiskDecision::Rejected(RiskRejectReason::MaxQuantity);
@@ -134,14 +131,23 @@ impl RiskEngine {
         {
             return RiskDecision::Rejected(RiskRejectReason::MaxNotional);
         }
-        if ctx.available_cash.currency() != ctx.notional.currency()
-            || ctx.available_cash.minor_units() < ctx.notional.minor_units()
-        {
-            return RiskDecision::Rejected(RiskRejectReason::InsufficientBuyingPower);
-        }
-        let new_pos = ctx.position_lots.saturating_add(qty);
-        if new_pos > self.limits.max_position_lots {
-            return RiskDecision::Rejected(RiskRejectReason::MaxPosition);
+        match intent.side {
+            Side::Buy => {
+                if ctx.available_cash.currency() != ctx.notional.currency()
+                    || ctx.available_cash.minor_units() < ctx.notional.minor_units()
+                {
+                    return RiskDecision::Rejected(RiskRejectReason::InsufficientBuyingPower);
+                }
+                let new_pos = ctx.position_lots.saturating_add(qty);
+                if new_pos > self.limits.max_position_lots {
+                    return RiskDecision::Rejected(RiskRejectReason::MaxPosition);
+                }
+            }
+            Side::Sell => {
+                if ctx.position_lots < qty {
+                    return RiskDecision::Rejected(RiskRejectReason::InsufficientPosition);
+                }
+            }
         }
         RiskDecision::Approved
     }
@@ -201,6 +207,36 @@ mod tests {
                 .check(&buy_intent(1), &ctx(100, 1_000, 0))
                 .reject_reason(),
             Some(RiskRejectReason::KillSwitch)
+        );
+    }
+
+    fn sell_intent(qty: i64) -> RiskOrderIntent {
+        RiskOrderIntent {
+            account_id: AccountId::from_u64(1),
+            instrument_id: aapl().id(),
+            side: Side::Sell,
+            qty: QuantityLots::from_lots(qty),
+            price: PriceTicks::from_scaled(10_000),
+        }
+    }
+
+    #[test]
+    fn rejects_insufficient_position_on_sell() {
+        let engine = RiskEngine::default();
+        assert_eq!(
+            engine
+                .check(&sell_intent(5), &ctx(50_000, 1_000_000, 2))
+                .reject_reason(),
+            Some(RiskRejectReason::InsufficientPosition)
+        );
+    }
+
+    #[test]
+    fn approves_sell_within_position() {
+        let engine = RiskEngine::default();
+        assert_eq!(
+            engine.check(&sell_intent(5), &ctx(50_000, 1_000_000, 10)),
+            RiskDecision::Approved
         );
     }
 

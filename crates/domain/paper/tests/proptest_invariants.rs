@@ -34,13 +34,17 @@ fn assert_invariants(engine: &PaperEngine, acc: AccountId) {
         assert!(order.leaves_qty().lots() >= 0);
     }
 
-    let mut filled_lots = 0_i64;
+    let mut net_lots = 0_i64;
     for order in engine.orders().orders() {
         if order.account_id() == acc && order.instrument_id() == aapl().id() {
-            filled_lots = filled_lots.saturating_add(order.cum_qty().lots());
+            let filled = order.cum_qty().lots();
+            net_lots = match order.side() {
+                Side::Buy => net_lots.saturating_add(filled),
+                Side::Sell => net_lots.saturating_sub(filled),
+            };
         }
     }
-    assert_eq!(engine.book().position(acc, aapl().id()), filled_lots);
+    assert_eq!(engine.book().position(acc, aapl().id()), net_lots);
 
     let reserved = engine.book().reserved(acc, Currency::usd());
     assert!(reserved.minor_units() >= 0);

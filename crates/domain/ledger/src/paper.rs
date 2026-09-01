@@ -54,6 +54,8 @@ pub struct PaperBook {
     accounts: HashMap<AccountId, PaperAccount>,
     /// Signed position in lot units (positive = long).
     positions: HashMap<(AccountId, InstrumentId), i64>,
+    /// Lots reserved for working sell orders.
+    position_reserved: HashMap<(AccountId, InstrumentId), i64>,
 }
 
 impl PaperBook {
@@ -104,6 +106,22 @@ impl PaperBook {
             .get(&(account, instrument))
             .copied()
             .unwrap_or(0)
+    }
+
+    /// Lots reserved for working sell orders.
+    #[must_use]
+    pub fn reserved_position(&self, account: AccountId, instrument: InstrumentId) -> i64 {
+        self.position_reserved
+            .get(&(account, instrument))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Long lots available to sell (position minus sell reserves).
+    #[must_use]
+    pub fn available_position(&self, account: AccountId, instrument: InstrumentId) -> i64 {
+        self.position(account, instrument)
+            .saturating_sub(self.reserved_position(account, instrument))
     }
 
     /// Non-zero positions for an account.
@@ -362,6 +380,142 @@ impl PaperBook {
         }
     }
 
+    /// Locks long lots for a working sell (in-memory; no cash journal movement).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LedgerError::InsufficientPosition`] when available lots are too low.
+    pub fn reserve_position_for_order(
+        &mut self,
+        account: AccountId,
+        instrument: InstrumentId,
+        qty_lots: i64,
+    ) -> Result<(), LedgerError> {
+        self.open_account(account);
+        if qty_lots <= 0 {
+            return Err(LedgerError::InvalidQuantity);
+        }
+        if self.available_position(account, instrument) < qty_lots {
+            return Err(LedgerError::InsufficientPosition);
+        }
+        let reserved = self
+            .position_reserved
+            .entry((account, instrument))
+            .or_insert(0);
+        *reserved = reserved
+            .checked_add(qty_lots)
+            .ok_or(LedgerError::InvalidQuantity)?;
+        Ok(())
+    }
+
+    /// Releases sell-reserved lots (cancel / reject).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LedgerError::InsufficientPosition`] when reserved lots are too low.
+    pub fn release_position_reserve(
+        &mut self,
+        account: AccountId,
+        instrument: InstrumentId,
+        qty_lots: i64,
+    ) -> Result<(), LedgerError> {
+        if qty_lots <= 0 {
+            return Err(LedgerError::InvalidQuantity);
+        }
+        let key = (account, instrument);
+        let Some(reserved) = self.position_reserved.get_mut(&key) else {
+            return Err(LedgerError::InsufficientPosition);
+        };
+        if *reserved < qty_lots {
+            return Err(LedgerError::InsufficientPosition);
+        }
+        *reserved -= qty_lots;
+        if *reserved == 0 {
+            self.position_reserved.remove(&key);
+        }
+        Ok(())
+    }
+
+    /// Settles a sell: consumes reserved lots, credits cash with proceeds minus fee.
+    ///
+    /// # Errors
+    ///
+    /// Returns reserved/quantity errors. On failure the journal is left unchanged.
+    pub fn settle_sell(
+        &mut self,
+        account: AccountId,
+        instrument: InstrumentId,
+        qty_lots: i64,
+        proceeds: Money,
+        fee: Money,
+        key: impl Into<String>,
+    ) -> Result<EntryId, LedgerError> {
+        self.open_account(account);
+        if qty_lots <= 0 {
+            return Err(LedgerError::InvalidQuantity);
+        }
+        if proceeds.minor_units() <= 0 {
+            return Err(LedgerError::ZeroAmount);
+        }
+        if fee.minor_units() < 0 {
+            return Err(LedgerError::ZeroAmount);
+        }
+        if proceeds.currency() != fee.currency() {
+            return Err(LedgerError::MixedCurrency);
+        }
+        let pos_key = (account, instrument);
+        let reserved = self.reserved_position(account, instrument);
+        if reserved < qty_lots {
+            return Err(LedgerError::InsufficientPosition);
+        }
+        let position = self.position(account, instrument);
+        if position < qty_lots {
+            return Err(LedgerError::InvalidQuantity);
+        }
+
+        let ccy = proceeds.currency();
+        let net = if fee.is_zero() {
+            proceeds
+        } else {
+            proceeds.checked_sub(fee)?
+        };
+
+        let len_before = self.journal.len();
+        let mut builder = EntryBuilder::new(key)?
+            .credit(LedgerAccount::BrokerSettlement { currency: ccy }, proceeds)
+            .debit(
+                LedgerAccount::CustomerCash {
+                    account,
+                    currency: ccy,
+                },
+                net,
+            );
+        if fee.minor_units() > 0 {
+            builder = builder.credit(LedgerAccount::FeesRevenue { currency: ccy }, fee);
+        }
+        let entry = builder.build()?;
+        let outcome = self.journal.post(entry)?;
+        match outcome {
+            PostOutcome::Duplicate(id) => Ok(id),
+            PostOutcome::Applied(id) => {
+                *self.position_reserved.entry(pos_key).or_insert(0) -= qty_lots;
+                if self.position_reserved.get(&pos_key).copied() == Some(0) {
+                    self.position_reserved.remove(&pos_key);
+                }
+                let pos = self.positions.entry(pos_key).or_insert(0);
+                *pos = pos
+                    .checked_sub(qty_lots)
+                    .ok_or(LedgerError::InvalidQuantity)?;
+                if *pos == 0 {
+                    self.positions.remove(&pos_key);
+                }
+                debug_assert!(self.journal.trial_balance_ok());
+                debug_assert_eq!(self.journal.len(), len_before + 1);
+                Ok(id)
+            }
+        }
+    }
+
     /// Posts an already-balanced entry (reversals, adjustments).
     ///
     /// # Errors
@@ -438,6 +592,46 @@ mod tests {
         // 10000 - 100 notional - 1 fee
         assert_eq!(book.available(acc, Currency::usd()).minor_units(), 989_900);
         assert_eq!(book.position(acc, inst), 1);
+        assert!(book.journal().trial_balance_ok());
+    }
+
+    #[test]
+    fn reserve_and_settle_sell() {
+        let mut book = PaperBook::new();
+        let acc = AccountId::from_u64(1);
+        let inst = InstrumentId::from_u64(1);
+        book.deposit(acc, usd(10_000), "dep").expect("dep");
+        let notional = Money::parse_major("100.00", Currency::usd()).expect("n");
+        book.reserve_for_order(acc, notional, "rsv").expect("rsv");
+        book.settle_buy(
+            acc,
+            inst,
+            10,
+            notional,
+            Money::from_minor(0, Currency::usd()),
+            "buy",
+        )
+        .expect("buy");
+        assert_eq!(book.position(acc, inst), 10);
+        book.reserve_position_for_order(acc, inst, 4)
+            .expect("rsv pos");
+        assert_eq!(book.available_position(acc, inst), 6);
+        let proceeds = Money::parse_major("440.00", Currency::usd()).expect("p");
+        book.settle_sell(
+            acc,
+            inst,
+            4,
+            proceeds,
+            Money::from_minor(0, Currency::usd()),
+            "sell",
+        )
+        .expect("sell");
+        assert_eq!(book.position(acc, inst), 6);
+        assert_eq!(book.reserved_position(acc, inst), 0);
+        assert_eq!(
+            book.available(acc, Currency::usd()).minor_units(),
+            990_000 + 44_000
+        );
         assert!(book.journal().trial_balance_ok());
     }
 

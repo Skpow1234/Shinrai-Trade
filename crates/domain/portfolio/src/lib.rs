@@ -53,7 +53,7 @@ pub struct PortfolioSnapshot {
     pub total_unrealized_pnl_minor: Option<i128>,
     /// Total cost basis of open positions (quote minor units).
     pub total_cost_basis_minor: Option<i128>,
-    /// Realized P&L from closed trades (buy-only paper: always zero).
+    /// Realized P&L from closed sell trades (average-cost method).
     pub realized_pnl_minor: i128,
     /// Cash + marked market value of positions when marks exist (quote minor units).
     pub total_equity_minor: Option<i128>,
@@ -80,43 +80,24 @@ pub fn build_snapshot<S: std::hash::BuildHasher>(
         reserved: book.reserved(account, usd),
     }];
 
+    let (realized_pnl_minor, inventory) = inventory_from_orders(account, orders, master)?;
+
     let mut by_instrument: HashMap<InstrumentId, PositionLine> = HashMap::new();
 
-    for order in orders.orders().filter(|o| o.account_id() == account) {
-        if order.side() != Side::Buy || order.cum_qty().lots() <= 0 {
-            continue;
-        }
-        let instrument = master
-            .get(order.instrument_id())
-            .map_err(|_| MoneyError::Overflow)?;
-        let entry = by_instrument
-            .entry(order.instrument_id())
-            .or_insert_with(|| PositionLine {
-                instrument_id: order.instrument_id(),
-                lots: book.position(account, order.instrument_id()),
-                avg_cost_scaled: None,
-                mark_scaled: marks.get(&order.instrument_id()).map(|p| p.scaled()),
+    for (inst, lots) in book_positions(book, account) {
+        let inv = inventory.get(&inst);
+        by_instrument.insert(
+            inst,
+            PositionLine {
+                instrument_id: inst,
+                lots,
+                avg_cost_scaled: inv.map(|i| i.avg_scaled),
+                mark_scaled: marks.get(&inst).map(|p| p.scaled()),
                 cost_basis_minor: None,
                 market_value_minor: None,
                 unrealized_pnl_minor: None,
-            });
-        if let Some(avg) = order.avg_px() {
-            entry.avg_cost_scaled = Some(avg.scaled());
-        }
-        let _ = instrument;
-    }
-
-    // Positions opened on book without a filled order row (should not happen) still show lots.
-    for (inst, lots) in book_positions(book, account) {
-        by_instrument.entry(inst).or_insert_with(|| PositionLine {
-            instrument_id: inst,
-            lots,
-            avg_cost_scaled: None,
-            mark_scaled: marks.get(&inst).map(|p| p.scaled()),
-            cost_basis_minor: None,
-            market_value_minor: None,
-            unrealized_pnl_minor: None,
-        });
+            },
+        );
     }
 
     let mut total_unrealized: Option<i128> = None;
@@ -185,15 +166,114 @@ pub fn build_snapshot<S: std::hash::BuildHasher>(
         positions,
         total_unrealized_pnl_minor: total_unrealized,
         total_cost_basis_minor: total_cost_basis,
-        realized_pnl_minor: realized_pnl_from_orders(account, orders),
+        realized_pnl_minor,
         total_equity_minor: total_equity,
     })
 }
 
-/// Realized P&L from terminal sell fills (zero while paper path is buy-only).
-#[must_use]
-pub fn realized_pnl_from_orders(_account: AccountId, _orders: &OrderStore) -> i128 {
-    0
+/// Average-cost inventory and realized P&L from filled orders (sorted by order id).
+fn inventory_from_orders(
+    account: AccountId,
+    orders: &OrderStore,
+    master: &InstrumentMaster,
+) -> Result<(i128, HashMap<InstrumentId, InventoryLot>), MoneyError> {
+    let mut realized = 0i128;
+    let mut by_inst: HashMap<InstrumentId, InventoryLot> = HashMap::new();
+    let mut filled: Vec<_> = orders
+        .orders()
+        .filter(|o| o.account_id() == account && o.cum_qty().lots() > 0)
+        .collect();
+    filled.sort_by_key(|o| o.id().get());
+
+    for order in filled {
+        let inst = order.instrument_id();
+        let instrument = master.get(inst).map_err(|_| MoneyError::Overflow)?;
+        let qty = order.cum_qty().lots();
+        let px = order.avg_px().unwrap_or_else(|| order.price());
+        match order.side() {
+            Side::Buy => {
+                let fill_cost = notional_for(
+                    instrument,
+                    px,
+                    shinrai_instruments::QuantityLots::from_lots(qty),
+                )?;
+                let entry = by_inst.entry(inst).or_insert(InventoryLot {
+                    lots: 0,
+                    cost_minor: 0,
+                    avg_scaled: px.scaled(),
+                });
+                entry.avg_scaled =
+                    weighted_avg_ticks(entry.avg_scaled, entry.lots, px.scaled(), qty);
+                entry.lots = entry.lots.checked_add(qty).ok_or(MoneyError::Overflow)?;
+                entry.cost_minor = entry
+                    .cost_minor
+                    .checked_add(fill_cost.minor_units())
+                    .ok_or(MoneyError::Overflow)?;
+            }
+            Side::Sell => {
+                let Some(entry) = by_inst.get_mut(&inst) else {
+                    continue;
+                };
+                if entry.lots < qty {
+                    continue;
+                }
+                let cost_for_sale = entry
+                    .cost_minor
+                    .checked_mul(i128::from(qty))
+                    .and_then(|v| v.checked_div(i128::from(entry.lots)))
+                    .ok_or(MoneyError::Overflow)?;
+                let proceeds = notional_for(
+                    instrument,
+                    px,
+                    shinrai_instruments::QuantityLots::from_lots(qty),
+                )?;
+                realized = realized
+                    .checked_add(
+                        proceeds
+                            .minor_units()
+                            .checked_sub(cost_for_sale)
+                            .ok_or(MoneyError::Overflow)?,
+                    )
+                    .ok_or(MoneyError::Overflow)?;
+                entry.lots -= qty;
+                entry.cost_minor -= cost_for_sale;
+                if entry.lots == 0 {
+                    entry.cost_minor = 0;
+                }
+            }
+        }
+    }
+    Ok((realized, by_inst))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct InventoryLot {
+    lots: i64,
+    cost_minor: i128,
+    avg_scaled: i64,
+}
+
+fn weighted_avg_ticks(prev_avg: i64, prev_lots: i64, px: i64, qty: i64) -> i64 {
+    let total_lots = prev_lots + qty;
+    if total_lots == 0 {
+        return px;
+    }
+    let blended = (i128::from(prev_avg) * i128::from(prev_lots) + i128::from(px) * i128::from(qty))
+        / i128::from(total_lots);
+    i64::try_from(blended).unwrap_or(prev_avg)
+}
+
+/// Realized P&L from sell fills using average cost.
+///
+/// # Errors
+///
+/// Returns money overflow when notionals do not fit in `i128`.
+pub fn realized_pnl_from_orders(
+    account: AccountId,
+    orders: &OrderStore,
+    master: &InstrumentMaster,
+) -> Result<i128, MoneyError> {
+    inventory_from_orders(account, orders, master).map(|(r, _)| r)
 }
 
 fn book_positions(book: &PaperBook, account: AccountId) -> Vec<(InstrumentId, i64)> {
@@ -260,5 +340,47 @@ mod tests {
         assert!(snap.total_cost_basis_minor.is_some());
         assert_eq!(snap.realized_pnl_minor, 0);
         assert!(snap.total_equity_minor.is_some());
+    }
+
+    #[test]
+    fn snapshot_after_partial_sell_shows_realized_pnl() {
+        let mut engine = PaperEngine::new(phase1_master(), FaultConfig::happy_path());
+        let acc = AccountId::from_u64(1);
+        engine
+            .deposit(
+                acc,
+                Money::from_major(10_000, Currency::usd()).expect("d"),
+                "dep",
+            )
+            .expect("dep");
+        let buy = SubmitRequest {
+            account_id: acc,
+            client_order_id: ClientOrderId::new("b1").expect("c"),
+            instrument_id: aapl().id(),
+            side: Side::Buy,
+            qty: shinrai_instruments::QuantityLots::from_lots(10),
+            price: PriceTicks::from_scaled(10_000),
+        };
+        engine.submit(&buy).expect("buy");
+        let sell = SubmitRequest {
+            account_id: acc,
+            client_order_id: ClientOrderId::new("s1").expect("c"),
+            instrument_id: aapl().id(),
+            side: Side::Sell,
+            qty: shinrai_instruments::QuantityLots::from_lots(4),
+            price: PriceTicks::from_scaled(11_000),
+        };
+        engine.submit(&sell).expect("sell");
+
+        let snap = build_snapshot(
+            acc,
+            engine.book(),
+            engine.orders(),
+            &phase1_master(),
+            &HashMap::new(),
+        )
+        .expect("snap");
+        assert_eq!(snap.positions[0].lots, 6);
+        assert!(snap.realized_pnl_minor > 0);
     }
 }

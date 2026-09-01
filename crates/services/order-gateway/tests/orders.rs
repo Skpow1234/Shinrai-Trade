@@ -238,3 +238,102 @@ async fn list_orders_for_account() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
     assert_eq!(json["orders"].as_array().expect("arr").len(), 1);
 }
+
+#[tokio::test]
+async fn sell_after_buy_reduces_position() {
+    let app = router(AppState::for_test("paper-tok", "trader", 1, 10_000));
+
+    let buy = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/orders?token=paper-tok")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "client_order_id": "buy-for-sell",
+                        "symbol": "AAPL",
+                        "side": "Buy",
+                        "qty": 10,
+                        "price": 10000
+                    })
+                    .to_string(),
+                ))
+                .expect("req"),
+        )
+        .await
+        .expect("buy");
+    assert_eq!(buy.status(), StatusCode::OK);
+
+    let sell = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/orders?token=paper-tok")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "client_order_id": "sell-partial",
+                        "symbol": "AAPL",
+                        "side": "Sell",
+                        "qty": 4,
+                        "price": 11000
+                    })
+                    .to_string(),
+                ))
+                .expect("req"),
+        )
+        .await
+        .expect("sell");
+    assert_eq!(sell.status(), StatusCode::OK);
+
+    let portfolio = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/portfolio?token=paper-tok")
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("pf");
+    assert_eq!(portfolio.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(portfolio.into_body(), usize::MAX)
+        .await
+        .expect("bytes");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["positions"][0]["lots"], 6);
+    assert!(json["realized_pnl_minor"].as_i64().is_some_and(|v| v > 0));
+}
+
+#[tokio::test]
+async fn sell_without_position_rejected() {
+    let app = router(AppState::for_test("paper-tok", "trader", 1, 10_000));
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/orders?token=paper-tok")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "client_order_id": "naked-sell",
+                        "symbol": "AAPL",
+                        "side": "Sell",
+                        "qty": 1,
+                        "price": 10000
+                    })
+                    .to_string(),
+                ))
+                .expect("req"),
+        )
+        .await
+        .expect("sell");
+    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .expect("bytes");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["code"], "insufficient_position");
+}

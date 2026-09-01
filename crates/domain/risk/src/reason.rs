@@ -17,8 +17,8 @@ pub enum RiskRejectReason {
     MaxPosition,
     /// Available cash is less than required notional (buy).
     InsufficientBuyingPower,
-    /// Sell side is not supported in the current paper path.
-    UnsupportedSide,
+    /// Sell quantity exceeds available long position.
+    InsufficientPosition,
 }
 
 impl RiskRejectReason {
@@ -32,7 +32,7 @@ impl RiskRejectReason {
             Self::MaxNotional => "max_notional",
             Self::MaxPosition => "max_position",
             Self::InsufficientBuyingPower => "insufficient_buying_power",
-            Self::UnsupportedSide => "unsupported_side",
+            Self::InsufficientPosition => "insufficient_position",
         }
     }
 }

@@ -25,7 +25,7 @@ pub struct SubmitRequest {
     pub client_order_id: shinrai_orders::ClientOrderId,
     /// Instrument.
     pub instrument_id: shinrai_instruments::InstrumentId,
-    /// Side ( buy only).
+    /// Side (buy or sell).
     pub side: Side,
     /// Quantity in lots.
     pub qty: shinrai_instruments::QuantityLots,
@@ -40,7 +40,8 @@ pub struct PaperEngine {
     book: PaperBook,
     orders: OrderStore,
     sim: SimExchange,
-    remaining_reserve: HashMap<OrderId, Money>,
+    remaining_cash_reserve: HashMap<OrderId, Money>,
+    remaining_position_reserve: HashMap<OrderId, i64>,
     risk: RiskEngine,
     audit: AuditLog,
     logical_now: u64,
@@ -61,7 +62,8 @@ impl PaperEngine {
             book: PaperBook::new(),
             orders: OrderStore::new(),
             sim: SimExchange::new(faults),
-            remaining_reserve: HashMap::new(),
+            remaining_cash_reserve: HashMap::new(),
+            remaining_position_reserve: HashMap::new(),
             risk,
             audit: AuditLog::new(),
             logical_now: 0,
@@ -149,7 +151,7 @@ impl PaperEngine {
         let instrument = self.master.get(req.instrument_id)?;
         instrument.assert_tradable()?;
         instrument.assert_order_grid(req.price, req.qty)?;
-        let reserved_amt = notional(instrument, req.price, req.qty)?;
+        let order_notional = notional(instrument, req.price, req.qty)?;
 
         if let Some(existing) = self
             .orders
@@ -168,8 +170,10 @@ impl PaperEngine {
             available_cash: self
                 .book
                 .available(req.account_id, instrument.quote_currency()),
-            position_lots: self.book.position(req.account_id, req.instrument_id),
-            notional: reserved_amt,
+            position_lots: self
+                .book
+                .available_position(req.account_id, req.instrument_id),
+            notional: order_notional,
         };
         let intent = RiskOrderIntent {
             account_id: req.account_id,
@@ -209,30 +213,62 @@ impl PaperEngine {
                     Some(order_id),
                     AuditKind::OrderCreated,
                 );
-                match self.book.reserve_for_order(
-                    req.account_id,
-                    reserved_amt,
-                    format!("rsv:{order_id}"),
-                ) {
-                    Ok(_) => {
-                        self.remaining_reserve.insert(order_id, reserved_amt);
-                        self.audit.record(
-                            self.logical_now,
-                            Some(req.account_id),
-                            Some(order_id),
-                            AuditKind::LedgerReserved,
-                        );
+                match req.side {
+                    Side::Buy => {
+                        match self.book.reserve_for_order(
+                            req.account_id,
+                            order_notional,
+                            format!("rsv:{order_id}"),
+                        ) {
+                            Ok(_) => {
+                                self.remaining_cash_reserve.insert(order_id, order_notional);
+                                self.audit.record(
+                                    self.logical_now,
+                                    Some(req.account_id),
+                                    Some(order_id),
+                                    AuditKind::LedgerReserved,
+                                );
+                            }
+                            Err(LedgerError::InsufficientFunds) => {
+                                self.orders.apply_event(
+                                    order_id,
+                                    OrderEvent::Rejected {
+                                        reason: "insufficient funds".into(),
+                                    },
+                                )?;
+                                return Err(PaperError::Ledger(LedgerError::InsufficientFunds));
+                            }
+                            Err(e) => return Err(PaperError::Ledger(e)),
+                        }
                     }
-                    Err(LedgerError::InsufficientFunds) => {
-                        self.orders.apply_event(
-                            order_id,
-                            OrderEvent::Rejected {
-                                reason: "insufficient funds".into(),
-                            },
-                        )?;
-                        return Err(PaperError::Ledger(LedgerError::InsufficientFunds));
+                    Side::Sell => {
+                        match self.book.reserve_position_for_order(
+                            req.account_id,
+                            req.instrument_id,
+                            req.qty.lots(),
+                        ) {
+                            Ok(()) => {
+                                self.remaining_position_reserve
+                                    .insert(order_id, req.qty.lots());
+                                self.audit.record(
+                                    self.logical_now,
+                                    Some(req.account_id),
+                                    Some(order_id),
+                                    AuditKind::LedgerReserved,
+                                );
+                            }
+                            Err(LedgerError::InsufficientPosition) => {
+                                self.orders.apply_event(
+                                    order_id,
+                                    OrderEvent::Rejected {
+                                        reason: "insufficient position".into(),
+                                    },
+                                )?;
+                                return Err(PaperError::Ledger(LedgerError::InsufficientPosition));
+                            }
+                            Err(e) => return Err(PaperError::Ledger(e)),
+                        }
                     }
-                    Err(e) => return Err(PaperError::Ledger(e)),
                 }
 
                 self.sim.submit(&NewSimOrder {
@@ -341,34 +377,68 @@ impl PaperEngine {
                     let order = self.orders.get(order_id)?;
                     let instrument = self.master.get(order.instrument_id())?;
                     let fill_notional = notional(instrument, *price, *qty)?;
-                    let remaining = self
-                        .remaining_reserve
-                        .get(&order_id)
-                        .copied()
-                        .ok_or(PaperError::ReservationShortfall { order_id })?;
-                    if remaining.minor_units() < fill_notional.minor_units() {
-                        return Err(PaperError::ReservationShortfall { order_id });
-                    }
                     let fee = Money::from_minor(0, fill_notional.currency());
-                    self.book.settle_buy(
-                        order.account_id(),
-                        order.instrument_id(),
-                        qty.lots(),
-                        fill_notional,
-                        fee,
-                        format!("fill:{exec_id}"),
-                    )?;
-                    self.audit.record(
-                        self.logical_now,
-                        Some(order.account_id()),
-                        Some(order_id),
-                        AuditKind::LedgerSettled,
-                    );
-                    let leftover = remaining.checked_sub(fill_notional)?;
-                    if leftover.is_zero() {
-                        self.remaining_reserve.remove(&order_id);
-                    } else {
-                        self.remaining_reserve.insert(order_id, leftover);
+                    match order.side() {
+                        Side::Buy => {
+                            let remaining = self
+                                .remaining_cash_reserve
+                                .get(&order_id)
+                                .copied()
+                                .ok_or(PaperError::ReservationShortfall { order_id })?;
+                            if remaining.minor_units() < fill_notional.minor_units() {
+                                return Err(PaperError::ReservationShortfall { order_id });
+                            }
+                            self.book.settle_buy(
+                                order.account_id(),
+                                order.instrument_id(),
+                                qty.lots(),
+                                fill_notional,
+                                fee,
+                                format!("fill:{exec_id}"),
+                            )?;
+                            self.audit.record(
+                                self.logical_now,
+                                Some(order.account_id()),
+                                Some(order_id),
+                                AuditKind::LedgerSettled,
+                            );
+                            let leftover = remaining.checked_sub(fill_notional)?;
+                            if leftover.is_zero() {
+                                self.remaining_cash_reserve.remove(&order_id);
+                            } else {
+                                self.remaining_cash_reserve.insert(order_id, leftover);
+                            }
+                        }
+                        Side::Sell => {
+                            let remaining = self
+                                .remaining_position_reserve
+                                .get(&order_id)
+                                .copied()
+                                .ok_or(PaperError::ReservationShortfall { order_id })?;
+                            if remaining < qty.lots() {
+                                return Err(PaperError::ReservationShortfall { order_id });
+                            }
+                            self.book.settle_sell(
+                                order.account_id(),
+                                order.instrument_id(),
+                                qty.lots(),
+                                fill_notional,
+                                fee,
+                                format!("fill:{exec_id}"),
+                            )?;
+                            self.audit.record(
+                                self.logical_now,
+                                Some(order.account_id()),
+                                Some(order_id),
+                                AuditKind::LedgerSettled,
+                            );
+                            let leftover = remaining - qty.lots();
+                            if leftover == 0 {
+                                self.remaining_position_reserve.remove(&order_id);
+                            } else {
+                                self.remaining_position_reserve.insert(order_id, leftover);
+                            }
+                        }
                     }
                     if *filled {
                         self.release_remaining(order_id)?;
@@ -387,21 +457,35 @@ impl PaperEngine {
     }
 
     fn release_remaining(&mut self, order_id: OrderId) -> Result<(), PaperError> {
-        let Some(amount) = self.remaining_reserve.remove(&order_id) else {
-            return Ok(());
-        };
-        if amount.is_zero() {
-            return Ok(());
+        if let Some(amount) = self.remaining_cash_reserve.remove(&order_id) {
+            if !amount.is_zero() {
+                let account = self.orders.get(order_id)?.account_id();
+                self.book
+                    .release_reserve(account, amount, format!("rel:{order_id}"))?;
+                self.audit.record(
+                    self.logical_now,
+                    Some(account),
+                    Some(order_id),
+                    AuditKind::LedgerReleased,
+                );
+            }
         }
-        let account = self.orders.get(order_id)?.account_id();
-        self.book
-            .release_reserve(account, amount, format!("rel:{order_id}"))?;
-        self.audit.record(
-            self.logical_now,
-            Some(account),
-            Some(order_id),
-            AuditKind::LedgerReleased,
-        );
+        if let Some(qty) = self.remaining_position_reserve.remove(&order_id) {
+            if qty > 0 {
+                let order = self.orders.get(order_id)?;
+                self.book.release_position_reserve(
+                    order.account_id(),
+                    order.instrument_id(),
+                    qty,
+                )?;
+                self.audit.record(
+                    self.logical_now,
+                    Some(order.account_id()),
+                    Some(order_id),
+                    AuditKind::LedgerReleased,
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -427,12 +511,18 @@ mod tests {
         (engine, acc)
     }
 
-    fn aapl_buy(acc: AccountId, clid: &str, qty: i64, price_scaled: i64) -> SubmitRequest {
+    fn aapl_order(
+        acc: AccountId,
+        clid: &str,
+        side: Side,
+        qty: i64,
+        price_scaled: i64,
+    ) -> SubmitRequest {
         SubmitRequest {
             account_id: acc,
             client_order_id: ClientOrderId::new(clid).expect("c"),
             instrument_id: aapl().id(),
-            side: Side::Buy,
+            side,
             qty: QuantityLots::from_lots(qty),
             price: shinrai_instruments::PriceTicks::from_scaled(price_scaled),
         }
@@ -442,7 +532,7 @@ mod tests {
     fn buy_fills_settles_once() {
         let (mut engine, acc) = funded_engine(FaultConfig::happy_path());
         let outcome = engine
-            .submit(&aapl_buy(acc, "c1", 10, 10_000))
+            .submit(&aapl_order(acc, "c1", Side::Buy, 10, 10_000))
             .expect("submit");
         let order = match outcome {
             SubmitOutcome::Created(o) => o,
@@ -457,19 +547,20 @@ mod tests {
             900_000
         );
         assert!(engine.book().journal().trial_balance_ok());
-        assert!(engine.remaining_reserve.is_empty());
+        assert!(engine.remaining_cash_reserve.is_empty());
+        assert!(engine.remaining_position_reserve.is_empty());
     }
 
     #[test]
     fn duplicate_client_id_does_not_double_reserve() {
         let (mut engine, acc) = funded_engine(FaultConfig::happy_path());
         engine
-            .submit(&aapl_buy(acc, "dup", 10, 10_000))
+            .submit(&aapl_order(acc, "dup", Side::Buy, 10, 10_000))
             .expect("s1");
         let cash = engine.book().available(acc, Currency::usd()).minor_units();
         let pos = engine.book().position(acc, aapl().id());
         let again = engine
-            .submit(&aapl_buy(acc, "dup", 10, 10_000))
+            .submit(&aapl_order(acc, "dup", Side::Buy, 10, 10_000))
             .expect("s2");
         assert!(matches!(again, SubmitOutcome::Duplicate(_)));
         assert_eq!(engine.orders().len(), 1);
@@ -492,7 +583,7 @@ mod tests {
             )
             .expect("dep");
         let err = engine
-            .submit(&aapl_buy(acc, "poor", 10, 10_000))
+            .submit(&aapl_order(acc, "poor", Side::Buy, 10, 10_000))
             .expect_err("insuf");
         assert!(matches!(err, PaperError::Risk(_)));
         assert!(engine.orders().is_empty());
@@ -511,7 +602,7 @@ mod tests {
             ..FaultConfig::happy_path()
         });
         let outcome = engine
-            .submit(&aapl_buy(acc, "cxl", 10, 10_000))
+            .submit(&aapl_order(acc, "cxl", Side::Buy, 10, 10_000))
             .expect("submit");
         let order = match outcome {
             SubmitOutcome::Created(o) => o,
@@ -538,7 +629,9 @@ mod tests {
             duplicate_exec: true,
             ..FaultConfig::happy_path()
         });
-        engine.submit(&aapl_buy(acc, "dex", 10, 10_000)).expect("s");
+        engine
+            .submit(&aapl_order(acc, "dex", Side::Buy, 10, 10_000))
+            .expect("s");
         assert_eq!(engine.book().position(acc, aapl().id()), 10);
         assert_eq!(
             engine.book().available(acc, Currency::usd()).minor_units(),
@@ -558,6 +651,36 @@ mod tests {
             price: shinrai_instruments::PriceTicks::from_scaled(10_000),
         };
         assert!(engine.submit(&bad).is_err());
+        assert!(engine.orders().is_empty());
+    }
+
+    #[test]
+    fn sell_after_buy_realizes_proceeds_and_reduces_position() {
+        let (mut engine, acc) = funded_engine(FaultConfig::happy_path());
+        engine
+            .submit(&aapl_order(acc, "buy-s", Side::Buy, 10, 10_000))
+            .expect("buy");
+        let cash_after_buy = engine.book().available(acc, Currency::usd()).minor_units();
+        let sell = engine
+            .submit(&aapl_order(acc, "sell-s", Side::Sell, 4, 11_000))
+            .expect("sell");
+        let order = match sell {
+            SubmitOutcome::Created(o) => o,
+            SubmitOutcome::Duplicate(_) => panic!("created"),
+        };
+        assert_eq!(order.status(), OrderStatus::Filled);
+        assert_eq!(engine.book().position(acc, aapl().id()), 6);
+        assert!(engine.book().available(acc, Currency::usd()).minor_units() > cash_after_buy);
+        assert!(engine.book().journal().trial_balance_ok());
+    }
+
+    #[test]
+    fn sell_without_position_rejected_by_risk() {
+        let (mut engine, acc) = funded_engine(FaultConfig::happy_path());
+        let err = engine
+            .submit(&aapl_order(acc, "naked", Side::Sell, 1, 10_000))
+            .expect_err("no stock");
+        assert!(matches!(err, PaperError::Risk(_)));
         assert!(engine.orders().is_empty());
     }
 

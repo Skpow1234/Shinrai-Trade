@@ -30,6 +30,8 @@ pub enum LedgerError {
     InsufficientReserved,
     /// Quantity for a position update was invalid (zero or overflow).
     InvalidQuantity,
+    /// Available position is not sufficient to reserve for a sell.
+    InsufficientPosition,
 }
 
 impl fmt::Display for LedgerError {
@@ -46,6 +48,7 @@ impl fmt::Display for LedgerError {
             Self::InsufficientFunds => f.write_str("insufficient available funds"),
             Self::InsufficientReserved => f.write_str("insufficient reserved funds"),
             Self::InvalidQuantity => f.write_str("invalid position quantity"),
+            Self::InsufficientPosition => f.write_str("insufficient available position"),
         }
     }
 }
