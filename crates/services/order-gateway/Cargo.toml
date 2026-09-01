@@ -27,4 +27,6 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tokio = { workspace = true }
 
 [dev-dependencies]
+reqwest = { workspace = true }
+shinrai-md-gateway = { path = "../market-data-gateway" }
 tower = { version = "0.5", features = ["util"] }

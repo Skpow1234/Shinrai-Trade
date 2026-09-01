@@ -1159,6 +1159,7 @@ dependencies = [
  "shinrai-instruments",
  "shinrai-ledger",
  "shinrai-md-fanout",
+ "shinrai-md-gateway",
  "shinrai-money",
  "shinrai-orders",
  "shinrai-paper",

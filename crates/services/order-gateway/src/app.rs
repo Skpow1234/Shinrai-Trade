@@ -207,6 +207,28 @@ impl AppState {
         ))
     }
 
+    /// Test helper with MD gateway URL for live portfolio marks.
+    #[must_use]
+    pub fn for_test_with_md(
+        token: &str,
+        subject: &str,
+        account: u64,
+        deposit_major: i64,
+        md_base_url: &str,
+        md_token: &str,
+    ) -> Self {
+        let mut cfg = GatewayConfig::new(
+            vec![(token.to_owned(), subject.to_owned())],
+            Vec::new(),
+            vec![(subject.to_owned(), account)],
+            vec![(account, deposit_major)],
+            TokenTtl::default(),
+        );
+        cfg.md_base_url = Some(md_base_url.to_owned());
+        cfg.md_token = Some(md_token.to_owned());
+        Self::from_config(&cfg)
+    }
+
     /// Test helper with client credentials.
     #[must_use]
     pub fn for_test_client(
