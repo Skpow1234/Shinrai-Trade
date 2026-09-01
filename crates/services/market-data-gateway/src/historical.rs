@@ -137,6 +137,49 @@ pub async fn get_trades(
     .into_response()
 }
 
+/// Query string for `GET /v1/quotes`.
+#[derive(Debug, Deserialize)]
+pub struct QuoteQuery {
+    symbol: String,
+    token: Option<String>,
+}
+
+/// `GET /v1/quotes` — last trade print from the historical archive.
+pub async fn get_quote(
+    Query(query): Query<QuoteQuery>,
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Response {
+    let token = extract_bearer(
+        &headers,
+        &AuthQuery {
+            token: query.token.clone(),
+        },
+    );
+    let now = crate::app::unix_logical_now();
+    if let Err(err) = lock_hub(&state).preview_auth(token.as_deref(), now) {
+        return unauthorized(err);
+    }
+    let instrument_id = match resolve(&state.master, &query.symbol) {
+        Ok(id) => id,
+        Err(err) => return api_error(err),
+    };
+    let Some(price) = lock_archive(&state).last_trade_price(instrument_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "type": "error", "code": "no_quote" })),
+        )
+            .into_response();
+    };
+    Json(json!({
+        "type": "quote",
+        "symbol": query.symbol,
+        "instrument_id": instrument_id.get(),
+        "price_scaled": price.scaled(),
+    }))
+    .into_response()
+}
+
 fn resolve(
     master: &InstrumentMaster,
     symbol: &str,

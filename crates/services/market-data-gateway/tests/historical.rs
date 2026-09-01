@@ -74,3 +74,24 @@ async fn unknown_symbol_is_not_found() {
         .expect("oneshot");
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn quote_returns_last_trade() {
+    let app = router(AppState::for_test("dev", "alice"));
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/quotes?symbol=BTC-USD&token=dev")
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("quote");
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .expect("bytes");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["type"], "quote");
+    assert!(json["price_scaled"].as_i64().is_some_and(|p| p > 0));
+}

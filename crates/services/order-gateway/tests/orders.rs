@@ -197,3 +197,44 @@ async fn idempotent_client_order_id() {
     };
     assert_eq!(id1, id2);
 }
+
+#[tokio::test]
+async fn list_orders_for_account() {
+    let app = router(AppState::for_test("paper-tok", "trader", 1, 10_000));
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/orders?token=paper-tok")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "client_order_id": "list-1",
+                        "symbol": "AAPL",
+                        "side": "Buy",
+                        "qty": 1,
+                        "price": 10000
+                    })
+                    .to_string(),
+                ))
+                .expect("req"),
+        )
+        .await
+        .expect("order");
+
+    let list = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/orders?token=paper-tok")
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("list");
+    assert_eq!(list.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(list.into_body(), usize::MAX)
+        .await
+        .expect("bytes");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["orders"].as_array().expect("arr").len(), 1);
+}

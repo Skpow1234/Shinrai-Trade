@@ -11,7 +11,10 @@ use shinrai_md_fanout::Authenticator;
 use shinrai_orders::{ClientOrderId, Order, OrderId, Side, SubmitOutcome};
 use shinrai_paper::{PaperError, SubmitRequest};
 
-use crate::app::{extract_bearer, lock_engine, resolve_account, unauthorized, AppState, AuthQuery};
+use crate::app::{
+    extract_bearer, lock_engine, record_fill_mark, resolve_account, unauthorized, AppState,
+    AuthQuery,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct SubmitOrderBody {
@@ -25,6 +28,32 @@ pub struct SubmitOrderBody {
 #[derive(Debug, Deserialize)]
 pub struct OrderAuthQuery {
     token: Option<String>,
+}
+
+/// `GET /v1/orders` — list orders for the authenticated account.
+pub async fn list_orders(
+    headers: HeaderMap,
+    Query(auth): Query<AuthQuery>,
+    State(state): State<AppState>,
+) -> Response {
+    let token = extract_bearer(&headers, &auth);
+    let now = crate::app::unix_logical_now();
+    let claims = match state.auth.authenticate(token.as_deref(), now) {
+        Ok(c) => c,
+        Err(err) => return unauthorized(err),
+    };
+    let account = match resolve_account(&state, claims.subject().as_str()) {
+        Ok(a) => a,
+        Err(err) => return unauthorized(err),
+    };
+    let engine = lock_engine(&state);
+    let orders: Vec<Value> = engine
+        .orders()
+        .orders()
+        .filter(|o| o.account_id() == account)
+        .map(|o| order_json(&state, o))
+        .collect();
+    (StatusCode::OK, Json(json!({ "orders": orders }))).into_response()
 }
 
 /// `POST /v1/orders` — submit a paper limit buy.
@@ -80,6 +109,7 @@ pub async fn post_order(
     match outcome {
         Ok(SubmitOutcome::Created(order) | SubmitOutcome::Duplicate(order)) => {
             state.metrics.record_accepted();
+            record_fill_mark(&state, &order);
             (StatusCode::OK, Json(order_json(&state, &order))).into_response()
         }
         Err(PaperError::Risk(reason)) => {

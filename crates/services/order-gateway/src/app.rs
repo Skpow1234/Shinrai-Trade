@@ -17,6 +17,7 @@ use shinrai_ledger::AccountId;
 use shinrai_md_fanout::{FanoutError, SubjectId, TokenAuth, TokenTtl};
 use shinrai_money::{Currency, Money};
 use shinrai_paper::PaperEngine;
+use shinrai_portfolio::MarkStore;
 use shinrai_risk::{RiskEngine, RiskLimits};
 
 /// Coarse gateway counters for local ops (not billing-grade).
@@ -63,6 +64,9 @@ pub struct AppState {
     pub(crate) accounts: Arc<HashMap<String, AccountId>>,
     pub(crate) master: InstrumentMaster,
     pub(crate) metrics: Arc<GatewayMetrics>,
+    pub(crate) marks: Arc<Mutex<MarkStore>>,
+    pub(crate) md_base_url: Option<String>,
+    pub(crate) md_token: Option<String>,
 }
 
 /// Process configuration (tokens / secrets are not displayed).
@@ -73,6 +77,9 @@ pub struct GatewayConfig {
     accounts: Vec<(String, u64)>,
     deposits: Vec<(u64, i64)>,
     ttl: TokenTtl,
+    bootstrap_marks: Vec<(String, i64)>,
+    md_base_url: Option<String>,
+    md_token: Option<String>,
 }
 
 impl GatewayConfig {
@@ -91,6 +98,9 @@ impl GatewayConfig {
             accounts,
             deposits,
             ttl,
+            bootstrap_marks: Vec::new(),
+            md_base_url: None,
+            md_token: None,
         }
     }
 
@@ -99,13 +109,21 @@ impl GatewayConfig {
     pub fn from_env() -> Self {
         let access = env_u64("SHINRAI_OG_ACCESS_TTL").unwrap_or(60);
         let refresh = env_u64("SHINRAI_OG_REFRESH_TTL").unwrap_or(3_600);
-        Self::new(
+        let mut cfg = Self::new(
             parse_tokens(std::env::var("SHINRAI_OG_TOKENS").ok().as_deref()),
             parse_clients(std::env::var("SHINRAI_OG_CLIENTS").ok().as_deref()),
             parse_accounts(std::env::var("SHINRAI_OG_ACCOUNTS").ok().as_deref()),
             parse_deposits(std::env::var("SHINRAI_OG_DEPOSITS").ok().as_deref()),
             TokenTtl::new(access, refresh),
-        )
+        );
+        cfg.bootstrap_marks = parse_symbol_marks(std::env::var("SHINRAI_OG_MARKS").ok().as_deref());
+        cfg.md_base_url = std::env::var("SHINRAI_OG_MD_URL")
+            .ok()
+            .filter(|s| !s.is_empty());
+        cfg.md_token = std::env::var("SHINRAI_OG_MD_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
+        cfg
     }
 }
 
@@ -117,6 +135,9 @@ impl core::fmt::Debug for GatewayConfig {
             .field("account_entries", &self.accounts.len())
             .field("deposit_entries", &self.deposits.len())
             .field("ttl", &self.ttl)
+            .field("bootstrap_mark_entries", &self.bootstrap_marks.len())
+            .field("md_base_url_configured", &self.md_base_url.is_some())
+            .field("md_token_configured", &self.md_token.is_some())
             .finish()
     }
 }
@@ -153,12 +174,24 @@ impl AppState {
             }
         }
 
+        let mut marks = MarkStore::new();
+        for (symbol, scaled) in &config.bootstrap_marks {
+            if let Ok(alias) = shinrai_instruments::ExternalId::ticker(symbol) {
+                if let Ok(id) = master.resolve_alias(&alias) {
+                    marks.set(id, shinrai_instruments::PriceTicks::from_scaled(*scaled));
+                }
+            }
+        }
+
         Self {
             engine: Arc::new(Mutex::new(engine)),
             auth,
             accounts: Arc::new(accounts),
             master,
             metrics: Arc::new(GatewayMetrics::default()),
+            marks: Arc::new(Mutex::new(marks)),
+            md_base_url: config.md_base_url.clone(),
+            md_token: config.md_token.clone(),
         }
     }
 
@@ -208,7 +241,10 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/v1/auth/token", post(crate::auth_http::post_token))
         .route("/v1/auth/revoke", post(crate::auth_http::post_revoke))
-        .route("/v1/orders", post(crate::orders_http::post_order))
+        .route(
+            "/v1/orders",
+            get(crate::orders_http::list_orders).post(crate::orders_http::post_order),
+        )
         .route("/v1/orders/{id}", get(crate::orders_http::get_order))
         .route(
             "/v1/orders/{id}/cancel",
@@ -348,6 +384,35 @@ fn parse_deposits(raw: Option<&str>) -> Vec<(u64, i64)> {
             .collect()
     })
     .unwrap_or_default()
+}
+
+fn parse_symbol_marks(raw: Option<&str>) -> Vec<(String, i64)> {
+    raw.map(|s| {
+        s.split(',')
+            .filter_map(|entry| {
+                let (symbol, scaled) = entry.split_once(':')?;
+                let symbol = symbol.trim().to_owned();
+                let scaled = scaled.trim().parse().ok()?;
+                if symbol.is_empty() || scaled <= 0 {
+                    return None;
+                }
+                Some((symbol, scaled))
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Updates stored marks from a filled/working order's average or limit price.
+pub(crate) fn record_fill_mark(state: &AppState, order: &shinrai_orders::Order) {
+    let price = order.avg_px().unwrap_or_else(|| order.price());
+    if order.cum_qty().lots() > 0 {
+        state
+            .marks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set(order.instrument_id(), price);
+    }
 }
 
 #[cfg(test)]

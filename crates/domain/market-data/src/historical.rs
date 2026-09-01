@@ -1,6 +1,6 @@
 //! Historical bar and trade queries (pagination, time range).
 
-use shinrai_instruments::InstrumentId;
+use shinrai_instruments::{InstrumentId, PriceTicks};
 
 use crate::bar::{BarAggregator, BarInterval, BarStore, OhlcvBar};
 use crate::error::MdError;
@@ -224,6 +224,17 @@ impl HistoricalArchive {
     #[must_use]
     pub fn query_trades(&self, query: TradeHistoryQuery) -> TradeHistoryPage {
         page_trades(self.journal.records(), &query)
+    }
+
+    /// Latest trade print price for an instrument, if any.
+    #[must_use]
+    pub fn last_trade_price(&self, instrument_id: InstrumentId) -> Option<PriceTicks> {
+        self.journal
+            .records()
+            .iter()
+            .rev()
+            .find(|r| r.kind() == MdKind::Trade && r.instrument_id() == instrument_id)
+            .map(|r| r.price())
     }
 
     /// Replays a journal into this archive and closes working bars.

@@ -191,6 +191,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/auth/revoke", post(crate::auth_http::post_revoke))
         .route("/v1/bars", get(crate::historical::get_bars))
         .route("/v1/trades", get(crate::historical::get_trades))
+        .route("/v1/quotes", get(crate::historical::get_quote))
         .route("/v1/ws", get(ws_handler))
         .with_state(state)
 }

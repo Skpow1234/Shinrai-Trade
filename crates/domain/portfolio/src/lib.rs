@@ -1,5 +1,7 @@
 //! Portfolio snapshot from ledger positions and order fill history.
 
+mod marks;
+
 use std::collections::HashMap;
 
 use shinrai_instruments::{Instrument, InstrumentId, InstrumentMaster, PriceTicks};
@@ -7,6 +9,8 @@ use shinrai_ledger::{AccountId, PaperBook};
 use shinrai_money::{Currency, Money, MoneyError};
 use shinrai_orders::{OrderStore, Side};
 use shinrai_paper::notional;
+
+pub use marks::MarkStore;
 
 /// Cash line for one currency.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +51,12 @@ pub struct PortfolioSnapshot {
     pub positions: Vec<PositionLine>,
     /// Sum of unrealized P&L where marks were provided (quote minor units).
     pub total_unrealized_pnl_minor: Option<i128>,
+    /// Total cost basis of open positions (quote minor units).
+    pub total_cost_basis_minor: Option<i128>,
+    /// Realized P&L from closed trades (buy-only paper: always zero).
+    pub realized_pnl_minor: i128,
+    /// Cash + marked market value of positions when marks exist (quote minor units).
+    pub total_equity_minor: Option<i128>,
 }
 
 /// Builds a portfolio snapshot from book state, orders, and optional marks.
@@ -56,6 +66,7 @@ pub struct PortfolioSnapshot {
 /// # Errors
 ///
 /// Returns money overflow / inexact notional errors when computing values.
+#[allow(clippy::too_many_lines)]
 pub fn build_snapshot<S: std::hash::BuildHasher>(
     account: AccountId,
     book: &PaperBook,
@@ -109,6 +120,8 @@ pub fn build_snapshot<S: std::hash::BuildHasher>(
     }
 
     let mut total_unrealized: Option<i128> = None;
+    let mut total_cost_basis: Option<i128> = None;
+    let mut total_market_value: Option<i128> = None;
     let mut positions: Vec<PositionLine> = by_instrument.into_values().collect();
     for line in &mut positions {
         if line.lots == 0 {
@@ -122,10 +135,22 @@ pub fn build_snapshot<S: std::hash::BuildHasher>(
             let qty = shinrai_instruments::QuantityLots::from_lots(line.lots);
             let cost = notional_for(instrument, avg, qty)?;
             line.cost_basis_minor = Some(cost.minor_units());
+            total_cost_basis = Some(
+                total_cost_basis
+                    .unwrap_or(0)
+                    .checked_add(cost.minor_units())
+                    .ok_or(MoneyError::Overflow)?,
+            );
             if let Some(mark) = marks.get(&line.instrument_id) {
                 line.mark_scaled = Some(mark.scaled());
                 let mkt = notional_for(instrument, *mark, qty)?;
                 line.market_value_minor = Some(mkt.minor_units());
+                total_market_value = Some(
+                    total_market_value
+                        .unwrap_or(0)
+                        .checked_add(mkt.minor_units())
+                        .ok_or(MoneyError::Overflow)?,
+                );
                 let pnl = mkt
                     .minor_units()
                     .checked_sub(cost.minor_units())
@@ -143,12 +168,32 @@ pub fn build_snapshot<S: std::hash::BuildHasher>(
     positions.retain(|p| p.lots != 0);
     positions.sort_by_key(|p| p.instrument_id.get());
 
+    let cash_total = cash[0]
+        .available
+        .checked_add(cash[0].reserved)
+        .map_err(|_| MoneyError::Overflow)?;
+    let total_equity = total_market_value.map(|mv| {
+        cash_total
+            .minor_units()
+            .checked_add(mv)
+            .expect("overflow checked above")
+    });
+
     Ok(PortfolioSnapshot {
         account_id: account,
         cash,
         positions,
         total_unrealized_pnl_minor: total_unrealized,
+        total_cost_basis_minor: total_cost_basis,
+        realized_pnl_minor: realized_pnl_from_orders(account, orders),
+        total_equity_minor: total_equity,
     })
+}
+
+/// Realized P&L from terminal sell fills (zero while paper path is buy-only).
+#[must_use]
+pub fn realized_pnl_from_orders(_account: AccountId, _orders: &OrderStore) -> i128 {
+    0
 }
 
 fn book_positions(book: &PaperBook, account: AccountId) -> Vec<(InstrumentId, i64)> {
@@ -212,5 +257,8 @@ mod tests {
         assert_eq!(snap.positions[0].lots, 10);
         assert!(snap.positions[0].unrealized_pnl_minor.is_some());
         assert!(snap.total_unrealized_pnl_minor.unwrap() > 0);
+        assert!(snap.total_cost_basis_minor.is_some());
+        assert_eq!(snap.realized_pnl_minor, 0);
+        assert!(snap.total_equity_minor.is_some());
     }
 }

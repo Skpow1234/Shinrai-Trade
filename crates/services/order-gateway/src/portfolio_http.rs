@@ -20,8 +20,12 @@ use crate::app::{extract_bearer, lock_engine, resolve_account, unauthorized, App
 #[derive(Debug, Deserialize)]
 pub struct AccountQuery {
     token: Option<String>,
-    /// Comma-separated `SYMBOL:price_scaled` marks for unrealized P&L.
+    /// Comma-separated `SYMBOL:price_scaled` marks (override stored/live).
     marks: Option<String>,
+    /// Include marks from fill prices / bootstrap (default true). Accepts `1`/`0` or `true`/`false`.
+    use_stored_marks: Option<String>,
+    /// Fetch last trade from MD gateway when `SHINRAI_OG_MD_URL` is set.
+    use_live_marks: Option<String>,
     /// Pagination: return records with `seq` greater than this value.
     after_seq: Option<u64>,
     limit: Option<usize>,
@@ -37,7 +41,37 @@ pub async fn get_portfolio(
         Ok(a) => a,
         Err(err) => return unauthorized(err),
     };
-    let marks = match parse_marks(&state, query.marks.as_deref()) {
+    let manual = match parse_marks(&state, query.marks.as_deref()) {
+        Ok(m) => m,
+        Err(code) => return bad_request(code),
+    };
+    let position_symbols: Vec<String> = {
+        let engine = lock_engine(&state);
+        engine
+            .book()
+            .positions_for(account)
+            .filter_map(|(id, lots)| {
+                (lots != 0)
+                    .then(|| {
+                        state
+                            .master
+                            .get(id)
+                            .ok()
+                            .map(|i| i.symbol_display().to_owned())
+                    })
+                    .flatten()
+            })
+            .collect()
+    };
+    let use_stored = match parse_bool_query(query.use_stored_marks.as_deref(), true) {
+        Ok(v) => v,
+        Err(code) => return bad_request(code),
+    };
+    let use_live = match parse_bool_query(query.use_live_marks.as_deref(), false) {
+        Ok(v) => v,
+        Err(code) => return bad_request(code),
+    };
+    let marks = match resolve_marks(&state, use_stored, use_live, manual, &position_symbols).await {
         Ok(m) => m,
         Err(code) => return bad_request(code),
     };
@@ -202,7 +236,56 @@ fn portfolio_json(state: &AppState, snap: &PortfolioSnapshot) -> Value {
             })
         }).collect::<Vec<_>>(),
         "total_unrealized_pnl_minor": snap.total_unrealized_pnl_minor,
+        "total_cost_basis_minor": snap.total_cost_basis_minor,
+        "realized_pnl_minor": snap.realized_pnl_minor,
+        "total_equity_minor": snap.total_equity_minor,
     })
+}
+
+fn parse_bool_query(value: Option<&str>, default: bool) -> Result<bool, &'static str> {
+    match value {
+        None => Ok(default),
+        Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "" => Ok(default),
+            "1" | "true" | "yes" => Ok(true),
+            "0" | "false" | "no" => Ok(false),
+            _ => Err("invalid_bool"),
+        },
+    }
+}
+
+async fn resolve_marks(
+    state: &AppState,
+    use_stored: bool,
+    use_live: bool,
+    manual: HashMap<InstrumentId, PriceTicks>,
+    position_symbols: &[String],
+) -> Result<HashMap<InstrumentId, PriceTicks>, &'static str> {
+    let mut marks = if use_stored {
+        state
+            .marks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .merged_with(&manual)
+    } else {
+        manual
+    };
+    if use_live {
+        let Some(base) = state.md_base_url.as_deref() else {
+            return Err("md_url_not_configured");
+        };
+        let token = state.md_token.as_deref();
+        for symbol in position_symbols {
+            if let Some(px) =
+                crate::md_client::fetch_quote(base, token, &state.master, symbol).await
+            {
+                if let Some(id) = crate::md_client::instrument_for_symbol(&state.master, symbol) {
+                    marks.insert(id, px);
+                }
+            }
+        }
+    }
+    Ok(marks)
 }
 
 fn audit_row_json(record: &AuditRecord) -> Value {

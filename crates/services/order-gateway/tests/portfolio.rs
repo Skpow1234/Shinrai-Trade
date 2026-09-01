@@ -104,3 +104,46 @@ async fn portfolio_and_audit_after_order() {
     assert_eq!(json["orders_submitted"], 1);
     assert_eq!(json["orders_accepted"], 1);
 }
+
+#[tokio::test]
+async fn stored_marks_value_portfolio_without_manual_marks() {
+    let app = router(AppState::for_test("paper-tok", "trader", 1, 10_000));
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/orders?token=paper-tok")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "client_order_id": "mark-fill",
+                        "symbol": "AAPL",
+                        "side": "Buy",
+                        "qty": 10,
+                        "price": 10000
+                    })
+                    .to_string(),
+                ))
+                .expect("req"),
+        )
+        .await
+        .expect("order");
+
+    let portfolio = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/portfolio?token=paper-tok&use_stored_marks=1")
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("pf");
+    assert_eq!(portfolio.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(portfolio.into_body(), usize::MAX)
+        .await
+        .expect("bytes");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["positions"][0]["mark_scaled"], 10_000);
+    assert!(json["total_cost_basis_minor"].as_i64().is_some());
+}
