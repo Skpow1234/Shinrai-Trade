@@ -8,5 +8,6 @@
 mod app;
 mod auth_http;
 mod orders_http;
+mod portfolio_http;
 
 pub use app::{router, unix_logical_now, AppState, GatewayConfig};

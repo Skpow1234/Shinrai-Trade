@@ -55,6 +55,19 @@ pub struct SimExchange {
     md_seq: HashMap<InstrumentId, u64>,
 }
 
+/// Read-only view of a working order at the simulated venue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VenueOrderSnapshot {
+    /// Internal OMS order id.
+    pub order_id: OrderId,
+    /// Original order quantity in lots.
+    pub order_qty: i64,
+    /// Cumulative filled quantity at the venue.
+    pub cum_qty: i64,
+    /// Cancel requested at the venue.
+    pub canceled: bool,
+}
+
 impl Default for SimExchange {
     fn default() -> Self {
         Self::new(FaultConfig::happy_path())
@@ -291,6 +304,27 @@ impl SimExchange {
     /// Drains all currently queued execution reports (does not require connected).
     pub fn poll(&mut self) -> Vec<ExecutionReport> {
         self.outbox.drain(..).collect()
+    }
+
+    /// Venue view of one order (for reconciliation).
+    #[must_use]
+    pub fn venue_order(&self, order_id: OrderId) -> Option<VenueOrderSnapshot> {
+        self.inflight.get(&order_id).map(|sim| VenueOrderSnapshot {
+            order_id: sim.order_id,
+            order_qty: sim.qty.lots(),
+            cum_qty: sim.cum_qty,
+            canceled: sim.canceled,
+        })
+    }
+
+    /// All orders still tracked at the venue.
+    pub fn venue_orders(&self) -> impl Iterator<Item = VenueOrderSnapshot> + '_ {
+        self.inflight.values().map(|sim| VenueOrderSnapshot {
+            order_id: sim.order_id,
+            order_qty: sim.qty.lots(),
+            cum_qty: sim.cum_qty,
+            canceled: sim.canceled,
+        })
     }
 
     /// Emits a market-data tick; may skip a seq if `md_skip_seq` is set.

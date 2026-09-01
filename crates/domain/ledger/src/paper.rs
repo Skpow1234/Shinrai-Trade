@@ -106,6 +106,22 @@ impl PaperBook {
             .unwrap_or(0)
     }
 
+    /// Non-zero positions for an account.
+    pub fn positions_for(
+        &self,
+        account: AccountId,
+    ) -> impl Iterator<Item = (InstrumentId, i64)> + '_ {
+        self.positions
+            .iter()
+            .filter_map(move |((acc, inst), lots)| {
+                if *acc == account && *lots != 0 {
+                    Some((*inst, *lots))
+                } else {
+                    None
+                }
+            })
+    }
+
     fn require_funds(have: Money, need: Money) -> Result<(), LedgerError> {
         if have.currency() != need.currency() {
             return Err(LedgerError::Money(

@@ -45,6 +45,8 @@ pub async fn post_order(
         Err(err) => return unauthorized(err),
     };
 
+    state.metrics.record_submit();
+
     let Ok(client_order_id) = ClientOrderId::new(body.client_order_id.trim()) else {
         return bad_request("invalid_client_order_id");
     };
@@ -71,14 +73,19 @@ pub async fn post_order(
 
     let outcome = {
         let mut engine = lock_engine(&state);
+        engine.set_logical_now(now);
         engine.submit(&req)
     };
 
     match outcome {
         Ok(SubmitOutcome::Created(order) | SubmitOutcome::Duplicate(order)) => {
+            state.metrics.record_accepted();
             (StatusCode::OK, Json(order_json(&state, &order))).into_response()
         }
-        Err(PaperError::Risk(reason)) => risk_rejected(reason.code()),
+        Err(PaperError::Risk(reason)) => {
+            state.metrics.record_risk_rejected();
+            risk_rejected(reason.code())
+        }
         Err(PaperError::Instrument(_) | PaperError::Order(_)) => bad_request("invalid_order"),
         Err(PaperError::Ledger(_)) => (
             StatusCode::CONFLICT,

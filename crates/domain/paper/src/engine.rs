@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use shinrai_audit::{AuditKind, AuditLog};
 use shinrai_exchange_simulator::{FaultConfig, NewSimOrder, SimExchange};
 use shinrai_instruments::InstrumentMaster;
 use shinrai_ledger::{AccountId, LedgerError, PaperBook};
@@ -41,6 +42,8 @@ pub struct PaperEngine {
     sim: SimExchange,
     remaining_reserve: HashMap<OrderId, Money>,
     risk: RiskEngine,
+    audit: AuditLog,
+    logical_now: u64,
 }
 
 impl PaperEngine {
@@ -60,7 +63,26 @@ impl PaperEngine {
             sim: SimExchange::new(faults),
             remaining_reserve: HashMap::new(),
             risk,
+            audit: AuditLog::new(),
+            logical_now: 0,
         }
+    }
+
+    /// Instrument master.
+    #[must_use]
+    pub const fn master(&self) -> &InstrumentMaster {
+        &self.master
+    }
+
+    /// Append-only audit trail.
+    #[must_use]
+    pub const fn audit(&self) -> &AuditLog {
+        &self.audit
+    }
+
+    /// Sets logical time used for audit timestamps (unix seconds).
+    pub const fn set_logical_now(&mut self, now: u64) {
+        self.logical_now = now;
     }
 
     /// Paper book (cash / positions).
@@ -115,7 +137,15 @@ impl PaperEngine {
     ///
     /// Returns validation, funds, OMS, or venue errors. Insufficient funds
     /// reject the OMS order and leave cash unchanged.
+    #[allow(clippy::too_many_lines)]
     pub fn submit(&mut self, req: &SubmitRequest) -> Result<SubmitOutcome, PaperError> {
+        self.audit.record(
+            self.logical_now,
+            Some(req.account_id),
+            None,
+            AuditKind::OrderSubmitRequested,
+        );
+
         let instrument = self.master.get(req.instrument_id)?;
         instrument.assert_tradable()?;
         instrument.assert_order_grid(req.price, req.qty)?;
@@ -125,6 +155,12 @@ impl PaperEngine {
             .orders
             .get_by_client(req.account_id, &req.client_order_id)
         {
+            self.audit.record(
+                self.logical_now,
+                Some(req.account_id),
+                Some(existing.id()),
+                AuditKind::OrderDuplicate,
+            );
             return Ok(SubmitOutcome::Duplicate(existing.clone()));
         }
 
@@ -143,6 +179,14 @@ impl PaperEngine {
             price: req.price,
         };
         if let RiskDecision::Rejected(reason) = self.risk.check(&intent, &risk_ctx) {
+            self.audit.record(
+                self.logical_now,
+                Some(req.account_id),
+                None,
+                AuditKind::RiskRejected {
+                    code: reason.code().into(),
+                },
+            );
             return Err(PaperError::Risk(reason));
         }
 
@@ -159,6 +203,12 @@ impl PaperEngine {
             SubmitOutcome::Duplicate(order) => Ok(SubmitOutcome::Duplicate(order)),
             SubmitOutcome::Created(order) => {
                 let order_id = order.id();
+                self.audit.record(
+                    self.logical_now,
+                    Some(req.account_id),
+                    Some(order_id),
+                    AuditKind::OrderCreated,
+                );
                 match self.book.reserve_for_order(
                     req.account_id,
                     reserved_amt,
@@ -166,6 +216,12 @@ impl PaperEngine {
                 ) {
                     Ok(_) => {
                         self.remaining_reserve.insert(order_id, reserved_amt);
+                        self.audit.record(
+                            self.logical_now,
+                            Some(req.account_id),
+                            Some(order_id),
+                            AuditKind::LedgerReserved,
+                        );
                     }
                     Err(LedgerError::InsufficientFunds) => {
                         self.orders.apply_event(
@@ -186,6 +242,12 @@ impl PaperEngine {
                     qty: req.qty,
                     price: req.price,
                 })?;
+                self.audit.record(
+                    self.logical_now,
+                    Some(req.account_id),
+                    Some(order_id),
+                    AuditKind::VenueSubmitted,
+                );
                 self.drain()?;
                 let order = self.orders.get(order_id)?.clone();
                 Ok(SubmitOutcome::Created(order))
@@ -225,6 +287,18 @@ impl PaperEngine {
     pub fn drain(&mut self) -> Result<(), PaperError> {
         let reports = self.sim.poll();
         for report in reports {
+            let exec_label = report.exec_type().name().to_owned();
+            self.audit.record(
+                self.logical_now,
+                self.orders
+                    .get(report.order_id())
+                    .ok()
+                    .map(Order::account_id),
+                Some(report.order_id()),
+                AuditKind::VenueReport {
+                    exec_type: exec_label,
+                },
+            );
             let Some(event) = report.to_order_event()? else {
                 continue;
             };
@@ -235,6 +309,17 @@ impl PaperEngine {
                 }
                 Err(e) => return Err(PaperError::Order(e)),
             };
+            self.audit.record(
+                self.logical_now,
+                self.orders
+                    .get(report.order_id())
+                    .ok()
+                    .map(Order::account_id),
+                Some(report.order_id()),
+                AuditKind::OrderEventApplied {
+                    status: applied.0.status().to_string(),
+                },
+            );
             self.apply_effects(report.order_id(), &applied.1)?;
         }
         Ok(())
@@ -273,6 +358,12 @@ impl PaperEngine {
                         fee,
                         format!("fill:{exec_id}"),
                     )?;
+                    self.audit.record(
+                        self.logical_now,
+                        Some(order.account_id()),
+                        Some(order_id),
+                        AuditKind::LedgerSettled,
+                    );
                     let leftover = remaining.checked_sub(fill_notional)?;
                     if leftover.is_zero() {
                         self.remaining_reserve.remove(&order_id);
@@ -305,6 +396,12 @@ impl PaperEngine {
         let account = self.orders.get(order_id)?.account_id();
         self.book
             .release_reserve(account, amount, format!("rel:{order_id}"))?;
+        self.audit.record(
+            self.logical_now,
+            Some(account),
+            Some(order_id),
+            AuditKind::LedgerReleased,
+        );
         Ok(())
     }
 }

@@ -15,7 +15,7 @@ mod report;
 
 pub use clock::VirtualClock;
 pub use error::SimError;
-pub use exchange::{NewSimOrder, SimExchange};
+pub use exchange::{NewSimOrder, SimExchange, VenueOrderSnapshot};
 pub use faults::{FaultConfig, FillPolicy};
 pub use md::MdTick;
 pub use report::{stream_fingerprint, ExecType, ExecutionReport, SessionId};

@@ -1,6 +1,7 @@
 //! Axum router, shared state, and env configuration.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,6 +19,42 @@ use shinrai_money::{Currency, Money};
 use shinrai_paper::PaperEngine;
 use shinrai_risk::{RiskEngine, RiskLimits};
 
+/// Coarse gateway counters for local ops (not billing-grade).
+#[derive(Debug, Default)]
+#[allow(clippy::struct_field_names)]
+pub struct GatewayMetrics {
+    orders_submitted: AtomicU64,
+    orders_accepted: AtomicU64,
+    orders_risk_rejected: AtomicU64,
+}
+
+impl GatewayMetrics {
+    /// Records an order submit attempt.
+    pub fn record_submit(&self) {
+        self.orders_submitted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records an accepted order (created or duplicate return).
+    pub fn record_accepted(&self) {
+        self.orders_accepted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records a pre-trade risk rejection.
+    pub fn record_risk_rejected(&self) {
+        self.orders_risk_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// JSON snapshot for `GET /v1/metrics`.
+    #[must_use]
+    pub fn snapshot(&self) -> Value {
+        json!({
+            "orders_submitted": self.orders_submitted.load(Ordering::Relaxed),
+            "orders_accepted": self.orders_accepted.load(Ordering::Relaxed),
+            "orders_risk_rejected": self.orders_risk_rejected.load(Ordering::Relaxed),
+        })
+    }
+}
+
 /// Shared gateway state (mutex only at this I/O edge).
 #[derive(Clone)]
 pub struct AppState {
@@ -25,6 +62,7 @@ pub struct AppState {
     pub(crate) auth: TokenAuth,
     pub(crate) accounts: Arc<HashMap<String, AccountId>>,
     pub(crate) master: InstrumentMaster,
+    pub(crate) metrics: Arc<GatewayMetrics>,
 }
 
 /// Process configuration (tokens / secrets are not displayed).
@@ -120,6 +158,7 @@ impl AppState {
             auth,
             accounts: Arc::new(accounts),
             master,
+            metrics: Arc::new(GatewayMetrics::default()),
         }
     }
 
@@ -175,6 +214,13 @@ pub fn router(state: AppState) -> Router {
             "/v1/orders/{id}/cancel",
             post(crate::orders_http::post_cancel),
         )
+        .route("/v1/portfolio", get(crate::portfolio_http::get_portfolio))
+        .route("/v1/audit", get(crate::portfolio_http::get_audit))
+        .route(
+            "/v1/reconciliation",
+            get(crate::portfolio_http::get_reconciliation),
+        )
+        .route("/v1/metrics", get(crate::portfolio_http::get_metrics))
         .with_state(state)
 }
 
