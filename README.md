@@ -44,10 +44,12 @@ Shinrai-Trade/
 | `shinrai-market-data` | Tick journal, OHLCV, L2 book, replay |
 | `shinrai-paper` | Paper loop: reserve → simulated venue → fill → settle |
 | `shinrai-risk` | Pre-trade checks: buying power, limits, kill switches |
+| `shinrai-audit` | Append-only audit trail for the trading path |
+| `shinrai-portfolio` | Cash, positions, mark-to-market P&L snapshots |
 | `shinrai-md-protocol` | Coinbase Exchange decode, raw journal, feed supervisor |
 | `shinrai-md-fanout` | Sessions, authn, bounded queues, heartbeats |
 | `shinrai-md-gateway` | `GET /health`, `GET /v1/bars`, `GET /v1/trades`, `GET /v1/ws` |
-| `shinrai-order-gateway` | `POST /v1/orders`, `GET /v1/orders/{id}`, auth, paper trading |
+| `shinrai-order-gateway` | Orders, portfolio, audit, reconciliation, metrics |
 | `shinrai-exchange-simulator` | Scripted venue for paper tests |
 
 ## Prerequisites
@@ -166,6 +168,25 @@ curl -s -X POST "http://127.0.0.1:8081/v1/orders?token=dev" \
 
 Pre-trade risk runs before the OMS. Insufficient buying power returns **422** with `"code":"insufficient_buying_power"`. Duplicate `client_order_id` for the same account is idempotent (returns the existing order).
 
+Additional authenticated routes:
+
+```bash
+# Portfolio (optional marks for unrealized P&L: SYMBOL:price_scaled)
+curl "http://127.0.0.1:8081/v1/portfolio?token=dev&marks=AAPL:11000"
+
+# Append-only audit trail (paginate with after_seq)
+curl "http://127.0.0.1:8081/v1/audit?token=dev"
+
+# OMS vs simulated-venue reconciliation
+curl "http://127.0.0.1:8081/v1/reconciliation?token=dev"
+```
+
+Unauthenticated ops counters (local only):
+
+```bash
+curl http://127.0.0.1:8081/v1/metrics
+```
+
 ## Test
 
 Same flags as CI:
@@ -188,6 +209,8 @@ Single crate / filter:
 cargo test -p shinrai-paper --all-features
 cargo test -p shinrai-md-gateway --test auth
 cargo test -p shinrai-order-gateway --test orders
+cargo test -p shinrai-order-gateway --test portfolio
+cargo test -p shinrai-audit --lib
 cargo test -p shinrai-risk --lib
 cargo test -p shinrai-md-gateway --test health
 cargo test -p shinrai-md-fanout --lib overflow_drops_oldest
@@ -285,6 +308,7 @@ SHINRAI_MD_TOKENS=dev:alice SHINRAI_MD_SYNTH=1 cargo run -p shinrai-md-gateway -
 | Vendor decode only | `cargo test -p shinrai-md-protocol`. Swap fixtures under `crates/protocols/market-data/tests/fixtures/` if you are extending the Coinbase adapter. |
 | Paper invariants | `cargo test -p shinrai-paper --test proptest_invariants`. |
 | Paper orders over HTTP | `cargo test -p shinrai-order-gateway --test orders`. |
+| Portfolio / audit / reconcile | `cargo test -p shinrai-order-gateway --test portfolio`. |
 
 Do not log tokens. Do not commit real secrets. Prefer `SHINRAI_MD_CLIENTS` + short-lived access tokens; `SHINRAI_MD_TOKENS` is a non-expiring bootstrap for local smoke tests only.
 

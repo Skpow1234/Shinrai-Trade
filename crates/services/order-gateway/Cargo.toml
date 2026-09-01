@@ -17,9 +17,11 @@ shinrai-exchange-simulator = { workspace = true }
 shinrai-instruments = { workspace = true }
 shinrai-ledger = { workspace = true }
 shinrai-md-fanout = { workspace = true }
+shinrai-audit = { workspace = true }
 shinrai-money = { workspace = true }
 shinrai-orders = { workspace = true }
 shinrai-paper = { workspace = true }
+shinrai-portfolio = { workspace = true }
 shinrai-risk = { workspace = true }
 tokio = { workspace = true }
 
