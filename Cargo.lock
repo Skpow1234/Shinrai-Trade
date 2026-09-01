@@ -716,6 +716,25 @@ name = "shinrai-money"
 version = "0.1.0"
 
 [[package]]
+name = "shinrai-order-gateway"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "serde",
+ "serde_json",
+ "shinrai-exchange-simulator",
+ "shinrai-instruments",
+ "shinrai-ledger",
+ "shinrai-md-fanout",
+ "shinrai-money",
+ "shinrai-orders",
+ "shinrai-paper",
+ "shinrai-risk",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "shinrai-orders"
 version = "0.1.0"
 dependencies = [
@@ -729,6 +748,17 @@ version = "0.1.0"
 dependencies = [
  "proptest",
  "shinrai-exchange-simulator",
+ "shinrai-instruments",
+ "shinrai-ledger",
+ "shinrai-money",
+ "shinrai-orders",
+ "shinrai-risk",
+]
+
+[[package]]
+name = "shinrai-risk"
+version = "0.1.0"
+dependencies = [
  "shinrai-instruments",
  "shinrai-ledger",
  "shinrai-money",

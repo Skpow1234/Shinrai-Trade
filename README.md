@@ -7,9 +7,9 @@
 [![Proptest](https://img.shields.io/badge/proptest-invariants-yellow.svg)](https://github.com/proptest-rs/proptest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://opensource.org/licenses/MIT)
 
-A Rust trading platform workspace: domain correctness first, then a read-only market-data path. It is **not** an exchange, does **not** hold customer funds, and does **not** accept live orders yet.
+A Rust trading platform workspace: domain correctness first, then a read-only market-data path, then authenticated paper orders. It is **not** an exchange and does **not** hold customer funds in production. Phase 3 adds a paper order gateway (pre-trade risk → OMS → simulated venue → ledger).
 
-The intended product is a trading application connected to a licensed broker or venue. Phase 1 proved money, instruments, an order state machine, a double-entry ledger, and a paper loop **in-process**. Phase 2 is a read-only market-data gateway (normalize, gap/degrade, bounded WebSocket fanout, historical bars/trades, short-lived auth).
+The intended product is a trading application connected to a licensed broker or venue. Phase 1 proved money, instruments, an order state machine, a double-entry ledger, and a paper loop **in-process**. Phase 2 is a read-only market-data gateway (normalize, gap/degrade, bounded WebSocket fanout, historical bars/trades, short-lived auth). Phase 3 wires **paper orders** through an HTTP gateway with pre-trade risk.
 
 ## Tech
 
@@ -28,9 +28,9 @@ Domain crates stay independent of Axum, databases, and a specific venue. The gat
 
 ```text
 Shinrai-Trade/
-├── crates/domain/           # money, instruments, ledger, orders, market-data, paper
+├── crates/domain/           # money, instruments, ledger, orders, market-data, paper, risk
 ├── crates/protocols/       # Coinbase adapter + client fanout (no sockets in fanout)
-├── crates/services/        # market-data-gateway (Axum binary)
+├── crates/services/        # market-data-gateway, order-gateway (Axum binaries)
 ├── crates/testing/         # exchange simulator
 └── .github/workflows/ci.yml
 ```
@@ -43,9 +43,11 @@ Shinrai-Trade/
 | `shinrai-orders` | Order FSM + idempotent store |
 | `shinrai-market-data` | Tick journal, OHLCV, L2 book, replay |
 | `shinrai-paper` | Paper loop: reserve → simulated venue → fill → settle |
+| `shinrai-risk` | Pre-trade checks: buying power, limits, kill switches |
 | `shinrai-md-protocol` | Coinbase Exchange decode, raw journal, feed supervisor |
 | `shinrai-md-fanout` | Sessions, authn, bounded queues, heartbeats |
 | `shinrai-md-gateway` | `GET /health`, `GET /v1/bars`, `GET /v1/trades`, `GET /v1/ws` |
+| `shinrai-order-gateway` | `POST /v1/orders`, `GET /v1/orders/{id}`, auth, paper trading |
 | `shinrai-exchange-simulator` | Scripted venue for paper tests |
 
 ## Prerequisites
@@ -71,14 +73,18 @@ One binary:
 
 ```bash
 cargo build -p shinrai-md-gateway
+cargo build -p shinrai-order-gateway
 cargo build -p shinrai-md-gateway --release
+cargo build -p shinrai-order-gateway --release
 ```
 
-The release binary is `target/release/shinrai-md-gateway` (`.exe` on Windows).
+The release binaries are `target/release/shinrai-md-gateway` and `target/release/shinrai-order-gateway` (`.exe` on Windows).
 
 ## Run
 
-The only process binary today is the market-data gateway. With **no** env vars it binds `127.0.0.1:8080` and **rejects every WebSocket** (fail-closed: empty token table).
+### Market-data gateway
+
+With **no** env vars it binds `127.0.0.1:8080` and **rejects every WebSocket** (fail-closed: empty token table).
 
 ```bash
 cargo run -p shinrai-md-gateway
@@ -134,6 +140,32 @@ curl "http://127.0.0.1:8080/v1/trades?symbol=BTC-USD&limit=50&token=$ACCESS"
 
 Optional filters: `start` / `end` (logical or Unix seconds matching the store). Prices and sizes are scaled integers (`*_scaled`, `*_lots`). Gateway startup seeds ~120 synthetic BTC-USD trades so these endpoints work without `SHINRAI_MD_SYNTH`; with synth enabled, live prints also append to the archive.
 
+### Order gateway (paper trading)
+
+Binds `127.0.0.1:8081` by default. Requires auth and a subject → account mapping.
+
+| Env | Meaning |
+|---|---|
+| `SHINRAI_OG_BIND` | Listen address (default `127.0.0.1:8081`) |
+| `SHINRAI_OG_CLIENTS` | `client_id:secret:subject,...` |
+| `SHINRAI_OG_TOKENS` | `token:subject,...` — bootstrap static tokens |
+| `SHINRAI_OG_ACCOUNTS` | `subject:account_id,...` — maps auth subject to ledger account |
+| `SHINRAI_OG_DEPOSITS` | `account_id:usd_major,...` — bootstrap paper cash |
+| `SHINRAI_OG_ACCESS_TTL` / `SHINRAI_OG_REFRESH_TTL` | Token lifetimes (same semantics as MD gateway) |
+
+```bash
+SHINRAI_OG_TOKENS=dev:trader \
+SHINRAI_OG_ACCOUNTS=trader:1 \
+SHINRAI_OG_DEPOSITS=1:10000 \
+cargo run -p shinrai-order-gateway
+
+curl -s -X POST "http://127.0.0.1:8081/v1/orders?token=dev" \
+  -H 'content-type: application/json' \
+  -d '{"client_order_id":"o1","symbol":"AAPL","side":"Buy","qty":10,"price":10000}'
+```
+
+Pre-trade risk runs before the OMS. Insufficient buying power returns **422** with `"code":"insufficient_buying_power"`. Duplicate `client_order_id` for the same account is idempotent (returns the existing order).
+
 ## Test
 
 Same flags as CI:
@@ -155,6 +187,8 @@ Single crate / filter:
 ```bash
 cargo test -p shinrai-paper --all-features
 cargo test -p shinrai-md-gateway --test auth
+cargo test -p shinrai-order-gateway --test orders
+cargo test -p shinrai-risk --lib
 cargo test -p shinrai-md-gateway --test health
 cargo test -p shinrai-md-fanout --lib overflow_drops_oldest
 cargo test -p shinrai-paper --test proptest_invariants
@@ -250,6 +284,7 @@ SHINRAI_MD_TOKENS=dev:alice SHINRAI_MD_SYNTH=1 cargo run -p shinrai-md-gateway -
 | Historical REST | `cargo test -p shinrai-md-gateway --test historical`. Domain pagination: `cargo test -p shinrai-market-data --lib historical`. |
 | Vendor decode only | `cargo test -p shinrai-md-protocol`. Swap fixtures under `crates/protocols/market-data/tests/fixtures/` if you are extending the Coinbase adapter. |
 | Paper invariants | `cargo test -p shinrai-paper --test proptest_invariants`. |
+| Paper orders over HTTP | `cargo test -p shinrai-order-gateway --test orders`. |
 
 Do not log tokens. Do not commit real secrets. Prefer `SHINRAI_MD_CLIENTS` + short-lived access tokens; `SHINRAI_MD_TOKENS` is a non-expiring bootstrap for local smoke tests only.
 

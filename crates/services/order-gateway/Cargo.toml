@@ -1,6 +1,6 @@
 [package]
-name = "shinrai-paper"
-description = "Paper trading loop: order, reserve, simulated venue, fill, settle"
+name = "shinrai-order-gateway"
+description = "HTTP order gateway: auth, pre-trade risk, paper trading"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,12 +10,18 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 shinrai-exchange-simulator = { workspace = true }
 shinrai-instruments = { workspace = true }
 shinrai-ledger = { workspace = true }
+shinrai-md-fanout = { workspace = true }
 shinrai-money = { workspace = true }
 shinrai-orders = { workspace = true }
+shinrai-paper = { workspace = true }
 shinrai-risk = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
-proptest = { workspace = true }
+tower = { version = "0.5", features = ["util"] }

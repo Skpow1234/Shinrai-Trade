@@ -10,7 +10,9 @@ members = [
     "crates/protocols/md-fanout",
     "crates/testing/exchange-simulator",
     "crates/domain/paper",
+    "crates/domain/risk",
     "crates/services/market-data-gateway",
+    "crates/services/order-gateway",
 ]
 default-members = [
     "crates/domain/money",
@@ -22,7 +24,9 @@ default-members = [
     "crates/protocols/md-fanout",
     "crates/testing/exchange-simulator",
     "crates/domain/paper",
+    "crates/domain/risk",
     "crates/services/market-data-gateway",
+    "crates/services/order-gateway",
 ]
 
 [workspace.package]
@@ -40,6 +44,8 @@ shinrai-market-data = { path = "crates/domain/market-data", version = "0.1.0" }
 shinrai-md-protocol = { path = "crates/protocols/market-data", version = "0.1.0" }
 shinrai-md-fanout = { path = "crates/protocols/md-fanout", version = "0.1.0" }
 shinrai-exchange-simulator = { path = "crates/testing/exchange-simulator", version = "0.1.0" }
+shinrai-paper = { path = "crates/domain/paper", version = "0.1.0" }
+shinrai-risk = { path = "crates/domain/risk", version = "0.1.0" }
 proptest = "1.6"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

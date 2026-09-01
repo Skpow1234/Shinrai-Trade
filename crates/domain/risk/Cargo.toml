@@ -1,6 +1,6 @@
 [package]
-name = "shinrai-paper"
-description = "Paper trading loop: order, reserve, simulated venue, fill, settle"
+name = "shinrai-risk"
+description = "Pre-trade risk checks: buying power, limits, kill switches"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,12 +10,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-shinrai-exchange-simulator = { workspace = true }
 shinrai-instruments = { workspace = true }
 shinrai-ledger = { workspace = true }
 shinrai-money = { workspace = true }
 shinrai-orders = { workspace = true }
-shinrai-risk = { workspace = true }
-
-[dev-dependencies]
-proptest = { workspace = true }
