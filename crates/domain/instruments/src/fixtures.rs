@@ -1,4 +1,4 @@
-//! Phase 1 static instrument fixtures (no live vendor feed).
+//! static instrument fixtures (no live vendor feed).
 
 use shinrai_money::Currency;
 
@@ -88,7 +88,7 @@ fn build_btc_usd() -> Result<Instrument, InstrumentError> {
     )
 }
 
-/// Phase 1 master containing the static fixtures.
+/// Master containing the static fixtures.
 #[must_use]
 pub fn phase1_master() -> InstrumentMaster {
     let mut master = InstrumentMaster::new();

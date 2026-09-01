@@ -1,4 +1,4 @@
-//! Minimal market-data ticks for gap-detection tests (Phase 1.6 feed).
+//! Minimal market-data ticks for gap-detection tests.
 
 use shinrai_instruments::{InstrumentId, PriceTicks};
 

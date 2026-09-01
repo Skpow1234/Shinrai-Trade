@@ -7,7 +7,7 @@ pub enum AssetClass {
     Equity,
     /// Exchange-traded future.
     Future,
-    /// Crypto spot pair (Phase 1 placeholder).
+    /// Crypto spot pair.
     Crypto,
     /// Other / unclassified.
     Other,

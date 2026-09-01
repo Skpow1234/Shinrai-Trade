@@ -2,7 +2,7 @@
 //!
 //! Reports map onto [`shinrai_orders::OrderEvent`] so the real adapter can
 //! eventually speak the same types. Late fills after cancel are **emitted**
-//! when configured, but the OMS rejects them (defined Phase 1 policy).
+//! when configured, but the OMS rejects them.
 
 #![forbid(unsafe_code)]
 

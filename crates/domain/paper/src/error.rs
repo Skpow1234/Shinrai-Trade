@@ -7,6 +7,7 @@ use shinrai_instruments::InstrumentError;
 use shinrai_ledger::LedgerError;
 use shinrai_money::MoneyError;
 use shinrai_orders::{OrderError, OrderId};
+use shinrai_risk::RiskRejectReason;
 
 /// Errors from the paper trading loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +31,8 @@ pub enum PaperError {
         /// Order whose reservation was too small.
         order_id: OrderId,
     },
+    /// Pre-trade risk rejected the order (OMS not mutated).
+    Risk(RiskRejectReason),
 }
 
 impl fmt::Display for PaperError {
@@ -45,6 +48,7 @@ impl fmt::Display for PaperError {
             Self::ReservationShortfall { order_id } => {
                 write!(f, "reservation shortfall for order {order_id}")
             }
+            Self::Risk(r) => write!(f, "pre-trade risk rejected: {r}"),
         }
     }
 }

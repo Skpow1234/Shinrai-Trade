@@ -5,7 +5,7 @@ use shinrai_exchange_simulator::{FaultConfig, FillPolicy};
 use shinrai_instruments::{aapl, phase1_master, PriceTicks, QuantityLots};
 use shinrai_ledger::AccountId;
 use shinrai_money::{Currency, Money};
-use shinrai_orders::{ClientOrderId, OrderId, Side};
+use shinrai_orders::{ClientOrderId, OrderId, Side, SubmitOutcome};
 use shinrai_paper::{PaperEngine, SubmitRequest};
 
 fn funded_engine(faults: FaultConfig) -> (PaperEngine, AccountId) {
@@ -63,7 +63,7 @@ enum Action {
 
 fn run_actions(actions: &[Action], faults: FaultConfig) {
     let (mut engine, acc) = funded_engine(faults);
-    let mut known_clients: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut oms_clients: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
     for action in actions {
         match action {
@@ -86,8 +86,9 @@ fn run_actions(actions: &[Action], faults: FaultConfig) {
                 let before_pos = engine.book().position(acc, aapl().id());
                 let before_reserved = engine.book().reserved(acc, Currency::usd()).minor_units();
 
-                if known_clients.contains(client_key) {
-                    let _ = engine.submit(&req);
+                let outcome = engine.submit(&req);
+                if oms_clients.contains(client_key) {
+                    assert!(matches!(outcome, Ok(SubmitOutcome::Duplicate(_))));
                     assert_eq!(engine.orders().len(), before_orders);
                     assert_eq!(
                         engine.book().available(acc, Currency::usd()).minor_units(),
@@ -98,9 +99,11 @@ fn run_actions(actions: &[Action], faults: FaultConfig) {
                         engine.book().reserved(acc, Currency::usd()).minor_units(),
                         before_reserved
                     );
-                } else {
-                    known_clients.insert(*client_key);
-                    let _ = engine.submit(&req);
+                } else if matches!(
+                    outcome,
+                    Ok(SubmitOutcome::Created(_) | SubmitOutcome::Duplicate(_))
+                ) {
+                    oms_clients.insert(*client_key);
                 }
             }
             Action::Cancel { order_id } => {

@@ -75,6 +75,17 @@ impl OrderStore {
         self.orders.is_empty()
     }
 
+    /// Looks up an order by account + client order id (idempotency key).
+    #[must_use]
+    pub fn get_by_client(
+        &self,
+        account_id: AccountId,
+        client_order_id: &ClientOrderId,
+    ) -> Option<&Order> {
+        let id = self.by_client.get(&(account_id, client_order_id.clone()))?;
+        self.orders.get(id)
+    }
+
     /// Event log length.
     #[must_use]
     pub fn event_log_len(&self) -> usize {

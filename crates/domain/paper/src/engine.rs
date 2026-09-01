@@ -10,6 +10,7 @@ use shinrai_orders::{
     CreateOrder, DomainEffect, Order, OrderError, OrderEvent, OrderId, OrderStore, Side,
     SubmitOutcome,
 };
+use shinrai_risk::{RiskContext, RiskDecision, RiskEngine, RiskOrderIntent};
 
 use crate::error::PaperError;
 use crate::notional::notional;
@@ -23,7 +24,7 @@ pub struct SubmitRequest {
     pub client_order_id: shinrai_orders::ClientOrderId,
     /// Instrument.
     pub instrument_id: shinrai_instruments::InstrumentId,
-    /// Side (Phase 1: buy only).
+    /// Side ( buy only).
     pub side: Side,
     /// Quantity in lots.
     pub qty: shinrai_instruments::QuantityLots,
@@ -39,18 +40,26 @@ pub struct PaperEngine {
     orders: OrderStore,
     sim: SimExchange,
     remaining_reserve: HashMap<OrderId, Money>,
+    risk: RiskEngine,
 }
 
 impl PaperEngine {
     /// Creates a session with the given instrument master and venue faults.
     #[must_use]
     pub fn new(master: InstrumentMaster, faults: FaultConfig) -> Self {
+        Self::with_risk(master, faults, RiskEngine::default())
+    }
+
+    /// Creates a session with an explicit risk engine.
+    #[must_use]
+    pub fn with_risk(master: InstrumentMaster, faults: FaultConfig, risk: RiskEngine) -> Self {
         Self {
             master,
             book: PaperBook::new(),
             orders: OrderStore::new(),
             sim: SimExchange::new(faults),
             remaining_reserve: HashMap::new(),
+            risk,
         }
     }
 
@@ -72,6 +81,17 @@ impl PaperEngine {
         &self.sim
     }
 
+    /// Pre-trade risk engine.
+    #[must_use]
+    pub const fn risk(&self) -> &RiskEngine {
+        &self.risk
+    }
+
+    /// Mutable pre-trade risk engine.
+    pub const fn risk_mut(&mut self) -> &mut RiskEngine {
+        &mut self.risk
+    }
+
     /// Paper deposit.
     ///
     /// # Errors
@@ -87,7 +107,7 @@ impl PaperEngine {
         Ok(())
     }
 
-    /// Submits an order: validate → OMS → reserve → venue → drain reports.
+    /// Submits an order: validate → risk → OMS → reserve → venue → drain reports.
     ///
     /// Duplicate `account + client_order_id` does not reserve twice.
     ///
@@ -96,13 +116,35 @@ impl PaperEngine {
     /// Returns validation, funds, OMS, or venue errors. Insufficient funds
     /// reject the OMS order and leave cash unchanged.
     pub fn submit(&mut self, req: &SubmitRequest) -> Result<SubmitOutcome, PaperError> {
-        if req.side != Side::Buy {
-            return Err(PaperError::UnsupportedSide);
-        }
         let instrument = self.master.get(req.instrument_id)?;
         instrument.assert_tradable()?;
         instrument.assert_order_grid(req.price, req.qty)?;
         let reserved_amt = notional(instrument, req.price, req.qty)?;
+
+        if let Some(existing) = self
+            .orders
+            .get_by_client(req.account_id, &req.client_order_id)
+        {
+            return Ok(SubmitOutcome::Duplicate(existing.clone()));
+        }
+
+        let risk_ctx = RiskContext {
+            available_cash: self
+                .book
+                .available(req.account_id, instrument.quote_currency()),
+            position_lots: self.book.position(req.account_id, req.instrument_id),
+            notional: reserved_amt,
+        };
+        let intent = RiskOrderIntent {
+            account_id: req.account_id,
+            instrument_id: req.instrument_id,
+            side: req.side,
+            qty: req.qty,
+            price: req.price,
+        };
+        if let RiskDecision::Rejected(reason) = self.risk.check(&intent, &risk_ctx) {
+            return Err(PaperError::Risk(reason));
+        }
 
         let create = CreateOrder {
             account_id: req.account_id,
@@ -342,7 +384,7 @@ mod tests {
     }
 
     #[test]
-    fn insufficient_funds_rejects_without_venue() {
+    fn insufficient_funds_rejected_by_risk_before_oms() {
         let mut engine = PaperEngine::new(phase1_master(), FaultConfig::happy_path());
         let acc = AccountId::from_u64(1);
         engine
@@ -355,12 +397,8 @@ mod tests {
         let err = engine
             .submit(&aapl_buy(acc, "poor", 10, 10_000))
             .expect_err("insuf");
-        assert!(matches!(
-            err,
-            PaperError::Ledger(LedgerError::InsufficientFunds)
-        ));
-        let order = engine.orders().get(OrderId::from_u64(1)).expect("o");
-        assert_eq!(order.status(), OrderStatus::Rejected);
+        assert!(matches!(err, PaperError::Risk(_)));
+        assert!(engine.orders().is_empty());
         assert_eq!(
             engine.book().available(acc, Currency::usd()).minor_units(),
             100

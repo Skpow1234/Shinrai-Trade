@@ -72,7 +72,7 @@ impl ExecType {
 /// One venue execution report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionReport {
-    /// Internal OMS order id (Phase 1 sim convenience).
+    /// Internal OMS order id (sim convenience).
     order_id: OrderId,
     /// Venue order id.
     venue_order_id: VenueOrderId,

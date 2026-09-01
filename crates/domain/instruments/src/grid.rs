@@ -176,7 +176,7 @@ impl TickTable {
     /// Returns an error if `tick_size_scaled` is not positive or scale is invalid.
     pub fn constant(price_scale: u8, tick_size_scaled: i64) -> Result<Self, InstrumentError> {
         // Allow negative prices via a symmetric band from i64::MIN/2 style is complex;
-        // Phase 1 constant tables start at 0 for equities/crypto mids. Use full-range
+        // Constant tables start at 0 for equities/crypto mids. Use full-range
         // band for signed prices.
         let band = TickBand::new(i64::MIN, None, tick_size_scaled)?;
         Self::new(price_scale, vec![band])
