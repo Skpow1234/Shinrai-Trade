@@ -23,6 +23,7 @@ shinrai-orders = { workspace = true }
 shinrai-paper = { workspace = true }
 shinrai-portfolio = { workspace = true }
 shinrai-risk = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { workspace = true }
 
 [dev-dependencies]

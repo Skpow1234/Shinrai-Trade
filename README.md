@@ -48,7 +48,7 @@ Shinrai-Trade/
 | `shinrai-portfolio` | Cash, positions, mark-to-market P&L snapshots |
 | `shinrai-md-protocol` | Coinbase Exchange decode, raw journal, feed supervisor |
 | `shinrai-md-fanout` | Sessions, authn, bounded queues, heartbeats |
-| `shinrai-md-gateway` | `GET /health`, `GET /v1/bars`, `GET /v1/trades`, `GET /v1/ws` |
+| `shinrai-md-gateway` | `GET /health`, bars/trades/quotes, WebSocket |
 | `shinrai-order-gateway` | Orders, portfolio, audit, reconciliation, metrics |
 | `shinrai-exchange-simulator` | Scripted venue for paper tests |
 
@@ -168,11 +168,21 @@ curl -s -X POST "http://127.0.0.1:8081/v1/orders?token=dev" \
 
 Pre-trade risk runs before the OMS. Insufficient buying power returns **422** with `"code":"insufficient_buying_power"`. Duplicate `client_order_id` for the same account is idempotent (returns the existing order).
 
+| Env | Meaning |
+|---|---|
+| `SHINRAI_OG_MARKS` | Bootstrap marks `SYMBOL:price_scaled,...` |
+| `SHINRAI_OG_MD_URL` | MD gateway base URL for `use_live_marks=1` on portfolio |
+| `SHINRAI_OG_MD_TOKEN` | Access token when calling the MD gateway |
+
 Additional authenticated routes:
 
 ```bash
-# Portfolio (optional marks for unrealized P&L: SYMBOL:price_scaled)
-curl "http://127.0.0.1:8081/v1/portfolio?token=dev&marks=AAPL:11000"
+# List orders
+curl "http://127.0.0.1:8081/v1/orders?token=dev"
+
+# Portfolio (stored fill marks by default; optional live MD quotes)
+curl "http://127.0.0.1:8081/v1/portfolio?token=dev&use_stored_marks=1"
+curl "http://127.0.0.1:8081/v1/portfolio?token=dev&use_live_marks=1"
 
 # Append-only audit trail (paginate with after_seq)
 curl "http://127.0.0.1:8081/v1/audit?token=dev"
