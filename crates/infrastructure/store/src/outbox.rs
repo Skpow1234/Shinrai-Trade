@@ -37,11 +37,11 @@ pub(crate) async fn insert_outbox_tx(
     payload: &serde_json::Value,
 ) -> Result<i64, StoreError> {
     let (id,): (i64,) = sqlx::query_as(
-        r#"
+        r"
         INSERT INTO outbox_events (topic, payload)
         VALUES ($1, $2)
         RETURNING id
-        "#,
+        ",
     )
     .bind(topic)
     .bind(payload)
@@ -57,13 +57,13 @@ pub(crate) async fn insert_outbox_tx(
 /// Returns sqlx errors.
 pub async fn claim_unpublished(pool: &PgPool, limit: i64) -> Result<Vec<OutboxEvent>, StoreError> {
     let rows: Vec<(i64, String, serde_json::Value)> = sqlx::query_as(
-        r#"
+        r"
         SELECT id, topic, payload
         FROM outbox_events
         WHERE published_at IS NULL
         ORDER BY id ASC
         LIMIT $1
-        "#,
+        ",
     )
     .bind(limit.max(1))
     .fetch_all(pool)

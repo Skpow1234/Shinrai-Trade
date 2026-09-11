@@ -31,8 +31,9 @@ Shinrai-Trade/
 ├── crates/domain/           # money, instruments, ledger, orders, market-data, paper, risk
 ├── crates/protocols/       # Coinbase adapter + client fanout (no sockets in fanout)
 ├── crates/services/        # market-data-gateway, order-gateway (Axum binaries)
+├── crates/infrastructure/  # shinrai-store (Postgres persistence)
 ├── crates/testing/         # exchange simulator
-├── compose.yaml            # optional Postgres for future durable store
+├── compose.yaml            # optional Postgres for durable store
 ├── .env.example            # SHINRAI_DATABASE_URL and related placeholders
 └── .github/workflows/ci.yml
 ```
@@ -52,6 +53,7 @@ Shinrai-Trade/
 | `shinrai-md-fanout` | Sessions, authn, bounded queues, heartbeats |
 | `shinrai-md-gateway` | `GET /health`, bars/trades/quotes, WebSocket |
 | `shinrai-order-gateway` | Orders, portfolio, audit, reconciliation, metrics |
+| `shinrai-store` | PostgreSQL: orders, ledger, audit, transactional outbox |
 | `shinrai-exchange-simulator` | Scripted venue for paper tests |
 
 ## Prerequisites
@@ -62,7 +64,7 @@ Shinrai-Trade/
 
 ## PostgreSQL
 
-Dev Postgres for the future durable OMS / ledger store. Domain crates stay free of Docker; compose only runs the database.
+Dev Postgres for `shinrai-store` (orders, ledger, audit, transactional outbox). Domain crates stay free of Docker; the order gateway is still in-memory until wired to the store.
 
 ```bash
 # Start (healthcheck: pg_isready)
@@ -85,10 +87,17 @@ cp .env.example .env
 | Variable | Meaning |
 |---|---|
 | `SHINRAI_DATABASE_URL` | Postgres URL (dev default matches `compose.yaml`) |
-| `SHINRAI_DB_POOL_SIZE` | Connection pool size (used when a store crate lands) |
-| `SHINRAI_RUN_MIGRATIONS` | `1` to apply migrations on process start (dev only) |
+| `SHINRAI_DB_POOL_SIZE` | Connection pool size (default 5) |
+| `SHINRAI_RUN_MIGRATIONS` | Reserved for process-start migrations (dev) |
 
-CI still runs `cargo test --workspace` **without** Postgres. A separate `test-db` job will be added when the store crate exists.
+Store tests skip when the URL is unset. With Postgres running:
+
+```bash
+SHINRAI_DATABASE_URL=postgres://shinrai:shinrai@127.0.0.1:5432/shinrai \
+  cargo test -p shinrai-store --all-features
+```
+
+CI matrix `cargo test --workspace` stays host-only; a dedicated **`test-db`** job runs store tests against a Postgres service.
 
 ## Build
 
@@ -254,6 +263,7 @@ cargo test -p shinrai-md-gateway --test auth
 cargo test -p shinrai-order-gateway --test orders
 cargo test -p shinrai-order-gateway --test portfolio
 cargo test -p shinrai-order-gateway --test live_marks
+cargo test -p shinrai-store --all-features
 cargo test -p shinrai-audit --lib
 cargo test -p shinrai-risk --lib
 cargo test -p shinrai-md-gateway --test health
@@ -354,6 +364,7 @@ SHINRAI_MD_TOKENS=dev:alice SHINRAI_MD_SYNTH=1 cargo run -p shinrai-md-gateway -
 | Paper orders over HTTP | `cargo test -p shinrai-order-gateway --test orders`. |
 | Portfolio / audit / reconcile | `cargo test -p shinrai-order-gateway --test portfolio`. |
 | Live marks (OG → MD quotes) | `cargo test -p shinrai-order-gateway --test live_marks`. Spawns MD gateway on a local port; order gateway fetches `GET /v1/quotes` over HTTP. |
+| Durable store (Postgres) | `docker compose up -d postgres` then `SHINRAI_DATABASE_URL=… cargo test -p shinrai-store`. |
 
 Do not log tokens. Do not commit real secrets. Prefer `SHINRAI_MD_CLIENTS` + short-lived access tokens; `SHINRAI_MD_TOKENS` is a non-expiring bootstrap for local smoke tests only.
 

@@ -1,4 +1,4 @@
-//! PostgreSQL persistence for OMS, ledger, audit, and outbox.
+//! `PostgreSQL` persistence for OMS, ledger, audit, and outbox.
 //!
 //! Domain crates stay free of sqlx. This crate maps domain snapshots to SQL
 //! and runs migrations from `migrations/`.
@@ -14,7 +14,9 @@ mod pool;
 
 pub use audit::{insert_audit_record, load_audit_after};
 pub use error::StoreError;
-pub use ledger::{insert_ledger_entry, load_ledger_entry_by_key, LedgerEntrySnapshot, LedgerPostingSnapshot};
+pub use ledger::{
+    insert_ledger_entry, load_ledger_entry_by_key, LedgerEntrySnapshot, LedgerPostingSnapshot,
+};
 pub use orders::{
     load_order_by_client, load_order_by_id, upsert_order, OrderSnapshot, StoredSide, StoredStatus,
 };

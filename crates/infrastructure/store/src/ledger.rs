@@ -105,12 +105,7 @@ fn encode_account(
         LedgerAccount::CustomerPosition {
             account,
             instrument,
-        } => (
-            "customer_position",
-            Some(account),
-            None,
-            Some(instrument),
-        ),
+        } => ("customer_position", Some(account), None, Some(instrument)),
     };
     LedgerPostingSnapshot {
         account_kind: kind.to_owned(),
@@ -148,11 +143,11 @@ pub async fn insert_ledger_entry(
     }
 
     let (entry_id,): (i64,) = sqlx::query_as(
-        r#"
+        r"
         INSERT INTO ledger_entries (idempotency_key, causation_id, correlation_id)
         VALUES ($1, $2, $3)
         RETURNING id
-        "#,
+        ",
     )
     .bind(&snap.idempotency_key)
     .bind(snap.causation_id.as_deref())
@@ -166,16 +161,19 @@ pub async fn insert_ledger_entry(
             Direction::Credit => "Credit",
         };
         sqlx::query(
-            r#"
+            r"
             INSERT INTO ledger_postings (
                 entry_id, account_kind, account_id, currency_code, instrument_id,
                 direction, minor_units
             ) VALUES ($1,$2,$3,$4,$5,$6,$7)
-            "#,
+            ",
         )
         .bind(entry_id)
         .bind(&p.account_kind)
-        .bind(p.account_id.map(|a| i64::try_from(a.get()).unwrap_or(i64::MAX)))
+        .bind(
+            p.account_id
+                .map(|a| i64::try_from(a.get()).unwrap_or(i64::MAX)),
+        )
         .bind(p.currency_code.as_deref())
         .bind(
             p.instrument_id
@@ -205,10 +203,10 @@ pub async fn load_ledger_entry_by_key(
     key: &str,
 ) -> Result<Option<LedgerEntrySnapshot>, StoreError> {
     let row: Option<(i64, String, Option<String>, Option<String>)> = sqlx::query_as(
-        r#"
+        r"
         SELECT id, idempotency_key, causation_id, correlation_id
         FROM ledger_entries WHERE idempotency_key = $1
-        "#,
+        ",
     )
     .bind(key)
     .fetch_optional(pool)
@@ -219,10 +217,10 @@ pub async fn load_ledger_entry_by_key(
     };
 
     let posting_rows: Vec<PostingRow> = sqlx::query_as(
-        r#"
+        r"
         SELECT account_kind, account_id, currency_code, instrument_id, direction, minor_units
         FROM ledger_postings WHERE entry_id = $1 ORDER BY id
-        "#,
+        ",
     )
     .bind(id)
     .fetch_all(pool)
@@ -240,18 +238,20 @@ pub async fn load_ledger_entry_by_key(
                 });
             }
         };
-        let minor_units = pr.minor_units.parse::<i128>().map_err(|_| {
-            StoreError::InvalidInteger {
-                field: "minor_units",
-                value: pr.minor_units.clone(),
-            }
-        })?;
+        let minor_units =
+            pr.minor_units
+                .parse::<i128>()
+                .map_err(|_| StoreError::InvalidInteger {
+                    field: "minor_units",
+                    value: pr.minor_units.clone(),
+                })?;
         // Validate currency shape when present (round-trip sanity).
         if let Some(ref code) = pr.currency_code {
-            let _ = shinrai_money::CurrencyCode::new(code).map_err(|_| StoreError::InvalidStored {
-                field: "currency_code",
-                value: code.clone(),
-            })?;
+            let _ =
+                shinrai_money::CurrencyCode::new(code).map_err(|_| StoreError::InvalidStored {
+                    field: "currency_code",
+                    value: code.clone(),
+                })?;
         }
         postings.push(LedgerPostingSnapshot {
             account_kind: pr.account_kind,

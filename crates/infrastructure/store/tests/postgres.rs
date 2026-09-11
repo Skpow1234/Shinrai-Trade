@@ -6,9 +6,7 @@ use shinrai_audit::{AuditKind, AuditRecord};
 use shinrai_instruments::{InstrumentId, PriceTicks, QuantityLots};
 use shinrai_ledger::{AccountId, Direction, EntryBuilder, LedgerAccount};
 use shinrai_money::{Currency, Money};
-use shinrai_orders::{
-    ClientOrderId, ExecId, Order, OrderId, OrderStatus, Side, VenueOrderId,
-};
+use shinrai_orders::{ClientOrderId, ExecId, Order, OrderId, OrderStatus, Side, VenueOrderId};
 use shinrai_store::{
     claim_unpublished, connect_from_env, insert_audit_record, insert_ledger_entry,
     load_audit_after, load_ledger_entry_by_key, load_order_by_client, load_order_by_id,
@@ -53,8 +51,9 @@ async fn order_round_trip_and_client_lookup() {
         return;
     };
 
+    let oid = OrderId::from_u64(900_000 + uuid_like() % 100_000);
     let order = Order::new_pending(
-        OrderId::from_u64(900_001),
+        oid,
         AccountId::from_u64(42),
         ClientOrderId::new(format!("clid-{}", uuid_like())).expect("clid"),
         InstrumentId::from_u64(1),
@@ -116,14 +115,9 @@ async fn ledger_idempotent_insert_with_outbox() {
 
     let snap = LedgerEntrySnapshot::from_balanced(&entry);
     let payload = serde_json::json!({ "idempotency_key": key, "kind": "ledger_posted" });
-    let id1 = insert_ledger_entry(
-        &pool,
-        &snap,
-        Some("ledger.posted"),
-        Some(payload.clone()),
-    )
-    .await
-    .expect("insert");
+    let id1 = insert_ledger_entry(&pool, &snap, Some("ledger.posted"), Some(payload.clone()))
+        .await
+        .expect("insert");
     let id2 = insert_ledger_entry(&pool, &snap, Some("ledger.posted"), Some(payload))
         .await
         .expect("dup");
@@ -185,6 +179,6 @@ fn uuid_like() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
+        .map(|d| u64::try_from(d.as_nanos() % u128::from(u64::MAX)).unwrap_or(1))
         .unwrap_or(1)
 }

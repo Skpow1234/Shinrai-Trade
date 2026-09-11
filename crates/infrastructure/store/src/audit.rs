@@ -16,10 +16,10 @@ use crate::error::StoreError;
 pub async fn insert_audit_record(pool: &PgPool, record: &AuditRecord) -> Result<(), StoreError> {
     let (kind, detail) = encode_kind(record.kind());
     sqlx::query(
-        r#"
+        r"
         INSERT INTO audit_records (seq, at_unix, account_id, order_id, kind, detail)
         VALUES ($1, $2, $3, $4, $5, $6)
-        "#,
+        ",
     )
     .bind(i64::try_from(record.seq()).unwrap_or(i64::MAX))
     .bind(i64::try_from(record.at()).unwrap_or(i64::MAX))
@@ -51,13 +51,13 @@ pub async fn load_audit_after(
     limit: i64,
 ) -> Result<Vec<AuditRecord>, StoreError> {
     let rows: Vec<AuditRow> = sqlx::query_as(
-        r#"
+        r"
         SELECT seq, at_unix, account_id, order_id, kind, detail
         FROM audit_records
         WHERE seq > $1
         ORDER BY seq ASC
         LIMIT $2
-        "#,
+        ",
     )
     .bind(i64::try_from(after_seq).unwrap_or(i64::MAX))
     .bind(limit.max(1))

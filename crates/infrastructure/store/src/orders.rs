@@ -4,7 +4,9 @@ use sqlx::{PgPool, Postgres, Transaction};
 
 use shinrai_instruments::{InstrumentId, PriceTicks, QuantityLots};
 use shinrai_ledger::AccountId;
-use shinrai_orders::{ClientOrderId, ExecId, Order, OrderId, OrderStatus, OrderType, Side, VenueOrderId};
+use shinrai_orders::{
+    ClientOrderId, ExecId, Order, OrderId, OrderStatus, OrderType, Side, VenueOrderId,
+};
 
 use crate::error::StoreError;
 
@@ -58,23 +60,23 @@ impl StoredSide {
 /// Order status as stored text (matches [`OrderStatus`] Display).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoredStatus {
-    /// PendingNew.
+    /// `PendingNew`.
     PendingNew,
-    /// New.
+    /// `New`.
     New,
-    /// PartiallyFilled.
+    /// `PartiallyFilled`.
     PartiallyFilled,
-    /// Filled.
+    /// `Filled`.
     Filled,
-    /// PendingCancel.
+    /// `PendingCancel`.
     PendingCancel,
-    /// Canceled.
+    /// `Canceled`.
     Canceled,
-    /// PendingReplace.
+    /// `PendingReplace`.
     PendingReplace,
-    /// Rejected.
+    /// `Rejected`.
     Rejected,
-    /// Expired.
+    /// `Expired`.
     Expired,
 }
 
@@ -207,7 +209,7 @@ async fn upsert_order_tx(
         OrderType::Limit => "Limit",
     };
     sqlx::query(
-        r#"
+        r"
         INSERT INTO orders (
             id, account_id, client_order_id, instrument_id, side, order_type, status,
             order_qty, price_scaled, cum_qty, leaves_qty, avg_px_scaled,
@@ -223,7 +225,7 @@ async fn upsert_order_tx(
             venue_order_id = EXCLUDED.venue_order_id,
             reject_reason = EXCLUDED.reject_reason,
             updated_at = NOW()
-        "#,
+        ",
     )
     .bind(i64::try_from(snap.id.get()).unwrap_or(i64::MAX))
     .bind(i64::try_from(snap.account_id.get()).unwrap_or(i64::MAX))
@@ -267,12 +269,12 @@ pub async fn load_order_by_id(
     id: OrderId,
 ) -> Result<Option<OrderSnapshot>, StoreError> {
     let row = sqlx::query_as::<_, OrderRow>(
-        r#"
+        r"
         SELECT id, account_id, client_order_id, instrument_id, side, order_type, status,
                order_qty, price_scaled, cum_qty, leaves_qty, avg_px_scaled,
                venue_order_id, reject_reason
         FROM orders WHERE id = $1
-        "#,
+        ",
     )
     .bind(i64::try_from(id.get()).unwrap_or(i64::MAX))
     .fetch_optional(pool)
@@ -295,12 +297,12 @@ pub async fn load_order_by_client(
     client_order_id: &ClientOrderId,
 ) -> Result<Option<OrderSnapshot>, StoreError> {
     let row = sqlx::query_as::<_, OrderRow>(
-        r#"
+        r"
         SELECT id, account_id, client_order_id, instrument_id, side, order_type, status,
                order_qty, price_scaled, cum_qty, leaves_qty, avg_px_scaled,
                venue_order_id, reject_reason
         FROM orders WHERE account_id = $1 AND client_order_id = $2
-        "#,
+        ",
     )
     .bind(i64::try_from(account_id.get()).unwrap_or(i64::MAX))
     .bind(client_order_id.as_str())
