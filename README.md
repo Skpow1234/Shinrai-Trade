@@ -60,11 +60,11 @@ Shinrai-Trade/
 
 - [Rustup](https://rustup.rs/). Opening the repo installs **1.90.0** plus `clippy` and `rustfmt` from `rust-toolchain.toml`.
 - Optional WebSocket clients for the demo: [`websocat`](https://github.com/vi/websocat) (`cargo install websocat`) or `npx wscat`.
-- Optional [Docker](https://docs.docker.com/get-docker/) / Docker Compose for local PostgreSQL (Phase 3.5+). **Not required** for `cargo test --workspace` today — paper trading is still in-memory.
+- Optional [Docker](https://docs.docker.com/get-docker/) / Docker Compose for local PostgreSQL . **Not required** for `cargo test --workspace` today — dual-write tests skip without `SHINRAI_DATABASE_URL`.
 
 ## PostgreSQL
 
-Dev Postgres for `shinrai-store` (orders, ledger, audit, transactional outbox). Domain crates stay free of Docker; the order gateway is still in-memory until wired to the store.
+Dev Postgres for `shinrai-store` (orders, ledger, audit, transactional outbox). Domain crates stay free of Docker. With `SHINRAI_DATABASE_URL` set, the order gateway **dual-writes** to Postgres (in-memory remains authoritative until startup replay). Without the URL, OG stays in-memory only.
 
 ```bash
 # Start (healthcheck: pg_isready)
@@ -88,16 +88,19 @@ cp .env.example .env
 |---|---|
 | `SHINRAI_DATABASE_URL` | Postgres URL (dev default matches `compose.yaml`) |
 | `SHINRAI_DB_POOL_SIZE` | Connection pool size (default 5) |
-| `SHINRAI_RUN_MIGRATIONS` | Reserved for process-start migrations (dev) |
+| `SHINRAI_RUN_MIGRATIONS` | When `1`/`true`, order gateway runs migrations on start (dev) |
 
-Store tests skip when the URL is unset. With Postgres running:
+Store and OG dual-write tests skip when the URL is unset. With Postgres running:
 
 ```bash
 SHINRAI_DATABASE_URL=postgres://shinrai:shinrai@127.0.0.1:5432/shinrai \
   cargo test -p shinrai-store --all-features
+
+SHINRAI_DATABASE_URL=postgres://shinrai:shinrai@127.0.0.1:5432/shinrai \
+  cargo test -p shinrai-order-gateway --all-features --test dual_write
 ```
 
-CI matrix `cargo test --workspace` stays host-only; a dedicated **`test-db`** job runs store tests against a Postgres service.
+CI matrix `cargo test --workspace` stays host-only; a dedicated **`test-db`** job runs store + OG dual-write tests against a Postgres service.
 
 ## Build
 
@@ -364,7 +367,7 @@ SHINRAI_MD_TOKENS=dev:alice SHINRAI_MD_SYNTH=1 cargo run -p shinrai-md-gateway -
 | Paper orders over HTTP | `cargo test -p shinrai-order-gateway --test orders`. |
 | Portfolio / audit / reconcile | `cargo test -p shinrai-order-gateway --test portfolio`. |
 | Live marks (OG → MD quotes) | `cargo test -p shinrai-order-gateway --test live_marks`. Spawns MD gateway on a local port; order gateway fetches `GET /v1/quotes` over HTTP. |
-| Durable store (Postgres) | `docker compose up -d postgres` then `SHINRAI_DATABASE_URL=… cargo test -p shinrai-store`. |
+| Durable store (Postgres) | `docker compose up -d postgres` then `SHINRAI_DATABASE_URL=… cargo test -p shinrai-store` / `dual_write`. |
 
 Do not log tokens. Do not commit real secrets. Prefer `SHINRAI_MD_CLIENTS` + short-lived access tokens; `SHINRAI_MD_TOKENS` is a non-expiring bootstrap for local smoke tests only.
 

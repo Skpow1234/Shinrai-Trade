@@ -1657,6 +1657,7 @@ dependencies = [
  "shinrai-paper",
  "shinrai-portfolio",
  "shinrai-risk",
+ "shinrai-store",
  "tokio",
  "tower",
 ]

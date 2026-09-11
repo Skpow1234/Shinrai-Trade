@@ -83,6 +83,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Store integration tests
         run: cargo test -p shinrai-store --all-features -- --nocapture
+      - name: Order-gateway dual-write tests
+        run: cargo test -p shinrai-order-gateway --all-features --test dual_write -- --nocapture
 
   build:
     name: build
