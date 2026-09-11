@@ -75,6 +75,24 @@ pub struct AuditRecord {
 }
 
 impl AuditRecord {
+    /// Reconstructs a record (e.g. from durable storage).
+    #[must_use]
+    pub const fn from_parts(
+        seq: u64,
+        at: u64,
+        account_id: Option<AccountId>,
+        order_id: Option<OrderId>,
+        kind: AuditKind,
+    ) -> Self {
+        Self {
+            seq,
+            at,
+            account_id,
+            order_id,
+            kind,
+        }
+    }
+
     /// Monotonic sequence (1-based).
     #[must_use]
     pub const fn seq(&self) -> u64 {

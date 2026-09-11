@@ -174,6 +174,12 @@ impl Order {
         self.reject_reason.as_deref()
     }
 
+    /// Venue execution ids already applied (for durable dedupe).
+    #[must_use]
+    pub fn seen_execs(&self) -> &[ExecId] {
+        &self.seen_execs
+    }
+
     /// Asserts fill accounting invariants.
     ///
     /// # Errors
