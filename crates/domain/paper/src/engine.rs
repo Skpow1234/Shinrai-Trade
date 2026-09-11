@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use shinrai_audit::{AuditKind, AuditLog};
 use shinrai_exchange_simulator::{FaultConfig, NewSimOrder, SimExchange};
 use shinrai_instruments::InstrumentMaster;
-use shinrai_ledger::{AccountId, LedgerError, PaperBook};
+use shinrai_ledger::{AccountId, BalancedEntry, LedgerError, PaperBook};
 use shinrai_money::Money;
 use shinrai_orders::{
     CreateOrder, DomainEffect, Order, OrderError, OrderEvent, OrderId, OrderStore, Side,
@@ -128,6 +128,40 @@ impl PaperEngine {
         key: impl Into<String>,
     ) -> Result<(), PaperError> {
         self.book.deposit(account, amount, key)?;
+        Ok(())
+    }
+
+    /// Replaces book/OMS/audit from durable snapshots (startup replay).
+    ///
+    /// Clears prior book/orders/audit/reserves. Does not reinflate the sim venue
+    /// or working-order cash/position reserves — suitable for terminal fills.
+    ///
+    /// # Errors
+    ///
+    /// Returns ledger/order errors while applying snapshots.
+    pub fn hydrate(
+        &mut self,
+        ledger: impl IntoIterator<Item = BalancedEntry>,
+        orders: impl IntoIterator<Item = Order>,
+        audit: Vec<shinrai_audit::AuditRecord>,
+        positions: impl IntoIterator<Item = (AccountId, shinrai_instruments::InstrumentId, i64, i64)>,
+    ) -> Result<(), PaperError> {
+        self.book = PaperBook::new();
+        self.orders = OrderStore::new();
+        self.remaining_cash_reserve.clear();
+        self.remaining_position_reserve.clear();
+        self.audit = AuditLog::new();
+
+        for entry in ledger {
+            let _ = self.book.restore_entry(entry)?;
+        }
+        for (account, instrument, lots, reserved) in positions {
+            self.book.set_position(account, instrument, lots, reserved);
+        }
+        for order in orders {
+            self.orders.restore_order(order);
+        }
+        self.audit.restore(audit);
         Ok(())
     }
 

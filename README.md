@@ -64,7 +64,7 @@ Shinrai-Trade/
 
 ## PostgreSQL
 
-Dev Postgres for `shinrai-store` (orders, ledger, audit, transactional outbox). Domain crates stay free of Docker. With `SHINRAI_DATABASE_URL` set, the order gateway **dual-writes** to Postgres (in-memory remains authoritative until startup replay). Without the URL, OG stays in-memory only.
+Dev Postgres for `shinrai-store` (orders, ledger, audit, transactional outbox). Domain crates stay free of Docker. With `SHINRAI_DATABASE_URL` set, the order gateway **dual-writes** to Postgres and **hydrates** `PaperEngine` from durable rows on restart. Without the URL, OG stays in-memory only.
 
 ```bash
 # Start (healthcheck: pg_isready)

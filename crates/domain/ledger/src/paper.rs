@@ -6,7 +6,7 @@ use shinrai_instruments::InstrumentId;
 use shinrai_money::{Currency, Money};
 
 use crate::account::{AccountId, LedgerAccount};
-use crate::entry::{EntryBuilder, EntryId};
+use crate::entry::{BalancedEntry, EntryBuilder, EntryId};
 use crate::error::LedgerError;
 use crate::journal::{Journal, PostOutcome};
 
@@ -115,6 +115,56 @@ impl PaperBook {
             .get(&(account, instrument))
             .copied()
             .unwrap_or(0)
+    }
+
+    /// Posts a restored journal entry (startup replay). Opens cash accounts as needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns journal posting errors.
+    pub fn restore_entry(&mut self, entry: BalancedEntry) -> Result<PostOutcome, LedgerError> {
+        for posting in entry.postings() {
+            match posting.account() {
+                LedgerAccount::CustomerCash { account, .. }
+                | LedgerAccount::CustomerCashReserved { account, .. }
+                | LedgerAccount::CustomerPosition { account, .. } => {
+                    self.open_account(account);
+                }
+                _ => {}
+            }
+        }
+        self.journal.post(entry)
+    }
+
+    /// Sets position lots for an account/instrument (startup replay).
+    pub fn set_position(
+        &mut self,
+        account: AccountId,
+        instrument: InstrumentId,
+        lots: i64,
+        reserved_lots: i64,
+    ) {
+        self.open_account(account);
+        let key = (account, instrument);
+        if lots == 0 {
+            self.positions.remove(&key);
+        } else {
+            self.positions.insert(key, lots);
+        }
+        if reserved_lots <= 0 {
+            self.position_reserved.remove(&key);
+        } else {
+            self.position_reserved.insert(key, reserved_lots);
+        }
+    }
+
+    /// Iterates all non-zero positions as `(account, instrument, lots, reserved)`.
+    pub fn positions_iter(&self) -> impl Iterator<Item = (AccountId, InstrumentId, i64, i64)> + '_ {
+        let reserved = &self.position_reserved;
+        self.positions.iter().map(move |((acc, inst), lots)| {
+            let r = reserved.get(&(*acc, *inst)).copied().unwrap_or(0);
+            (*acc, *inst, *lots, r)
+        })
     }
 
     /// Long lots available to sell (position minus sell reserves).

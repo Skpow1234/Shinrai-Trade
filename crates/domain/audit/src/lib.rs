@@ -192,6 +192,15 @@ impl AuditLog {
             .take(limit)
             .collect()
     }
+
+    /// Replaces the log with durable records (startup replay).
+    ///
+    /// Sets `next_seq` to the maximum restored sequence so new records continue.
+    pub fn restore(&mut self, records: Vec<AuditRecord>) {
+        let max = records.iter().map(AuditRecord::seq).max().unwrap_or(0);
+        self.next_seq = max;
+        self.records = records;
+    }
 }
 
 #[cfg(test)]

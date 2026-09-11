@@ -17,9 +17,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 migrate(&pool).await?;
                 eprintln!("shinrai-order-gateway: migrations applied");
             }
-            state.attach_store(pool);
-            state.persist_bootstrap().await;
-            eprintln!("shinrai-order-gateway: Postgres dual-write enabled");
+            if shinrai_store::has_durable_state(&pool).await? {
+                state.hydrate_from_store(pool).await?;
+                eprintln!("shinrai-order-gateway: hydrated PaperEngine from Postgres");
+            } else {
+                state.attach_store(pool);
+                state.persist_bootstrap().await;
+                eprintln!("shinrai-order-gateway: Postgres dual-write enabled (fresh bootstrap)");
+            }
         }
         Err(StoreError::MissingDatabaseUrl) => {
             eprintln!("shinrai-order-gateway: no SHINRAI_DATABASE_URL; in-memory only");

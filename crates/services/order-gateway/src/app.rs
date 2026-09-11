@@ -208,6 +208,25 @@ impl AppState {
         self.store = Some(pool);
     }
 
+    /// Hydrates the in-memory engine from Postgres (startup replay).
+    ///
+    /// # Errors
+    ///
+    /// Returns store / decode errors.
+    pub async fn hydrate_from_store(
+        &mut self,
+        pool: StorePool,
+    ) -> Result<(), shinrai_store::StoreError> {
+        let payload = crate::hydrate::load_hydrate_payload(&pool).await?;
+        let max_seq = {
+            let mut engine = lock_engine(self);
+            crate::hydrate::apply_hydrate(&mut engine, payload)?
+        };
+        self.store = Some(pool);
+        self.audit_persisted_seq.store(max_seq, Ordering::Release);
+        Ok(())
+    }
+
     /// Dual-writes bootstrap ledger/audit (deposits) after `attach_store`.
     pub async fn persist_bootstrap(&self) {
         self.maybe_persist(None).await;
@@ -265,6 +284,27 @@ impl AppState {
         let mut state = Self::for_test(token, subject, account, deposit_major);
         state.attach_store(pool);
         state.persist_bootstrap().await;
+        state
+    }
+
+    /// Test helper: rebuild state from Postgres only (no env deposits).
+    pub async fn for_test_hydrate(
+        token: &str,
+        subject: &str,
+        account: u64,
+        pool: StorePool,
+    ) -> Self {
+        let mut state = Self::from_config(&GatewayConfig::new(
+            vec![(token.to_owned(), subject.to_owned())],
+            Vec::new(),
+            vec![(subject.to_owned(), account)],
+            Vec::new(),
+            TokenTtl::default(),
+        ));
+        state
+            .hydrate_from_store(pool)
+            .await
+            .expect("hydrate from store");
         state
     }
 

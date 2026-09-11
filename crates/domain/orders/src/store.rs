@@ -169,6 +169,21 @@ impl OrderStore {
     pub fn orders(&self) -> impl Iterator<Item = &Order> {
         self.orders.values()
     }
+
+    /// Inserts a restored order (startup replay). Bumps `next_id` past `order.id()`.
+    ///
+    /// Replaces any existing row with the same id or client key.
+    pub fn restore_order(&mut self, order: Order) {
+        let id = order.id();
+        let key = (order.account_id(), order.client_order_id().clone());
+        if let Some(old_id) = self.by_client.insert(key, id) {
+            if old_id != id {
+                self.orders.remove(&old_id);
+            }
+        }
+        self.next_id = self.next_id.max(id.get());
+        self.orders.insert(id, order);
+    }
 }
 
 #[cfg(test)]

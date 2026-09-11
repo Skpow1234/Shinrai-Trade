@@ -49,6 +49,60 @@ pub struct Order {
 }
 
 impl Order {
+    /// Reconstructs an order from durable fields (startup replay).
+    ///
+    /// Does not validate legal FSM reachability — caller trusts the snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns quantity/price invariant errors.
+    #[allow(clippy::too_many_arguments)]
+    pub fn restore(
+        id: OrderId,
+        account_id: AccountId,
+        client_order_id: ClientOrderId,
+        instrument_id: InstrumentId,
+        side: Side,
+        order_type: OrderType,
+        status: OrderStatus,
+        order_qty: QuantityLots,
+        price: PriceTicks,
+        cum_qty: QuantityLots,
+        leaves_qty: QuantityLots,
+        avg_px: Option<PriceTicks>,
+        venue_order_id: Option<VenueOrderId>,
+        reject_reason: Option<String>,
+        seen_execs: Vec<ExecId>,
+    ) -> Result<Self, OrderError> {
+        if order_qty.lots() <= 0 {
+            return Err(OrderError::InvalidQuantity);
+        }
+        if price.scaled() <= 0 {
+            return Err(OrderError::InvalidPrice);
+        }
+        let order = Self {
+            id,
+            account_id,
+            client_order_id,
+            instrument_id,
+            side,
+            order_type,
+            status,
+            order_qty,
+            price,
+            cum_qty,
+            leaves_qty,
+            avg_px,
+            venue_order_id,
+            reject_reason,
+            seen_execs,
+            pending_replace_qty: None,
+            pending_replace_price: None,
+        };
+        order.assert_invariants()?;
+        Ok(order)
+    }
+
     /// Creates a new order in [`OrderStatus::PendingNew`].
     ///
     /// # Errors

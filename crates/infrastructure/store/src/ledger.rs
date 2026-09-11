@@ -3,8 +3,8 @@
 use sqlx::PgPool;
 
 use shinrai_instruments::InstrumentId;
-use shinrai_ledger::{AccountId, BalancedEntry, Direction, LedgerAccount};
-use shinrai_money::Money;
+use shinrai_ledger::{AccountId, BalancedEntry, Direction, EntryBuilder, LedgerAccount, Posting};
+use shinrai_money::{Currency, CurrencyCode, Money};
 
 use crate::error::StoreError;
 use crate::outbox;
@@ -57,6 +57,120 @@ impl LedgerEntrySnapshot {
             correlation_id: entry.correlation_id().map(str::to_owned),
             postings,
         }
+    }
+
+    /// Rebuilds a balanced domain entry from stored postings.
+    ///
+    /// # Errors
+    ///
+    /// Returns decode or balance validation errors.
+    pub fn try_into_balanced(&self) -> Result<BalancedEntry, StoreError> {
+        let mut builder = EntryBuilder::new(self.idempotency_key.clone()).map_err(|_| {
+            StoreError::InvalidStored {
+                field: "idempotency_key",
+                value: self.idempotency_key.clone(),
+            }
+        })?;
+        if let Some(c) = &self.causation_id {
+            builder = builder.causation(c.clone());
+        }
+        if let Some(c) = &self.correlation_id {
+            builder = builder.correlation(c.clone());
+        }
+        for p in &self.postings {
+            let account = decode_account(p)?;
+            let currency = account.currency().unwrap_or_else(Currency::usd);
+            let amount = Money::from_minor(p.minor_units, currency);
+            builder = builder.push(Posting::new(account, p.direction, amount));
+        }
+        builder.build().map_err(|e| StoreError::InvalidStored {
+            field: "ledger_entry",
+            value: e.to_string(),
+        })
+    }
+}
+
+fn decode_account(p: &LedgerPostingSnapshot) -> Result<LedgerAccount, StoreError> {
+    let currency = match p.currency_code.as_deref() {
+        Some(code) => Some(currency_from_code(code)?),
+        None => None,
+    };
+    match p.account_kind.as_str() {
+        "customer_cash" => Ok(LedgerAccount::CustomerCash {
+            account: p.account_id.ok_or(StoreError::InvalidStored {
+                field: "account_id",
+                value: "missing".into(),
+            })?,
+            currency: currency.ok_or(StoreError::InvalidStored {
+                field: "currency_code",
+                value: "missing".into(),
+            })?,
+        }),
+        "customer_cash_reserved" => Ok(LedgerAccount::CustomerCashReserved {
+            account: p.account_id.ok_or(StoreError::InvalidStored {
+                field: "account_id",
+                value: "missing".into(),
+            })?,
+            currency: currency.ok_or(StoreError::InvalidStored {
+                field: "currency_code",
+                value: "missing".into(),
+            })?,
+        }),
+        "paper_funding" => Ok(LedgerAccount::PaperFunding {
+            currency: currency.ok_or(StoreError::InvalidStored {
+                field: "currency_code",
+                value: "missing".into(),
+            })?,
+        }),
+        "broker_settlement" => Ok(LedgerAccount::BrokerSettlement {
+            currency: currency.ok_or(StoreError::InvalidStored {
+                field: "currency_code",
+                value: "missing".into(),
+            })?,
+        }),
+        "fees_revenue" => Ok(LedgerAccount::FeesRevenue {
+            currency: currency.ok_or(StoreError::InvalidStored {
+                field: "currency_code",
+                value: "missing".into(),
+            })?,
+        }),
+        "house_suspense" => Ok(LedgerAccount::HouseSuspense {
+            currency: currency.ok_or(StoreError::InvalidStored {
+                field: "currency_code",
+                value: "missing".into(),
+            })?,
+        }),
+        "customer_position" => Ok(LedgerAccount::CustomerPosition {
+            account: p.account_id.ok_or(StoreError::InvalidStored {
+                field: "account_id",
+                value: "missing".into(),
+            })?,
+            instrument: p.instrument_id.ok_or(StoreError::InvalidStored {
+                field: "instrument_id",
+                value: "missing".into(),
+            })?,
+        }),
+        other => Err(StoreError::InvalidStored {
+            field: "account_kind",
+            value: other.to_owned(),
+        }),
+    }
+}
+
+fn currency_from_code(code: &str) -> Result<Currency, StoreError> {
+    let parsed = CurrencyCode::new(code).map_err(|_| StoreError::InvalidStored {
+        field: "currency_code",
+        value: code.to_owned(),
+    })?;
+    match parsed.as_str() {
+        "USD" => Ok(Currency::usd()),
+        "EUR" => Ok(Currency::eur()),
+        "JPY" => Ok(Currency::jpy()),
+        "GBP" => Ok(Currency::gbp()),
+        other => Err(StoreError::InvalidStored {
+            field: "currency_code",
+            value: other.to_owned(),
+        }),
     }
 }
 
@@ -228,43 +342,7 @@ pub async fn load_ledger_entry_by_key(
 
     let mut postings = Vec::with_capacity(posting_rows.len());
     for pr in posting_rows {
-        let direction = match pr.direction.as_str() {
-            "Debit" => Direction::Debit,
-            "Credit" => Direction::Credit,
-            other => {
-                return Err(StoreError::InvalidStored {
-                    field: "direction",
-                    value: other.to_owned(),
-                });
-            }
-        };
-        let minor_units =
-            pr.minor_units
-                .parse::<i128>()
-                .map_err(|_| StoreError::InvalidInteger {
-                    field: "minor_units",
-                    value: pr.minor_units.clone(),
-                })?;
-        // Validate currency shape when present (round-trip sanity).
-        if let Some(ref code) = pr.currency_code {
-            let _ =
-                shinrai_money::CurrencyCode::new(code).map_err(|_| StoreError::InvalidStored {
-                    field: "currency_code",
-                    value: code.clone(),
-                })?;
-        }
-        postings.push(LedgerPostingSnapshot {
-            account_kind: pr.account_kind,
-            account_id: pr
-                .account_id
-                .map(|a| AccountId::from_u64(u64::try_from(a).unwrap_or(0))),
-            currency_code: pr.currency_code,
-            instrument_id: pr
-                .instrument_id
-                .map(|i| InstrumentId::from_u64(u64::try_from(i).unwrap_or(0))),
-            direction,
-            minor_units,
-        });
+        postings.push(decode_posting_row(pr)?);
     }
 
     Ok(Some(LedgerEntrySnapshot {
@@ -274,6 +352,86 @@ pub async fn load_ledger_entry_by_key(
         correlation_id,
         postings,
     }))
+}
+
+/// Lists all ledger entries ordered by id ascending (with postings).
+///
+/// # Errors
+///
+/// Returns sqlx / decode errors.
+pub async fn list_ledger_entries(pool: &PgPool) -> Result<Vec<LedgerEntrySnapshot>, StoreError> {
+    let rows: Vec<(i64, String, Option<String>, Option<String>)> = sqlx::query_as(
+        r"
+        SELECT id, idempotency_key, causation_id, correlation_id
+        FROM ledger_entries ORDER BY id ASC
+        ",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for (id, idempotency_key, causation_id, correlation_id) in rows {
+        let posting_rows: Vec<PostingRow> = sqlx::query_as(
+            r"
+            SELECT account_kind, account_id, currency_code, instrument_id, direction, minor_units
+            FROM ledger_postings WHERE entry_id = $1 ORDER BY id
+            ",
+        )
+        .bind(id)
+        .fetch_all(pool)
+        .await?;
+
+        let mut postings = Vec::with_capacity(posting_rows.len());
+        for pr in posting_rows {
+            postings.push(decode_posting_row(pr)?);
+        }
+        out.push(LedgerEntrySnapshot {
+            id,
+            idempotency_key,
+            causation_id,
+            correlation_id,
+            postings,
+        });
+    }
+    Ok(out)
+}
+
+fn decode_posting_row(pr: PostingRow) -> Result<LedgerPostingSnapshot, StoreError> {
+    let direction = match pr.direction.as_str() {
+        "Debit" => Direction::Debit,
+        "Credit" => Direction::Credit,
+        other => {
+            return Err(StoreError::InvalidStored {
+                field: "direction",
+                value: other.to_owned(),
+            });
+        }
+    };
+    let minor_units = pr
+        .minor_units
+        .parse::<i128>()
+        .map_err(|_| StoreError::InvalidInteger {
+            field: "minor_units",
+            value: pr.minor_units.clone(),
+        })?;
+    if let Some(ref code) = pr.currency_code {
+        let _ = CurrencyCode::new(code).map_err(|_| StoreError::InvalidStored {
+            field: "currency_code",
+            value: code.clone(),
+        })?;
+    }
+    Ok(LedgerPostingSnapshot {
+        account_kind: pr.account_kind,
+        account_id: pr
+            .account_id
+            .map(|a| AccountId::from_u64(u64::try_from(a).unwrap_or(0))),
+        currency_code: pr.currency_code,
+        instrument_id: pr
+            .instrument_id
+            .map(|i| InstrumentId::from_u64(u64::try_from(i).unwrap_or(0))),
+        direction,
+        minor_units,
+    })
 }
 
 #[derive(Debug, sqlx::FromRow)]

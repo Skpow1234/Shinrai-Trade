@@ -7,6 +7,7 @@
 
 mod app;
 mod auth_http;
+mod hydrate;
 mod md_client;
 mod orders_http;
 mod persist;

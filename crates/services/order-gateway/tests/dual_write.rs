@@ -81,3 +81,76 @@ async fn submit_persists_order_and_audit() {
         "expected audit rows after bootstrap + submit"
     );
 }
+
+#[tokio::test]
+async fn restart_hydrates_order_into_memory() {
+    if !database_configured() {
+        eprintln!("skipping: set SHINRAI_DATABASE_URL to run dual-write tests");
+        return;
+    }
+
+    let pool = match connect_from_env().await {
+        Ok(p) => p,
+        Err(StoreError::MissingDatabaseUrl) => return,
+        Err(err) => panic!("connect: {err}"),
+    };
+    migrate(&pool).await.expect("migrate");
+
+    let clid = format!(
+        "hy-ord-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+
+    {
+        let state =
+            AppState::for_test_with_store("hy-tok", "trader", 1, 10_000, pool.clone()).await;
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/orders?token=hy-tok")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "client_order_id": clid,
+                            "symbol": "AAPL",
+                            "side": "Buy",
+                            "qty": 3,
+                            "price": 10000
+                        })
+                        .to_string(),
+                    ))
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // Simulate process restart: empty deposits, load from Postgres.
+    let state = AppState::for_test_hydrate("hy-tok", "trader", 1, pool.clone()).await;
+    let app = router(state);
+    let list = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/orders?token=hy-tok")
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("list");
+    assert_eq!(list.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(list.into_body(), usize::MAX)
+        .await
+        .expect("bytes");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let orders = json["orders"].as_array().expect("orders");
+    let found = orders
+        .iter()
+        .any(|o| o["client_order_id"] == clid && o["status"] == "Filled" && o["cum_qty"] == 3);
+    assert!(found, "hydrated engine should expose filled order {clid}");
+}

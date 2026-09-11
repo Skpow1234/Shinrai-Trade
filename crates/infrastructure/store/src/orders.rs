@@ -128,6 +128,22 @@ impl StoredStatus {
             }),
         }
     }
+
+    /// Domain status.
+    #[must_use]
+    pub const fn to_order_status(self) -> OrderStatus {
+        match self {
+            Self::PendingNew => OrderStatus::PendingNew,
+            Self::New => OrderStatus::New,
+            Self::PartiallyFilled => OrderStatus::PartiallyFilled,
+            Self::Filled => OrderStatus::Filled,
+            Self::PendingCancel => OrderStatus::PendingCancel,
+            Self::Canceled => OrderStatus::Canceled,
+            Self::PendingReplace => OrderStatus::PendingReplace,
+            Self::Rejected => OrderStatus::Rejected,
+            Self::Expired => OrderStatus::Expired,
+        }
+    }
 }
 
 /// Durable order row (round-trips without reconstructing private OMS fields yet).
@@ -187,6 +203,31 @@ impl OrderSnapshot {
             seen_execs: order.seen_execs().to_vec(),
         }
     }
+
+    /// Rebuilds a domain order from this snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns order construction / invariant errors.
+    pub fn to_order(&self) -> Result<Order, shinrai_orders::OrderError> {
+        Order::restore(
+            self.id,
+            self.account_id,
+            self.client_order_id.clone(),
+            self.instrument_id,
+            self.side.to_side(),
+            self.order_type,
+            self.status.to_order_status(),
+            self.order_qty,
+            self.price,
+            self.cum_qty,
+            self.leaves_qty,
+            self.avg_px,
+            self.venue_order_id.clone(),
+            self.reject_reason.clone(),
+            self.seen_execs.clone(),
+        )
+    }
 }
 
 /// Upserts an order and replaces its exec-id set.
@@ -216,6 +257,11 @@ async fn upsert_order_tx(
             venue_order_id, reject_reason, updated_at
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, NOW())
         ON CONFLICT (id) DO UPDATE SET
+            account_id = EXCLUDED.account_id,
+            client_order_id = EXCLUDED.client_order_id,
+            instrument_id = EXCLUDED.instrument_id,
+            side = EXCLUDED.side,
+            order_type = EXCLUDED.order_type,
             status = EXCLUDED.status,
             order_qty = EXCLUDED.order_qty,
             price_scaled = EXCLUDED.price_scaled,
@@ -313,6 +359,48 @@ pub async fn load_order_by_client(
         None => Ok(None),
         Some(r) => Ok(Some(row_to_snapshot(pool, r).await?)),
     }
+}
+
+/// Lists all orders ordered by id ascending.
+///
+/// # Errors
+///
+/// Returns sqlx / decode errors.
+pub async fn list_orders(pool: &PgPool) -> Result<Vec<OrderSnapshot>, StoreError> {
+    let rows = sqlx::query_as::<_, OrderRow>(
+        r"
+        SELECT id, account_id, client_order_id, instrument_id, side, order_type, status,
+               order_qty, price_scaled, cum_qty, leaves_qty, avg_px_scaled,
+               venue_order_id, reject_reason
+        FROM orders ORDER BY id ASC
+        ",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(row_to_snapshot(pool, row).await?);
+    }
+    Ok(out)
+}
+
+/// Returns true when durable OMS or ledger rows exist.
+///
+/// # Errors
+///
+/// Returns sqlx errors.
+pub async fn has_durable_state(pool: &PgPool) -> Result<bool, StoreError> {
+    let (orders,): (i64,) = sqlx::query_as("SELECT COUNT(*)::bigint FROM orders")
+        .fetch_one(pool)
+        .await?;
+    if orders > 0 {
+        return Ok(true);
+    }
+    let (ledger,): (i64,) = sqlx::query_as("SELECT COUNT(*)::bigint FROM ledger_entries")
+        .fetch_one(pool)
+        .await?;
+    Ok(ledger > 0)
 }
 
 #[derive(Debug, sqlx::FromRow)]
