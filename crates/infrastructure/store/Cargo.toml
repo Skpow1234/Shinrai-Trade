@@ -1,0 +1,32 @@
+[package]
+name = "shinrai-store"
+description = "PostgreSQL persistence: orders, ledger, audit, transactional outbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+shinrai-audit = { workspace = true }
+shinrai-instruments = { workspace = true }
+shinrai-ledger = { workspace = true }
+shinrai-money = { workspace = true }
+shinrai-orders = { workspace = true }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring",
+    "postgres",
+    "migrate",
+    "json",
+    "macros",
+] }
+tokio = { workspace = true }
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { workspace = true }
