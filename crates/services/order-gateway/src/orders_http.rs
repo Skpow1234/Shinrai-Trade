@@ -110,10 +110,12 @@ pub async fn post_order(
         Ok(SubmitOutcome::Created(order) | SubmitOutcome::Duplicate(order)) => {
             state.metrics.record_accepted();
             record_fill_mark(&state, &order);
+            state.maybe_persist(Some(&order)).await;
             (StatusCode::OK, Json(order_json(&state, &order))).into_response()
         }
         Err(PaperError::Risk(reason)) => {
             state.metrics.record_risk_rejected();
+            state.maybe_persist(None).await;
             risk_rejected(reason.code())
         }
         Err(PaperError::Instrument(_) | PaperError::Order(_)) => bad_request("invalid_order"),
@@ -223,6 +225,7 @@ pub async fn post_cancel(
             }
         }
     };
+    state.maybe_persist(Some(&canceled)).await;
     (StatusCode::OK, Json(order_json(&state, &canceled))).into_response()
 }
 

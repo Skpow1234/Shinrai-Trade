@@ -16,9 +16,11 @@ use shinrai_instruments::{phase1_master, InstrumentMaster};
 use shinrai_ledger::AccountId;
 use shinrai_md_fanout::{FanoutError, SubjectId, TokenAuth, TokenTtl};
 use shinrai_money::{Currency, Money};
+use shinrai_orders::Order;
 use shinrai_paper::PaperEngine;
 use shinrai_portfolio::MarkStore;
 use shinrai_risk::{RiskEngine, RiskLimits};
+use shinrai_store::StorePool;
 
 /// Coarse gateway counters for local ops (not billing-grade).
 #[derive(Debug, Default)]
@@ -67,6 +69,10 @@ pub struct AppState {
     pub(crate) marks: Arc<Mutex<MarkStore>>,
     pub(crate) md_base_url: Option<String>,
     pub(crate) md_token: Option<String>,
+    /// Optional Postgres dual-write (set when `SHINRAI_DATABASE_URL` is configured).
+    pub(crate) store: Option<StorePool>,
+    /// Highest audit `seq` successfully dual-written (watermark).
+    pub(crate) audit_persisted_seq: Arc<AtomicU64>,
 }
 
 /// Process configuration (tokens / secrets are not displayed).
@@ -192,6 +198,47 @@ impl AppState {
             marks: Arc::new(Mutex::new(marks)),
             md_base_url: config.md_base_url.clone(),
             md_token: config.md_token.clone(),
+            store: None,
+            audit_persisted_seq: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Attaches a Postgres pool for fail-soft dual-write after trading mutations.
+    pub fn attach_store(&mut self, pool: StorePool) {
+        self.store = Some(pool);
+    }
+
+    /// Dual-writes bootstrap ledger/audit (deposits) after `attach_store`.
+    pub async fn persist_bootstrap(&self) {
+        self.maybe_persist(None).await;
+    }
+
+    /// Best-effort dual-write of order (if any), full ledger journal, and new audit rows.
+    ///
+    /// In-memory state is already committed; store failures are logged only.
+    pub async fn maybe_persist(&self, order: Option<&Order>) {
+        let Some(pool) = &self.store else {
+            return;
+        };
+        let after = self.audit_persisted_seq.load(Ordering::Acquire);
+        let batch = {
+            let engine = lock_engine(self);
+            crate::persist::collect_batch(&engine, order, after)
+        };
+        let max_seq = batch
+            .audit
+            .iter()
+            .map(shinrai_audit::AuditRecord::seq)
+            .max();
+        match crate::persist::write_batch(pool, &batch).await {
+            Ok(()) => {
+                if let Some(seq) = max_seq {
+                    self.audit_persisted_seq.fetch_max(seq, Ordering::Release);
+                }
+            }
+            Err(err) => {
+                eprintln!("shinrai-order-gateway: dual-write failed: {err}");
+            }
         }
     }
 
@@ -205,6 +252,20 @@ impl AppState {
             vec![(account, deposit_major)],
             TokenTtl::default(),
         ))
+    }
+
+    /// Test helper with dual-write to Postgres (caller migrates the pool).
+    pub async fn for_test_with_store(
+        token: &str,
+        subject: &str,
+        account: u64,
+        deposit_major: i64,
+        pool: StorePool,
+    ) -> Self {
+        let mut state = Self::for_test(token, subject, account, deposit_major);
+        state.attach_store(pool);
+        state.persist_bootstrap().await;
+        state
     }
 
     /// Test helper with MD gateway URL for live portfolio marks.

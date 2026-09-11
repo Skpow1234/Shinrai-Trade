@@ -8,7 +8,7 @@ use shinrai_orders::OrderId;
 
 use crate::error::StoreError;
 
-/// Inserts one audit row (append-only; conflict on seq is an error).
+/// Inserts one audit row (append-only; duplicate `seq` is ignored).
 ///
 /// # Errors
 ///
@@ -19,6 +19,7 @@ pub async fn insert_audit_record(pool: &PgPool, record: &AuditRecord) -> Result<
         r"
         INSERT INTO audit_records (seq, at_unix, account_id, order_id, kind, detail)
         VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (seq) DO NOTHING
         ",
     )
     .bind(i64::try_from(record.seq()).unwrap_or(i64::MAX))
