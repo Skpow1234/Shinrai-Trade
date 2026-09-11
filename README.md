@@ -32,6 +32,8 @@ Shinrai-Trade/
 ├── crates/protocols/       # Coinbase adapter + client fanout (no sockets in fanout)
 ├── crates/services/        # market-data-gateway, order-gateway (Axum binaries)
 ├── crates/testing/         # exchange simulator
+├── compose.yaml            # optional Postgres for future durable store
+├── .env.example            # SHINRAI_DATABASE_URL and related placeholders
 └── .github/workflows/ci.yml
 ```
 
@@ -56,6 +58,37 @@ Shinrai-Trade/
 
 - [Rustup](https://rustup.rs/). Opening the repo installs **1.90.0** plus `clippy` and `rustfmt` from `rust-toolchain.toml`.
 - Optional WebSocket clients for the demo: [`websocat`](https://github.com/vi/websocat) (`cargo install websocat`) or `npx wscat`.
+- Optional [Docker](https://docs.docker.com/get-docker/) / Docker Compose for local PostgreSQL (Phase 3.5+). **Not required** for `cargo test --workspace` today — paper trading is still in-memory.
+
+## PostgreSQL
+
+Dev Postgres for the future durable OMS / ledger store. Domain crates stay free of Docker; compose only runs the database.
+
+```bash
+# Start (healthcheck: pg_isready)
+docker compose up -d postgres
+
+# Connection string (same as `.env.example`)
+# postgres://shinrai:shinrai@127.0.0.1:5432/shinrai
+
+docker compose ps
+docker compose down       # stop
+docker compose down -v    # stop and delete the data volume
+```
+
+Copy env placeholders:
+
+```bash
+cp .env.example .env
+```
+
+| Variable | Meaning |
+|---|---|
+| `SHINRAI_DATABASE_URL` | Postgres URL (dev default matches `compose.yaml`) |
+| `SHINRAI_DB_POOL_SIZE` | Connection pool size (used when a store crate lands) |
+| `SHINRAI_RUN_MIGRATIONS` | `1` to apply migrations on process start (dev only) |
+
+CI still runs `cargo test --workspace` **without** Postgres. A separate `test-db` job will be added when the store crate exists.
 
 ## Build
 

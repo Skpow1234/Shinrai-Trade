@@ -10,6 +10,11 @@
 .DS_Store
 Thumbs.db
 
+# Local secrets / env (keep `.env.example` tracked)
+.env
+.env.local
+.env.*.local
+
 # Local / private docs
 .cursorrules
 docs/design.md

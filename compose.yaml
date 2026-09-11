@@ -1,0 +1,33 @@
+# Dev backing services for Phase 3.5+ (Postgres).
+# Domain / gateway unit tests do not need this — only future durable store work.
+#
+#   docker compose up -d postgres
+#   docker compose down          # stop
+#   docker compose down -v       # stop and wipe data volume
+#
+# Connection URL (matches .env.example):
+#   postgres://shinrai:shinrai@127.0.0.1:5432/shinrai
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: shinrai-postgres
+    environment:
+      POSTGRES_USER: shinrai
+      POSTGRES_PASSWORD: shinrai
+      POSTGRES_DB: shinrai
+    ports:
+      - "5432:5432"
+    volumes:
+      - shinrai_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shinrai -d shinrai"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  shinrai_pg:
+    name: shinrai_pg
