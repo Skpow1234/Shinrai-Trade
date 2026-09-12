@@ -218,6 +218,7 @@ Pre-trade risk runs before the OMS. Insufficient buying power returns **422** wi
 | `SHINRAI_OG_MARKS` | Bootstrap marks `SYMBOL:price_scaled,...` |
 | `SHINRAI_OG_MD_URL` | MD gateway base URL for `use_live_marks=1` on portfolio |
 | `SHINRAI_OG_MD_TOKEN` | Access token when calling the MD gateway |
+| `SHINRAI_OG_STUCK_AGE_SECS` | Pending OMS age before “stuck” (default `5`) |
 
 Additional authenticated routes:
 
@@ -236,10 +237,17 @@ curl "http://127.0.0.1:8081/v1/audit?token=dev"
 curl "http://127.0.0.1:8081/v1/reconciliation?token=dev"
 ```
 
-Unauthenticated ops counters (local only):
+Unauthenticated local ops (do not expose publicly):
 
 ```bash
+# Counters + OMS status histogram + stuck pending + ledger/recon health
 curl http://127.0.0.1:8081/v1/metrics
+
+# Stuck PendingNew / PendingCancel / PendingReplace
+curl "http://127.0.0.1:8081/v1/ops/stuck-orders?max_age_secs=5"
+
+# Minimal HTML dashboard (polls /v1/metrics)
+open http://127.0.0.1:8081/v1/ops   # or browse to that URL
 ```
 
 ## Test
