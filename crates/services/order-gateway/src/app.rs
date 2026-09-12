@@ -29,6 +29,9 @@ pub struct GatewayMetrics {
     orders_submitted: AtomicU64,
     orders_accepted: AtomicU64,
     orders_risk_rejected: AtomicU64,
+    orders_canceled: AtomicU64,
+    dual_write_failures: AtomicU64,
+    risk_reject_codes: Mutex<HashMap<String, u64>>,
 }
 
 impl GatewayMetrics {
@@ -47,13 +50,41 @@ impl GatewayMetrics {
         self.orders_risk_rejected.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// JSON snapshot for `GET /v1/metrics`.
+    /// Records a risk rejection with a stable reason code.
+    pub fn record_risk_rejected_code(&self, code: &str) {
+        self.record_risk_rejected();
+        let mut map = self
+            .risk_reject_codes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *map.entry(code.to_owned()).or_insert(0) += 1;
+    }
+
+    /// Records a cancel that reached the OMS path.
+    pub fn record_canceled(&self) {
+        self.orders_canceled.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records a fail-soft dual-write error.
+    pub fn record_dual_write_failure(&self) {
+        self.dual_write_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// JSON snapshot of atomic counters (no OMS lock).
     #[must_use]
     pub fn snapshot(&self) -> Value {
+        let risk_by_code = self
+            .risk_reject_codes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         json!({
             "orders_submitted": self.orders_submitted.load(Ordering::Relaxed),
             "orders_accepted": self.orders_accepted.load(Ordering::Relaxed),
             "orders_risk_rejected": self.orders_risk_rejected.load(Ordering::Relaxed),
+            "orders_canceled": self.orders_canceled.load(Ordering::Relaxed),
+            "dual_write_failures": self.dual_write_failures.load(Ordering::Relaxed),
+            "risk_rejects_by_code": risk_by_code,
         })
     }
 }
@@ -73,6 +104,8 @@ pub struct AppState {
     pub(crate) store: Option<StorePool>,
     /// Highest audit `seq` successfully dual-written (watermark).
     pub(crate) audit_persisted_seq: Arc<AtomicU64>,
+    /// Stuck pending age threshold (logical seconds).
+    pub(crate) stuck_age_secs: u64,
 }
 
 /// Process configuration (tokens / secrets are not displayed).
@@ -86,6 +119,7 @@ pub struct GatewayConfig {
     bootstrap_marks: Vec<(String, i64)>,
     md_base_url: Option<String>,
     md_token: Option<String>,
+    stuck_age_secs: u64,
 }
 
 impl GatewayConfig {
@@ -107,6 +141,7 @@ impl GatewayConfig {
             bootstrap_marks: Vec::new(),
             md_base_url: None,
             md_token: None,
+            stuck_age_secs: crate::ops::DEFAULT_STUCK_AGE_SECS,
         }
     }
 
@@ -129,6 +164,9 @@ impl GatewayConfig {
         cfg.md_token = std::env::var("SHINRAI_OG_MD_TOKEN")
             .ok()
             .filter(|s| !s.is_empty());
+        if let Some(age) = env_u64("SHINRAI_OG_STUCK_AGE_SECS") {
+            cfg.stuck_age_secs = age;
+        }
         cfg
     }
 }
@@ -144,6 +182,7 @@ impl core::fmt::Debug for GatewayConfig {
             .field("bootstrap_mark_entries", &self.bootstrap_marks.len())
             .field("md_base_url_configured", &self.md_base_url.is_some())
             .field("md_token_configured", &self.md_token.is_some())
+            .field("stuck_age_secs", &self.stuck_age_secs)
             .finish()
     }
 }
@@ -200,6 +239,7 @@ impl AppState {
             md_token: config.md_token.clone(),
             store: None,
             audit_persisted_seq: Arc::new(AtomicU64::new(0)),
+            stuck_age_secs: config.stuck_age_secs,
         }
     }
 
@@ -256,6 +296,7 @@ impl AppState {
                 }
             }
             Err(err) => {
+                self.metrics.record_dual_write_failure();
                 eprintln!("shinrai-order-gateway: dual-write failed: {err}");
             }
         }
@@ -305,6 +346,48 @@ impl AppState {
             .hydrate_from_store(pool)
             .await
             .expect("hydrate from store");
+        state
+    }
+
+    /// Test helper with a single stuck `PendingNew` order (no venue progress).
+    #[must_use]
+    pub fn for_test_with_stuck_pending(
+        token: &str,
+        subject: &str,
+        account: u64,
+        order_id: u64,
+    ) -> Self {
+        let state = Self::from_config(&GatewayConfig::new(
+            vec![(token.to_owned(), subject.to_owned())],
+            Vec::new(),
+            vec![(subject.to_owned(), account)],
+            Vec::new(),
+            TokenTtl::default(),
+        ));
+        let order = shinrai_orders::Order::restore(
+            shinrai_orders::OrderId::from_u64(order_id),
+            AccountId::from_u64(account),
+            shinrai_orders::ClientOrderId::new(format!("stuck-{order_id}")).expect("clid"),
+            shinrai_instruments::InstrumentId::from_u64(1),
+            shinrai_orders::Side::Buy,
+            shinrai_orders::OrderType::Limit,
+            shinrai_orders::OrderStatus::PendingNew,
+            shinrai_instruments::QuantityLots::from_lots(1),
+            shinrai_instruments::PriceTicks::from_scaled(100),
+            shinrai_instruments::QuantityLots::from_lots(0),
+            shinrai_instruments::QuantityLots::from_lots(1),
+            None,
+            None,
+            None,
+            Vec::new(),
+        )
+        .expect("order");
+        {
+            let mut engine = lock_engine(&state);
+            engine
+                .hydrate(Vec::new(), vec![order], Vec::new(), Vec::new())
+                .expect("hydrate stuck");
+        }
         state
     }
 
@@ -380,6 +463,11 @@ pub fn router(state: AppState) -> Router {
             get(crate::portfolio_http::get_reconciliation),
         )
         .route("/v1/metrics", get(crate::portfolio_http::get_metrics))
+        .route("/v1/ops", get(crate::ops_http::get_ops_dashboard))
+        .route(
+            "/v1/ops/stuck-orders",
+            get(crate::ops_http::get_stuck_orders),
+        )
         .with_state(state)
 }
 

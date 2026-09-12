@@ -9,6 +9,8 @@ mod app;
 mod auth_http;
 mod hydrate;
 mod md_client;
+mod ops;
+mod ops_http;
 mod orders_http;
 mod persist;
 mod portfolio_http;

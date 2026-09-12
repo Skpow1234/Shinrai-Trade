@@ -114,7 +114,7 @@ pub async fn post_order(
             (StatusCode::OK, Json(order_json(&state, &order))).into_response()
         }
         Err(PaperError::Risk(reason)) => {
-            state.metrics.record_risk_rejected();
+            state.metrics.record_risk_rejected_code(reason.code());
             state.maybe_persist(None).await;
             risk_rejected(reason.code())
         }
@@ -225,6 +225,7 @@ pub async fn post_cancel(
             }
         }
     };
+    state.metrics.record_canceled();
     state.maybe_persist(Some(&canceled)).await;
     (StatusCode::OK, Json(order_json(&state, &canceled))).into_response()
 }

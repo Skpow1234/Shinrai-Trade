@@ -162,9 +162,27 @@ pub async fn get_reconciliation(
         .into_response()
 }
 
-/// `GET /v1/metrics` — coarse counters (no auth; local ops only).
+/// `GET /v1/metrics` — counters + OMS ops snapshot (no auth; local ops only).
 pub async fn get_metrics(State(state): State<AppState>) -> Json<Value> {
-    Json(state.metrics.snapshot())
+    let now = crate::app::unix_logical_now();
+    let mut body = state.metrics.snapshot();
+    let engine = lock_engine(&state);
+    let ops = crate::ops::ops_snapshot(&engine, now, state.stuck_age_secs);
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("store_enabled".into(), json!(state.store.is_some()));
+        obj.insert(
+            "audit_persisted_seq".into(),
+            json!(state
+                .audit_persisted_seq
+                .load(std::sync::atomic::Ordering::Relaxed)),
+        );
+        if let Some(ops_obj) = ops.as_object() {
+            for (k, v) in ops_obj {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    Json(body)
 }
 
 fn authenticate(
