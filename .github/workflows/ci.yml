@@ -84,7 +84,7 @@ jobs:
       - name: Store integration tests
         run: cargo test -p shinrai-store --all-features -- --nocapture
       - name: Order-gateway dual-write tests
-        run: cargo test -p shinrai-order-gateway --all-features --test dual_write -- --nocapture
+        run: cargo test -p shinrai-order-gateway --all-features --test dual_write -- --nocapture --test-threads=1
 
   build:
     name: build

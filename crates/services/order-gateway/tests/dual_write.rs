@@ -1,6 +1,9 @@
 //! Dual-write integration: order gateway → `shinrai-store`.
 //!
 //! Skips when `SHINRAI_DATABASE_URL` / `DATABASE_URL` is unset.
+//!
+//! These tests share one Postgres; they serialize on an async mutex so order-id
+//! `1` upserts and bootstrap ledger keys do not race across tokio tests.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -11,7 +14,11 @@ use shinrai_orders::ClientOrderId;
 use shinrai_store::{
     connect_from_env, load_audit_after, load_order_by_client, migrate, StoreError,
 };
+use tokio::sync::Mutex;
 use tower::ServiceExt;
+
+/// Serializes dual-write tests that share the CI Postgres service.
+static DB_LOCK: Mutex<()> = Mutex::const_new(());
 
 fn database_configured() -> bool {
     std::env::var("SHINRAI_DATABASE_URL")
@@ -20,12 +27,20 @@ fn database_configured() -> bool {
         .is_some_and(|u| !u.trim().is_empty())
 }
 
+fn unique_suffix() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
 #[tokio::test]
 async fn submit_persists_order_and_audit() {
     if !database_configured() {
         eprintln!("skipping: set SHINRAI_DATABASE_URL to run dual-write tests");
         return;
     }
+    let _guard = DB_LOCK.lock().await;
 
     let pool = match connect_from_env().await {
         Ok(p) => p,
@@ -34,16 +49,13 @@ async fn submit_persists_order_and_audit() {
     };
     migrate(&pool).await.expect("migrate");
 
-    let state = AppState::for_test_with_store("dw-tok", "trader", 1, 10_000, pool.clone()).await;
+    // Distinct account avoids clobbering hydrate-test rows when suites overlap.
+    let account_raw = 101_u64;
+    let state =
+        AppState::for_test_with_store("dw-tok", "trader", account_raw, 10_000, pool.clone()).await;
     let app = router(state);
 
-    let clid = format!(
-        "dw-ord-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    );
+    let clid = format!("dw-ord-{}", unique_suffix());
 
     let resp = app
         .oneshot(
@@ -67,7 +79,7 @@ async fn submit_persists_order_and_audit() {
         .expect("resp");
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let account = AccountId::from_u64(1);
+    let account = AccountId::from_u64(account_raw);
     let client = ClientOrderId::new(&clid).expect("clid");
     let stored = load_order_by_client(&pool, account, &client)
         .await
@@ -88,6 +100,7 @@ async fn restart_hydrates_order_into_memory() {
         eprintln!("skipping: set SHINRAI_DATABASE_URL to run dual-write tests");
         return;
     }
+    let _guard = DB_LOCK.lock().await;
 
     let pool = match connect_from_env().await {
         Ok(p) => p,
@@ -96,17 +109,13 @@ async fn restart_hydrates_order_into_memory() {
     };
     migrate(&pool).await.expect("migrate");
 
-    let clid = format!(
-        "hy-ord-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    );
+    let account_raw = 202_u64;
+    let clid = format!("hy-ord-{}", unique_suffix());
 
     {
         let state =
-            AppState::for_test_with_store("hy-tok", "trader", 1, 10_000, pool.clone()).await;
+            AppState::for_test_with_store("hy-tok", "trader", account_raw, 10_000, pool.clone())
+                .await;
         let app = router(state);
         let resp = app
             .oneshot(
@@ -129,10 +138,18 @@ async fn restart_hydrates_order_into_memory() {
             .await
             .expect("resp");
         assert_eq!(resp.status(), StatusCode::OK);
+
+        let account = AccountId::from_u64(account_raw);
+        let client = ClientOrderId::new(&clid).expect("clid");
+        let stored = load_order_by_client(&pool, account, &client)
+            .await
+            .expect("load")
+            .expect("order must be dual-written before hydrate");
+        assert_eq!(stored.cum_qty.lots(), 3);
     }
 
     // Simulate process restart: empty deposits, load from Postgres.
-    let state = AppState::for_test_hydrate("hy-tok", "trader", 1, pool.clone()).await;
+    let state = AppState::for_test_hydrate("hy-tok", "trader", account_raw, pool.clone()).await;
     let app = router(state);
     let list = app
         .oneshot(

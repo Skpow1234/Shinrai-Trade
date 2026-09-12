@@ -136,10 +136,7 @@ impl PaperEngine {
 
     /// Venue snapshot for one order (reconciliation).
     #[must_use]
-    pub fn venue_order(
-        &self,
-        order_id: OrderId,
-    ) -> Option<shinrai_execution::VenueOrderSnapshot> {
+    pub fn venue_order(&self, order_id: OrderId) -> Option<shinrai_execution::VenueOrderSnapshot> {
         self.venue.venue_order(order_id)
     }
 

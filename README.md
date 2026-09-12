@@ -98,7 +98,7 @@ SHINRAI_DATABASE_URL=postgres://shinrai:shinrai@127.0.0.1:5432/shinrai \
   cargo test -p shinrai-store --all-features
 
 SHINRAI_DATABASE_URL=postgres://shinrai:shinrai@127.0.0.1:5432/shinrai \
-  cargo test -p shinrai-order-gateway --all-features --test dual_write
+  cargo test -p shinrai-order-gateway --all-features --test dual_write -- --test-threads=1
 ```
 
 CI matrix `cargo test --workspace` stays host-only; a dedicated **`test-db`** job runs store + OG dual-write tests against a Postgres service.

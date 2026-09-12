@@ -246,62 +246,63 @@ pub async fn insert_ledger_entry(
 ) -> Result<i64, StoreError> {
     let mut tx = pool.begin().await?;
 
-    let existing: Option<(i64,)> =
-        sqlx::query_as("SELECT id FROM ledger_entries WHERE idempotency_key = $1")
-            .bind(&snap.idempotency_key)
-            .fetch_optional(&mut *tx)
-            .await?;
-    if let Some((id,)) = existing {
-        tx.commit().await?;
-        return Ok(id);
-    }
-
-    let (entry_id,): (i64,) = sqlx::query_as(
+    let inserted: Option<(i64,)> = sqlx::query_as(
         r"
         INSERT INTO ledger_entries (idempotency_key, causation_id, correlation_id)
         VALUES ($1, $2, $3)
+        ON CONFLICT (idempotency_key) DO NOTHING
         RETURNING id
         ",
     )
     .bind(&snap.idempotency_key)
     .bind(snap.causation_id.as_deref())
     .bind(snap.correlation_id.as_deref())
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
 
-    for p in &snap.postings {
-        let direction = match p.direction {
-            Direction::Debit => "Debit",
-            Direction::Credit => "Credit",
-        };
-        sqlx::query(
-            r"
-            INSERT INTO ledger_postings (
-                entry_id, account_kind, account_id, currency_code, instrument_id,
-                direction, minor_units
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7)
-            ",
-        )
-        .bind(entry_id)
-        .bind(&p.account_kind)
-        .bind(
-            p.account_id
-                .map(|a| i64::try_from(a.get()).unwrap_or(i64::MAX)),
-        )
-        .bind(p.currency_code.as_deref())
-        .bind(
-            p.instrument_id
-                .map(|i| i64::try_from(i.get()).unwrap_or(i64::MAX)),
-        )
-        .bind(direction)
-        .bind(p.minor_units.to_string())
-        .execute(&mut *tx)
-        .await?;
-    }
+    let entry_id = if let Some((id,)) = inserted {
+        for p in &snap.postings {
+            let direction = match p.direction {
+                Direction::Debit => "Debit",
+                Direction::Credit => "Credit",
+            };
+            sqlx::query(
+                r"
+                INSERT INTO ledger_postings (
+                    entry_id, account_kind, account_id, currency_code, instrument_id,
+                    direction, minor_units
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+                ",
+            )
+            .bind(id)
+            .bind(&p.account_kind)
+            .bind(
+                p.account_id
+                    .map(|a| i64::try_from(a.get()).unwrap_or(i64::MAX)),
+            )
+            .bind(p.currency_code.as_deref())
+            .bind(
+                p.instrument_id
+                    .map(|i| i64::try_from(i.get()).unwrap_or(i64::MAX)),
+            )
+            .bind(direction)
+            .bind(p.minor_units.to_string())
+            .execute(&mut *tx)
+            .await?;
+        }
 
-    if let (Some(topic), Some(payload)) = (outbox_topic, outbox_payload) {
-        outbox::insert_outbox_tx(&mut tx, topic, &payload).await?;
-    }
+        if let (Some(topic), Some(payload)) = (outbox_topic, outbox_payload) {
+            outbox::insert_outbox_tx(&mut tx, topic, &payload).await?;
+        }
+        id
+    } else {
+        let (id,): (i64,) =
+            sqlx::query_as("SELECT id FROM ledger_entries WHERE idempotency_key = $1")
+                .bind(&snap.idempotency_key)
+                .fetch_one(&mut *tx)
+                .await?;
+        id
+    };
 
     tx.commit().await?;
     Ok(entry_id)
