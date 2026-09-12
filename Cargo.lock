@@ -1571,8 +1571,17 @@ dependencies = [
 name = "shinrai-exchange-simulator"
 version = "0.1.0"
 dependencies = [
+ "shinrai-execution",
  "shinrai-instruments",
  "shinrai-ledger",
+ "shinrai-orders",
+]
+
+[[package]]
+name = "shinrai-execution"
+version = "0.1.0"
+dependencies = [
+ "shinrai-instruments",
  "shinrai-orders",
 ]
 
@@ -1648,6 +1657,7 @@ dependencies = [
  "serde_json",
  "shinrai-audit",
  "shinrai-exchange-simulator",
+ "shinrai-execution",
  "shinrai-instruments",
  "shinrai-ledger",
  "shinrai-md-fanout",
@@ -1677,6 +1687,7 @@ dependencies = [
  "proptest",
  "shinrai-audit",
  "shinrai-exchange-simulator",
+ "shinrai-execution",
  "shinrai-instruments",
  "shinrai-ledger",
  "shinrai-money",

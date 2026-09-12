@@ -1,6 +1,6 @@
 [package]
-name = "shinrai-exchange-simulator"
-description = "Deterministic exchange simulator emitting OMS execution reports"
+name = "shinrai-execution"
+description = "Execution venue contract: reports, trait, paper sandbox broker"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,9 +10,5 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-shinrai-execution = { workspace = true }
 shinrai-instruments = { workspace = true }
 shinrai-orders = { workspace = true }
-
-[dev-dependencies]
-shinrai-ledger = { workspace = true }

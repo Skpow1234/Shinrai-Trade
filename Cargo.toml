@@ -8,6 +8,7 @@ members = [
     "crates/domain/market-data",
     "crates/protocols/market-data",
     "crates/protocols/md-fanout",
+    "crates/protocols/execution",
     "crates/testing/exchange-simulator",
     "crates/domain/paper",
     "crates/domain/risk",
@@ -25,6 +26,7 @@ default-members = [
     "crates/domain/market-data",
     "crates/protocols/market-data",
     "crates/protocols/md-fanout",
+    "crates/protocols/execution",
     "crates/testing/exchange-simulator",
     "crates/domain/paper",
     "crates/domain/risk",
@@ -49,6 +51,7 @@ shinrai-orders = { path = "crates/domain/orders", version = "0.1.0" }
 shinrai-market-data = { path = "crates/domain/market-data", version = "0.1.0" }
 shinrai-md-protocol = { path = "crates/protocols/market-data", version = "0.1.0" }
 shinrai-md-fanout = { path = "crates/protocols/md-fanout", version = "0.1.0" }
+shinrai-execution = { path = "crates/protocols/execution", version = "0.1.0" }
 shinrai-exchange-simulator = { path = "crates/testing/exchange-simulator", version = "0.1.0" }
 shinrai-paper = { path = "crates/domain/paper", version = "0.1.0" }
 shinrai-risk = { path = "crates/domain/risk", version = "0.1.0" }

@@ -53,8 +53,9 @@ Shinrai-Trade/
 | `shinrai-md-fanout` | Sessions, authn, bounded queues, heartbeats |
 | `shinrai-md-gateway` | `GET /health`, bars/trades/quotes, WebSocket |
 | `shinrai-order-gateway` | Orders, portfolio, audit, reconciliation, metrics |
+| `shinrai-execution` | Execution reports + `ExecutionVenue` trait; in-process sandbox broker |
 | `shinrai-store` | PostgreSQL: orders, ledger, audit, transactional outbox |
-| `shinrai-exchange-simulator` | Scripted venue for paper tests |
+| `shinrai-exchange-simulator` | Scripted venue for paper tests (`ExecutionVenue`) |
 
 ## Prerequisites
 
@@ -219,6 +220,7 @@ Pre-trade risk runs before the OMS. Insufficient buying power returns **422** wi
 | `SHINRAI_OG_MD_URL` | MD gateway base URL for `use_live_marks=1` on portfolio |
 | `SHINRAI_OG_MD_TOKEN` | Access token when calling the MD gateway |
 | `SHINRAI_OG_STUCK_AGE_SECS` | Pending OMS age before “stuck” (default `5`) |
+| `SHINRAI_OG_VENUE` | `sim` (default) or `sandbox` (in-process broker sandbox) |
 
 Additional authenticated routes:
 
