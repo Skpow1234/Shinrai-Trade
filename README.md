@@ -31,7 +31,7 @@ Shinrai-Trade/
 ├── crates/domain/           # money, instruments, ledger, orders, market-data, paper, risk
 ├── crates/protocols/       # Coinbase adapter + client fanout (no sockets in fanout)
 ├── crates/services/        # market-data-gateway, order-gateway (Axum binaries)
-├── crates/infrastructure/  # shinrai-store (Postgres persistence)
+├── crates/infrastructure/  # shinrai-store (Postgres), shinrai-telemetry (tracing/OTLP)
 ├── crates/testing/         # exchange simulator
 ├── compose.yaml            # optional Postgres for durable store
 ├── .env.example            # SHINRAI_DATABASE_URL and related placeholders
@@ -55,6 +55,7 @@ Shinrai-Trade/
 | `shinrai-order-gateway` | Orders, portfolio, audit, reconciliation, metrics |
 | `shinrai-execution` | Execution reports + `ExecutionVenue` trait; in-process sandbox broker |
 | `shinrai-store` | PostgreSQL: orders, ledger, audit, transactional outbox |
+| `shinrai-telemetry` | Process tracing + optional OTLP export (`SHINRAI_OTEL_ENDPOINT`) |
 | `shinrai-exchange-simulator` | Scripted venue for paper tests (`ExecutionVenue`) |
 
 ## Prerequisites
@@ -221,6 +222,10 @@ Pre-trade risk runs before the OMS. Insufficient buying power returns **422** wi
 | `SHINRAI_OG_MD_TOKEN` | Access token when calling the MD gateway |
 | `SHINRAI_OG_STUCK_AGE_SECS` | Pending OMS age before “stuck” (default `5`) |
 | `SHINRAI_OG_VENUE` | `sim` (default) or `sandbox` (in-process broker sandbox) |
+| `SHINRAI_LOG` | `tracing` filter (falls back to `RUST_LOG`, default `info`) |
+| `SHINRAI_OTEL_ENDPOINT` | OTLP/HTTP base URL (e.g. `http://127.0.0.1:4318`); also accepts `OTEL_EXPORTER_OTLP_ENDPOINT` |
+
+Order-path spans (`order.submit`, `order.cancel`) carry `account_id`, `client_order_id` / `order_id`, and `outcome`. HTTP requests get a `tower-http` trace layer. Without an OTLP endpoint, spans still appear on stderr via the fmt layer.
 
 Additional authenticated routes:
 

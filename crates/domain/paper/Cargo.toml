@@ -18,6 +18,7 @@ shinrai-money = { workspace = true }
 shinrai-orders = { workspace = true }
 shinrai-risk = { workspace = true }
 shinrai-audit = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
