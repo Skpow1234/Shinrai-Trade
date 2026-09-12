@@ -22,6 +22,7 @@ use shinrai_paper::{PaperEngine, VenueKind};
 use shinrai_portfolio::MarkStore;
 use shinrai_risk::{RiskEngine, RiskLimits};
 use shinrai_store::StorePool;
+use tower_http::trace::TraceLayer;
 
 /// Coarse gateway counters for local ops (not billing-grade).
 #[derive(Debug, Default)]
@@ -494,6 +495,7 @@ pub fn router(state: AppState) -> Router {
             "/v1/ops/stuck-orders",
             get(crate::ops_http::get_stuck_orders),
         )
+        .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 

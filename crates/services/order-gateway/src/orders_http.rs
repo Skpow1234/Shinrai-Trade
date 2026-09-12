@@ -10,6 +10,7 @@ use shinrai_instruments::{ExternalId, InstrumentId, PriceTicks, QuantityLots};
 use shinrai_md_fanout::Authenticator;
 use shinrai_orders::{ClientOrderId, Order, OrderId, Side, SubmitOutcome};
 use shinrai_paper::{PaperError, SubmitRequest};
+use tracing::{info_span, Instrument};
 
 use crate::app::{
     extract_bearer, lock_engine, record_fill_mark, resolve_account, unauthorized, AppState,
@@ -57,6 +58,7 @@ pub async fn list_orders(
 }
 
 /// `POST /v1/orders` — submit a paper limit buy.
+#[allow(clippy::too_many_lines)]
 pub async fn post_order(
     headers: HeaderMap,
     Query(auth): Query<AuthQuery>,
@@ -74,62 +76,110 @@ pub async fn post_order(
         Err(err) => return unauthorized(err),
     };
 
-    state.metrics.record_submit();
+    let span = info_span!(
+        "order.submit",
+        account_id = account.get(),
+        client_order_id = %body.client_order_id.trim(),
+        symbol = %body.symbol.trim(),
+        side = %body.side.trim(),
+        qty = body.qty,
+        price = body.price,
+        order_id = tracing::field::Empty,
+        outcome = tracing::field::Empty,
+    );
 
-    let Ok(client_order_id) = ClientOrderId::new(body.client_order_id.trim()) else {
-        return bad_request("invalid_client_order_id");
-    };
-    let side = match parse_side(&body.side) {
-        Ok(s) => s,
-        Err(code) => return bad_request(code),
-    };
-    if body.qty <= 0 || body.price <= 0 {
-        return bad_request("invalid_qty_or_price");
-    }
-    let instrument_id = match resolve_symbol(&state.master, body.symbol.trim()) {
-        Ok(id) => id,
-        Err(code) => return bad_request(code),
-    };
+    async move {
+        state.metrics.record_submit();
 
-    let req = SubmitRequest {
-        account_id: account,
-        client_order_id,
-        instrument_id,
-        side,
-        qty: QuantityLots::from_lots(body.qty),
-        price: PriceTicks::from_scaled(body.price),
-    };
-
-    let outcome = {
-        let mut engine = lock_engine(&state);
-        engine.set_logical_now(now);
-        engine.submit(&req)
-    };
-
-    match outcome {
-        Ok(SubmitOutcome::Created(order) | SubmitOutcome::Duplicate(order)) => {
-            state.metrics.record_accepted();
-            record_fill_mark(&state, &order);
-            state.maybe_persist(Some(&order)).await;
-            (StatusCode::OK, Json(order_json(&state, &order))).into_response()
+        let Ok(client_order_id) = ClientOrderId::new(body.client_order_id.trim()) else {
+            tracing::Span::current().record("outcome", "invalid_client_order_id");
+            return bad_request("invalid_client_order_id");
+        };
+        let side = match parse_side(&body.side) {
+            Ok(s) => s,
+            Err(code) => {
+                tracing::Span::current().record("outcome", code);
+                return bad_request(code);
+            }
+        };
+        if body.qty <= 0 || body.price <= 0 {
+            tracing::Span::current().record("outcome", "invalid_qty_or_price");
+            return bad_request("invalid_qty_or_price");
         }
-        Err(PaperError::Risk(reason)) => {
-            state.metrics.record_risk_rejected_code(reason.code());
-            state.maybe_persist(None).await;
-            risk_rejected(reason.code())
+        let instrument_id = match resolve_symbol(&state.master, body.symbol.trim()) {
+            Ok(id) => id,
+            Err(code) => {
+                tracing::Span::current().record("outcome", code);
+                return bad_request(code);
+            }
+        };
+
+        let req = SubmitRequest {
+            account_id: account,
+            client_order_id,
+            instrument_id,
+            side,
+            qty: QuantityLots::from_lots(body.qty),
+            price: PriceTicks::from_scaled(body.price),
+        };
+
+        let outcome = {
+            let mut engine = lock_engine(&state);
+            engine.set_logical_now(now);
+            engine.submit(&req)
+        };
+
+        match outcome {
+            Ok(SubmitOutcome::Created(order)) => {
+                let span = tracing::Span::current();
+                span.record("order_id", order.id().get());
+                span.record("outcome", "created");
+                state.metrics.record_accepted();
+                record_fill_mark(&state, &order);
+                state.maybe_persist(Some(&order)).await;
+                (StatusCode::OK, Json(order_json(&state, &order))).into_response()
+            }
+            Ok(SubmitOutcome::Duplicate(order)) => {
+                let span = tracing::Span::current();
+                span.record("order_id", order.id().get());
+                span.record("outcome", "duplicate");
+                state.metrics.record_accepted();
+                record_fill_mark(&state, &order);
+                state.maybe_persist(Some(&order)).await;
+                (StatusCode::OK, Json(order_json(&state, &order))).into_response()
+            }
+            Err(PaperError::Risk(reason)) => {
+                tracing::Span::current().record("outcome", reason.code());
+                state.metrics.record_risk_rejected_code(reason.code());
+                state.maybe_persist(None).await;
+                risk_rejected(reason.code())
+            }
+            Err(PaperError::Instrument(_) | PaperError::Order(_)) => {
+                tracing::Span::current().record("outcome", "invalid_order");
+                bad_request("invalid_order")
+            }
+            Err(PaperError::Ledger(_)) => {
+                tracing::Span::current().record("outcome", "ledger_error");
+                (
+                    StatusCode::CONFLICT,
+                    Json(json!({ "type": "error", "code": "ledger_error" })),
+                )
+                    .into_response()
+            }
+            Err(other) => {
+                tracing::Span::current().record("outcome", "internal");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        json!({ "type": "error", "code": "internal", "detail": other.to_string() }),
+                    ),
+                )
+                    .into_response()
+            }
         }
-        Err(PaperError::Instrument(_) | PaperError::Order(_)) => bad_request("invalid_order"),
-        Err(PaperError::Ledger(_)) => (
-            StatusCode::CONFLICT,
-            Json(json!({ "type": "error", "code": "ledger_error" })),
-        )
-            .into_response(),
-        Err(other) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "type": "error", "code": "internal", "detail": other.to_string() })),
-        )
-            .into_response(),
     }
+    .instrument(span)
+    .await
 }
 
 /// `GET /v1/orders/:id`
@@ -200,34 +250,48 @@ pub async fn post_cancel(
         Err(err) => return unauthorized(err),
     };
 
-    let order_id = OrderId::from_u64(id);
-    let canceled = {
-        let mut engine = lock_engine(&state);
-        let existing = match engine.orders().get(order_id) {
-            Ok(o) if o.account_id() == account => o.clone(),
-            Ok(_) | Err(_) => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({ "type": "error", "code": "not_found" })),
-                )
-                    .into_response();
+    let span = info_span!(
+        "order.cancel",
+        account_id = account.get(),
+        order_id = id,
+        outcome = tracing::field::Empty,
+    );
+
+    async move {
+        let order_id = OrderId::from_u64(id);
+        let canceled = {
+            let mut engine = lock_engine(&state);
+            let existing = match engine.orders().get(order_id) {
+                Ok(o) if o.account_id() == account => o.clone(),
+                Ok(_) | Err(_) => {
+                    tracing::Span::current().record("outcome", "not_found");
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({ "type": "error", "code": "not_found" })),
+                    )
+                        .into_response();
+                }
+            };
+            match engine.cancel(order_id) {
+                Ok(o) => o,
+                Err(PaperError::Order(_)) => existing,
+                Err(other) => {
+                    tracing::Span::current().record("outcome", "cancel_failed");
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(json!({ "type": "error", "code": "cancel_failed", "detail": other.to_string() })),
+                    )
+                        .into_response();
+                }
             }
         };
-        match engine.cancel(order_id) {
-            Ok(o) => o,
-            Err(PaperError::Order(_)) => existing,
-            Err(other) => {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(json!({ "type": "error", "code": "cancel_failed", "detail": other.to_string() })),
-                )
-                    .into_response();
-            }
-        }
-    };
-    state.metrics.record_canceled();
-    state.maybe_persist(Some(&canceled)).await;
-    (StatusCode::OK, Json(order_json(&state, &canceled))).into_response()
+        tracing::Span::current().record("outcome", "canceled");
+        state.metrics.record_canceled();
+        state.maybe_persist(Some(&canceled)).await;
+        (StatusCode::OK, Json(order_json(&state, &canceled))).into_response()
+    }
+    .instrument(span)
+    .await
 }
 
 fn order_json(state: &AppState, order: &Order) -> Value {

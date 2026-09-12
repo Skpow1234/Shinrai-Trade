@@ -216,6 +216,16 @@ impl PaperEngine {
     /// reject the OMS order and leave cash unchanged.
     #[allow(clippy::too_many_lines)]
     pub fn submit(&mut self, req: &SubmitRequest) -> Result<SubmitOutcome, PaperError> {
+        tracing::debug!(
+            account_id = req.account_id.get(),
+            client_order_id = %req.client_order_id.as_str(),
+            instrument_id = req.instrument_id.get(),
+            side = ?req.side,
+            qty = req.qty.lots(),
+            price = req.price.scaled(),
+            "paper.submit"
+        );
+
         self.audit.record(
             self.logical_now,
             Some(req.account_id),
@@ -372,6 +382,7 @@ impl PaperEngine {
     ///
     /// Returns OMS or venue errors.
     pub fn cancel(&mut self, order_id: OrderId) -> Result<Order, PaperError> {
+        tracing::debug!(order_id = order_id.get(), "paper.cancel");
         self.orders
             .apply_event(order_id, OrderEvent::CancelRequested)?;
         self.venue.cancel(order_id)?;

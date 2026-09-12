@@ -7,6 +7,8 @@ use shinrai_store::{connect_from_env, migrate, StoreError};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let _telemetry = shinrai_telemetry::init("shinrai-order-gateway")?;
+
     let bind = env::var("SHINRAI_OG_BIND").unwrap_or_else(|_| "127.0.0.1:8081".into());
     let config = GatewayConfig::from_env();
     let mut state = AppState::from_config(&config);
