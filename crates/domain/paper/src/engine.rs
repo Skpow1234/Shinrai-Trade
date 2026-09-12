@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 
 use shinrai_audit::{AuditKind, AuditLog};
-use shinrai_exchange_simulator::{FaultConfig, NewSimOrder, SimExchange};
+use shinrai_exchange_simulator::FaultConfig;
+use shinrai_execution::{NewVenueOrder, SandboxConfig};
 use shinrai_instruments::InstrumentMaster;
 use shinrai_ledger::{AccountId, BalancedEntry, LedgerError, PaperBook};
 use shinrai_money::Money;
@@ -15,6 +16,7 @@ use shinrai_risk::{RiskContext, RiskDecision, RiskEngine, RiskOrderIntent};
 
 use crate::error::PaperError;
 use crate::notional::notional;
+use crate::venue::{VenueHandle, VenueKind};
 
 /// Client request to submit a paper order.
 #[derive(Debug, Clone)]
@@ -39,7 +41,7 @@ pub struct PaperEngine {
     master: InstrumentMaster,
     book: PaperBook,
     orders: OrderStore,
-    sim: SimExchange,
+    venue: VenueHandle,
     remaining_cash_reserve: HashMap<OrderId, Money>,
     remaining_position_reserve: HashMap<OrderId, i64>,
     risk: RiskEngine,
@@ -54,20 +56,42 @@ impl PaperEngine {
         Self::with_risk(master, faults, RiskEngine::default())
     }
 
-    /// Creates a session with an explicit risk engine.
+    /// Creates a session with an explicit risk engine (sim venue).
     #[must_use]
     pub fn with_risk(master: InstrumentMaster, faults: FaultConfig, risk: RiskEngine) -> Self {
         Self {
             master,
             book: PaperBook::new(),
             orders: OrderStore::new(),
-            sim: SimExchange::new(faults),
+            venue: VenueHandle::sim(faults),
             remaining_cash_reserve: HashMap::new(),
             remaining_position_reserve: HashMap::new(),
             risk,
             audit: AuditLog::new(),
             logical_now: 0,
         }
+    }
+
+    /// Creates a session backed by the in-process broker sandbox.
+    #[must_use]
+    pub fn with_sandbox(master: InstrumentMaster, config: SandboxConfig, risk: RiskEngine) -> Self {
+        Self {
+            master,
+            book: PaperBook::new(),
+            orders: OrderStore::new(),
+            venue: VenueHandle::sandbox(config),
+            remaining_cash_reserve: HashMap::new(),
+            remaining_position_reserve: HashMap::new(),
+            risk,
+            audit: AuditLog::new(),
+            logical_now: 0,
+        }
+    }
+
+    /// Which venue backs this engine.
+    #[must_use]
+    pub const fn venue_kind(&self) -> VenueKind {
+        self.venue.kind()
     }
 
     /// Instrument master.
@@ -99,10 +123,30 @@ impl PaperEngine {
         &self.orders
     }
 
-    /// Simulated venue.
+    /// Simulated venue (when [`VenueKind::Sim`]).
     #[must_use]
-    pub const fn sim(&self) -> &SimExchange {
-        &self.sim
+    pub fn sim(&self) -> Option<&shinrai_exchange_simulator::SimExchange> {
+        self.venue.as_sim()
+    }
+
+    /// Mutable sandbox venue (when [`VenueKind::Sandbox`]) for injecting reports.
+    pub fn sandbox_mut(&mut self) -> Option<&mut shinrai_execution::SandboxBroker> {
+        self.venue.as_sandbox_mut()
+    }
+
+    /// Venue snapshot for one order (reconciliation).
+    #[must_use]
+    pub fn venue_order(
+        &self,
+        order_id: OrderId,
+    ) -> Option<shinrai_execution::VenueOrderSnapshot> {
+        self.venue.venue_order(order_id)
+    }
+
+    /// All venue-tracked orders (reconciliation).
+    #[must_use]
+    pub fn venue_orders(&self) -> Vec<shinrai_execution::VenueOrderSnapshot> {
+        self.venue.venue_orders()
     }
 
     /// Pre-trade risk engine.
@@ -305,7 +349,7 @@ impl PaperEngine {
                     }
                 }
 
-                self.sim.submit(&NewSimOrder {
+                self.venue.submit(&NewVenueOrder {
                     order_id,
                     instrument_id: req.instrument_id,
                     side: req.side,
@@ -333,7 +377,7 @@ impl PaperEngine {
     pub fn cancel(&mut self, order_id: OrderId) -> Result<Order, PaperError> {
         self.orders
             .apply_event(order_id, OrderEvent::CancelRequested)?;
-        self.sim.cancel(order_id)?;
+        self.venue.cancel(order_id)?;
         self.drain()?;
         Ok(self.orders.get(order_id)?.clone())
     }
@@ -344,7 +388,7 @@ impl PaperEngine {
     ///
     /// Returns OMS / ledger errors from draining.
     pub fn tick(&mut self, ticks: u64) -> Result<(), PaperError> {
-        self.sim.tick(ticks);
+        self.venue.tick(ticks);
         self.drain()
     }
 
@@ -355,7 +399,7 @@ impl PaperEngine {
     /// Returns mapping, OMS, or settle errors. Illegal transitions and duplicate
     /// execs are ignored (defined race / idempotency policy).
     pub fn drain(&mut self) -> Result<(), PaperError> {
-        let reports = self.sim.poll();
+        let reports = self.venue.poll();
         for report in reports {
             let exec_label = report.exec_type().name().to_owned();
             self.audit.record(
@@ -716,6 +760,34 @@ mod tests {
             .expect_err("no stock");
         assert!(matches!(err, PaperError::Risk(_)));
         assert!(engine.orders().is_empty());
+    }
+
+    #[test]
+    fn sandbox_venue_fills_like_happy_path() {
+        let mut engine = PaperEngine::with_sandbox(
+            phase1_master(),
+            shinrai_execution::SandboxConfig::happy_path(),
+            RiskEngine::new(shinrai_risk::RiskLimits::demo()),
+        );
+        assert_eq!(engine.venue_kind(), VenueKind::Sandbox);
+        let acc = AccountId::from_u64(1);
+        engine
+            .deposit(
+                acc,
+                Money::from_major(10_000, Currency::usd()).expect("d"),
+                "dep",
+            )
+            .expect("dep");
+        let outcome = engine
+            .submit(&aapl_order(acc, "sbx-1", Side::Buy, 5, 10_000))
+            .expect("submit");
+        let order = match outcome {
+            SubmitOutcome::Created(o) => o,
+            SubmitOutcome::Duplicate(_) => panic!("created"),
+        };
+        assert_eq!(order.status(), OrderStatus::Filled);
+        assert_eq!(engine.book().position(acc, aapl().id()), 5);
+        assert!(engine.reconcile().ok);
     }
 
     #[test]

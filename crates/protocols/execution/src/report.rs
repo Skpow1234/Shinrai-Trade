@@ -5,7 +5,7 @@ use core::fmt;
 use shinrai_instruments::{PriceTicks, QuantityLots};
 use shinrai_orders::{ExecId, OrderEvent, OrderId, VenueOrderId};
 
-use crate::error::SimError;
+use crate::error::ExecutionError;
 
 /// Venue session identifier (`venue + session` for exec uniqueness).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -72,21 +72,13 @@ impl ExecType {
 /// One venue execution report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionReport {
-    /// Internal OMS order id (sim convenience).
     order_id: OrderId,
-    /// Venue order id.
     venue_order_id: VenueOrderId,
-    /// Execution id (required for trades).
     exec_id: Option<ExecId>,
-    /// Report purpose.
     exec_type: ExecType,
-    /// Last fill or current working quantity (lots).
     qty: QuantityLots,
-    /// Last fill or limit price (ticks).
     price: PriceTicks,
-    /// Session that produced the report.
     session: SessionId,
-    /// Per-session sequence number (monotonic while connected).
     seq: u64,
 }
 
@@ -171,8 +163,8 @@ impl ExecutionReport {
     ///
     /// # Errors
     ///
-    /// Returns [`SimError::InvalidIdentifier`] if a trade is missing `exec_id`.
-    pub fn to_order_event(&self) -> Result<Option<OrderEvent>, SimError> {
+    /// Returns [`ExecutionError::InvalidIdentifier`] if a trade is missing `exec_id`.
+    pub fn to_order_event(&self) -> Result<Option<OrderEvent>, ExecutionError> {
         match &self.exec_type {
             ExecType::New => Ok(Some(OrderEvent::Accepted {
                 venue_order_id: self.venue_order_id.clone(),
@@ -181,7 +173,10 @@ impl ExecutionReport {
                 reason: reason.clone(),
             })),
             ExecType::Trade => {
-                let exec_id = self.exec_id.clone().ok_or(SimError::InvalidIdentifier)?;
+                let exec_id = self
+                    .exec_id
+                    .clone()
+                    .ok_or(ExecutionError::InvalidIdentifier)?;
                 Ok(Some(OrderEvent::Trade {
                     exec_id,
                     qty: self.qty,

@@ -3,28 +3,16 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use shinrai_instruments::{InstrumentId, PriceTicks, QuantityLots};
-use shinrai_orders::{ExecId, OrderId, Side, VenueOrderId};
+use shinrai_orders::{ExecId, OrderId, VenueOrderId};
 
 use crate::clock::VirtualClock;
 use crate::error::SimError;
 use crate::faults::{FaultConfig, FillPolicy};
 use crate::md::MdTick;
-use crate::report::{ExecType, ExecutionReport, SessionId};
-
-/// New order accepted by the simulator.
-#[derive(Debug, Clone)]
-pub struct NewSimOrder {
-    /// Internal OMS order id.
-    pub order_id: OrderId,
-    /// Instrument.
-    pub instrument_id: InstrumentId,
-    /// Side.
-    pub side: Side,
-    /// Remaining / total quantity.
-    pub qty: QuantityLots,
-    /// Limit price.
-    pub price: PriceTicks,
-}
+use shinrai_execution::{
+    ExecType, ExecutionError, ExecutionReport, ExecutionVenue, NewVenueOrder, SessionId,
+    VenueOrderSnapshot,
+};
 
 #[derive(Debug, Clone)]
 struct SimOrder {
@@ -53,19 +41,6 @@ pub struct SimExchange {
     scheduled: BTreeMap<u64, Vec<ExecutionReport>>,
     outbox: VecDeque<ExecutionReport>,
     md_seq: HashMap<InstrumentId, u64>,
-}
-
-/// Read-only view of a working order at the simulated venue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VenueOrderSnapshot {
-    /// Internal OMS order id.
-    pub order_id: OrderId,
-    /// Original order quantity in lots.
-    pub order_qty: i64,
-    /// Cumulative filled quantity at the venue.
-    pub cum_qty: i64,
-    /// Cancel requested at the venue.
-    pub canceled: bool,
 }
 
 impl Default for SimExchange {
@@ -134,7 +109,7 @@ impl SimExchange {
     /// # Errors
     ///
     /// Returns [`SimError::Disconnected`] or identifier errors.
-    pub fn submit(&mut self, order: &NewSimOrder) -> Result<(), SimError> {
+    pub fn submit(&mut self, order: &NewVenueOrder) -> Result<(), SimError> {
         if !self.connected {
             return Err(SimError::Disconnected);
         }
@@ -446,17 +421,56 @@ impl SimExchange {
     }
 }
 
+impl From<SimError> for ExecutionError {
+    fn from(value: SimError) -> Self {
+        match value {
+            SimError::Disconnected => Self::Disconnected,
+            SimError::UnknownOrder { id } => Self::UnknownOrder { id },
+            SimError::InvalidState(msg) => Self::InvalidState(msg),
+            SimError::InvalidQuantity => Self::InvalidQuantity,
+            SimError::InvalidIdentifier => Self::InvalidIdentifier,
+        }
+    }
+}
+
+impl ExecutionVenue for SimExchange {
+    fn submit(&mut self, order: &NewVenueOrder) -> Result<(), ExecutionError> {
+        SimExchange::submit(self, order).map_err(Into::into)
+    }
+
+    fn cancel(&mut self, order_id: OrderId) -> Result<(), ExecutionError> {
+        SimExchange::cancel(self, order_id).map_err(Into::into)
+    }
+
+    fn poll(&mut self) -> Vec<ExecutionReport> {
+        SimExchange::poll(self)
+    }
+
+    fn tick(&mut self, ticks: u64) {
+        SimExchange::tick(self, ticks);
+    }
+
+    fn venue_order(&self, order_id: OrderId) -> Option<VenueOrderSnapshot> {
+        SimExchange::venue_order(self, order_id)
+    }
+
+    fn venue_orders(&self) -> Vec<VenueOrderSnapshot> {
+        SimExchange::venue_orders(self).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::report::stream_fingerprint;
+    use shinrai_execution::stream_fingerprint;
     use shinrai_ledger::AccountId;
     use shinrai_orders::{
-        ClientOrderId, CreateOrder, OrderError, OrderEvent, OrderStatus, OrderStore, SubmitOutcome,
+        ClientOrderId, CreateOrder, OrderError, OrderEvent, OrderStatus, OrderStore, Side,
+        SubmitOutcome,
     };
 
-    fn new_order(id: u64, qty: i64) -> NewSimOrder {
-        NewSimOrder {
+    fn new_order(id: u64, qty: i64) -> NewVenueOrder {
+        NewVenueOrder {
             order_id: OrderId::from_u64(id),
             instrument_id: InstrumentId::from_u64(1),
             side: Side::Buy,
@@ -502,7 +516,7 @@ mod tests {
             SubmitOutcome::Duplicate(_) => panic!("created"),
         };
         let oid = created.id();
-        sim.submit(&NewSimOrder {
+        sim.submit(&NewVenueOrder {
             order_id: oid,
             instrument_id: InstrumentId::from_u64(1),
             side: Side::Buy,
@@ -589,7 +603,7 @@ mod tests {
             SubmitOutcome::Duplicate(_) => panic!("created"),
         };
         let oid = created.id();
-        sim.submit(&NewSimOrder {
+        sim.submit(&NewVenueOrder {
             order_id: oid,
             instrument_id: InstrumentId::from_u64(1),
             side: Side::Buy,

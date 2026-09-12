@@ -58,7 +58,7 @@ impl PaperEngine {
 
         for order in self.orders().orders() {
             let id = order.id();
-            let venue = self.sim().venue_order(id);
+            let venue = self.venue_order(id);
             let oms_cum = order.cum_qty().lots();
 
             if let Some(v) = venue {
@@ -87,7 +87,7 @@ impl PaperEngine {
             }
         }
 
-        for v in self.sim().venue_orders() {
+        for v in self.venue_orders() {
             if self.orders().get(v.order_id).is_err() {
                 mismatches.push(ReconciliationMismatch {
                     kind: ReconciliationKind::VenueOrderUnknownToOms,

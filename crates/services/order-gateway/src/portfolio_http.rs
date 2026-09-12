@@ -171,6 +171,13 @@ pub async fn get_metrics(State(state): State<AppState>) -> Json<Value> {
     if let Some(obj) = body.as_object_mut() {
         obj.insert("store_enabled".into(), json!(state.store.is_some()));
         obj.insert(
+            "venue".into(),
+            json!(match engine.venue_kind() {
+                shinrai_paper::VenueKind::Sim => "sim",
+                shinrai_paper::VenueKind::Sandbox => "sandbox",
+            }),
+        );
+        obj.insert(
             "audit_persisted_seq".into(),
             json!(state
                 .audit_persisted_seq

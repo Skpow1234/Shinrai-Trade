@@ -12,12 +12,13 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use shinrai_exchange_simulator::FaultConfig;
+use shinrai_execution::SandboxConfig;
 use shinrai_instruments::{phase1_master, InstrumentMaster};
 use shinrai_ledger::AccountId;
 use shinrai_md_fanout::{FanoutError, SubjectId, TokenAuth, TokenTtl};
 use shinrai_money::{Currency, Money};
 use shinrai_orders::Order;
-use shinrai_paper::PaperEngine;
+use shinrai_paper::{PaperEngine, VenueKind};
 use shinrai_portfolio::MarkStore;
 use shinrai_risk::{RiskEngine, RiskLimits};
 use shinrai_store::StorePool;
@@ -120,6 +121,7 @@ pub struct GatewayConfig {
     md_base_url: Option<String>,
     md_token: Option<String>,
     stuck_age_secs: u64,
+    venue_kind: VenueKind,
 }
 
 impl GatewayConfig {
@@ -142,6 +144,7 @@ impl GatewayConfig {
             md_base_url: None,
             md_token: None,
             stuck_age_secs: crate::ops::DEFAULT_STUCK_AGE_SECS,
+            venue_kind: VenueKind::Sim,
         }
     }
 
@@ -167,6 +170,7 @@ impl GatewayConfig {
         if let Some(age) = env_u64("SHINRAI_OG_STUCK_AGE_SECS") {
             cfg.stuck_age_secs = age;
         }
+        cfg.venue_kind = parse_venue_kind(std::env::var("SHINRAI_OG_VENUE").ok().as_deref());
         cfg
     }
 }
@@ -183,6 +187,7 @@ impl core::fmt::Debug for GatewayConfig {
             .field("md_base_url_configured", &self.md_base_url.is_some())
             .field("md_token_configured", &self.md_token.is_some())
             .field("stuck_age_secs", &self.stuck_age_secs)
+            .field("venue_kind", &self.venue_kind)
             .finish()
     }
 }
@@ -206,11 +211,18 @@ impl AppState {
             .collect();
 
         let master = phase1_master();
-        let mut engine = PaperEngine::with_risk(
-            master.clone(),
-            FaultConfig::happy_path(),
-            RiskEngine::new(RiskLimits::demo()),
-        );
+        let mut engine = match config.venue_kind {
+            VenueKind::Sim => PaperEngine::with_risk(
+                master.clone(),
+                FaultConfig::happy_path(),
+                RiskEngine::new(RiskLimits::demo()),
+            ),
+            VenueKind::Sandbox => PaperEngine::with_sandbox(
+                master.clone(),
+                SandboxConfig::happy_path(),
+                RiskEngine::new(RiskLimits::demo()),
+            ),
+        };
 
         for (account_raw, major) in &config.deposits {
             let account = AccountId::from_u64(*account_raw);
@@ -312,6 +324,20 @@ impl AppState {
             vec![(account, deposit_major)],
             TokenTtl::default(),
         ))
+    }
+
+    /// Test helper with sandbox venue (ack + auto-fill).
+    #[must_use]
+    pub fn for_test_sandbox(token: &str, subject: &str, account: u64, deposit_major: i64) -> Self {
+        let mut cfg = GatewayConfig::new(
+            vec![(token.to_owned(), subject.to_owned())],
+            Vec::new(),
+            vec![(subject.to_owned(), account)],
+            vec![(account, deposit_major)],
+            TokenTtl::default(),
+        );
+        cfg.venue_kind = VenueKind::Sandbox;
+        Self::from_config(&cfg)
     }
 
     /// Test helper with dual-write to Postgres (caller migrates the pool).
@@ -612,6 +638,13 @@ fn parse_symbol_marks(raw: Option<&str>) -> Vec<(String, i64)> {
             .collect()
     })
     .unwrap_or_default()
+}
+
+fn parse_venue_kind(raw: Option<&str>) -> VenueKind {
+    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("sandbox" | "sbx" | "broker") => VenueKind::Sandbox,
+        _ => VenueKind::Sim,
+    }
 }
 
 /// Updates stored marks from a filled/working order's average or limit price.

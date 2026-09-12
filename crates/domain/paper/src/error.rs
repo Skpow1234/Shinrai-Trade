@@ -3,6 +3,7 @@
 use core::fmt;
 
 use shinrai_exchange_simulator::SimError;
+use shinrai_execution::ExecutionError;
 use shinrai_instruments::InstrumentError;
 use shinrai_ledger::LedgerError;
 use shinrai_money::MoneyError;
@@ -20,8 +21,8 @@ pub enum PaperError {
     Order(OrderError),
     /// Ledger error.
     Ledger(LedgerError),
-    /// Simulated venue error.
-    Sim(SimError),
+    /// Venue / execution adapter error.
+    Venue(ExecutionError),
     /// Only buy orders are wired to cash reserve / settle in Phase 1.
     UnsupportedSide,
     /// Fill notional was not exact in the quote currency scale.
@@ -42,7 +43,7 @@ impl fmt::Display for PaperError {
             Self::Instrument(e) => write!(f, "{e}"),
             Self::Order(e) => write!(f, "{e}"),
             Self::Ledger(e) => write!(f, "{e}"),
-            Self::Sim(e) => write!(f, "{e}"),
+            Self::Venue(e) => write!(f, "{e}"),
             Self::UnsupportedSide => f.write_str("only buy orders are supported in phase 1 paper"),
             Self::InexactNotional => f.write_str("notional is not exact in quote currency scale"),
             Self::ReservationShortfall { order_id } => {
@@ -79,8 +80,14 @@ impl From<LedgerError> for PaperError {
     }
 }
 
+impl From<ExecutionError> for PaperError {
+    fn from(value: ExecutionError) -> Self {
+        Self::Venue(value)
+    }
+}
+
 impl From<SimError> for PaperError {
     fn from(value: SimError) -> Self {
-        Self::Sim(value)
+        Self::Venue(value.into())
     }
 }

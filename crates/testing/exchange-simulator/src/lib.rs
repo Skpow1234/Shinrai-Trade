@@ -11,11 +11,16 @@ mod error;
 mod exchange;
 mod faults;
 mod md;
-mod report;
 
 pub use clock::VirtualClock;
 pub use error::SimError;
-pub use exchange::{NewSimOrder, SimExchange, VenueOrderSnapshot};
+pub use exchange::SimExchange;
 pub use faults::{FaultConfig, FillPolicy};
 pub use md::MdTick;
-pub use report::{stream_fingerprint, ExecType, ExecutionReport, SessionId};
+pub use shinrai_execution::{
+    stream_fingerprint, ExecType, ExecutionError, ExecutionReport, ExecutionVenue, NewVenueOrder,
+    SessionId, VenueOrderSnapshot,
+};
+
+/// Historical name for [`NewVenueOrder`].
+pub type NewSimOrder = NewVenueOrder;
