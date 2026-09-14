@@ -11,6 +11,8 @@ workspace = true
 
 [dependencies]
 axum = { workspace = true }
+futures-util = "0.3"
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 shinrai-instruments = { workspace = true }
@@ -18,8 +20,7 @@ shinrai-market-data = { workspace = true }
 shinrai-md-fanout = { workspace = true }
 shinrai-md-protocol = { workspace = true }
 tokio = { workspace = true }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 
 [dev-dependencies]
-futures-util = "0.3"
-tokio-tungstenite = "0.26"
 tower = { version = "0.5", features = ["util"] }

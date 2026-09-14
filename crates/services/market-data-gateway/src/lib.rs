@@ -8,8 +8,9 @@
 
 mod app;
 mod auth_http;
+mod coinbase_feed;
 mod historical;
 mod map;
 
-pub use app::{router, unix_logical_now, AppState, GatewayConfig};
+pub use app::{router, unix_logical_now, AppState, FeedMode, GatewayConfig};
 pub use map::to_market_event;

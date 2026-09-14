@@ -18,6 +18,29 @@ use shinrai_md_fanout::{
     TokenAuth, TokenTtl,
 };
 
+/// Which optional publisher is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedMode {
+    /// No background publisher (seed history + client sessions only).
+    None,
+    /// Synthetic BTC-USD trades.
+    Synth,
+    /// Live Coinbase Exchange public feed.
+    Coinbase,
+}
+
+impl FeedMode {
+    /// Stable label for health / logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Synth => "synth",
+            Self::Coinbase => "coinbase",
+        }
+    }
+}
+
 /// Shared gateway state (mutex only at this I/O edge).
 #[derive(Clone)]
 pub struct AppState {
@@ -25,6 +48,7 @@ pub struct AppState {
     pub(crate) auth: TokenAuth,
     pub(crate) history: Arc<Mutex<HistoricalArchive>>,
     pub(crate) master: InstrumentMaster,
+    pub(crate) feed_mode: FeedMode,
 }
 
 /// Process configuration (tokens / secrets are not displayed).
@@ -35,6 +59,7 @@ pub struct GatewayConfig {
     fanout: FanoutConfig,
     ttl: TokenTtl,
     synth: bool,
+    coinbase: bool,
 }
 
 impl GatewayConfig {
@@ -46,6 +71,7 @@ impl GatewayConfig {
         fanout: FanoutConfig,
         ttl: TokenTtl,
         synth: bool,
+        coinbase: bool,
     ) -> Self {
         Self {
             static_tokens,
@@ -53,10 +79,11 @@ impl GatewayConfig {
             fanout,
             ttl,
             synth,
+            coinbase,
         }
     }
 
-    /// Reads env: `SHINRAI_MD_TOKENS`, `SHINRAI_MD_CLIENTS`, TTLs, synth.
+    /// Reads env: tokens, clients, TTLs, `SHINRAI_MD_SYNTH`, `SHINRAI_MD_COINBASE`.
     #[must_use]
     pub fn from_env() -> Self {
         let access = env_u64("SHINRAI_MD_ACCESS_TTL").unwrap_or(60);
@@ -67,6 +94,7 @@ impl GatewayConfig {
             FanoutConfig::default(),
             TokenTtl::new(access, refresh),
             env_flag("SHINRAI_MD_SYNTH"),
+            env_flag("SHINRAI_MD_COINBASE"),
         )
     }
 
@@ -74,6 +102,24 @@ impl GatewayConfig {
     #[must_use]
     pub const fn synth(&self) -> bool {
         self.synth
+    }
+
+    /// Whether the live Coinbase publisher should run.
+    #[must_use]
+    pub const fn coinbase(&self) -> bool {
+        self.coinbase
+    }
+
+    /// Selected publisher (Coinbase wins if both flags are set).
+    #[must_use]
+    pub const fn feed_mode(&self) -> FeedMode {
+        if self.coinbase {
+            FeedMode::Coinbase
+        } else if self.synth {
+            FeedMode::Synth
+        } else {
+            FeedMode::None
+        }
     }
 }
 
@@ -85,12 +131,13 @@ impl core::fmt::Debug for GatewayConfig {
             .field("fanout", &self.fanout)
             .field("ttl", &self.ttl)
             .field("synth", &self.synth)
+            .field("coinbase", &self.coinbase)
             .finish()
     }
 }
 
 impl AppState {
-    /// Builds state from config (does not spawn the synth task).
+    /// Builds state from config (does not spawn publisher tasks).
     #[must_use]
     pub fn from_config(config: &GatewayConfig) -> Self {
         let auth = TokenAuth::new(config.ttl);
@@ -114,6 +161,7 @@ impl AppState {
             auth,
             history: Arc::new(Mutex::new(history)),
             master,
+            feed_mode: config.feed_mode(),
         }
     }
 
@@ -125,6 +173,7 @@ impl AppState {
             Vec::new(),
             FanoutConfig::default(),
             TokenTtl::default(),
+            false,
             false,
         ))
     }
@@ -138,7 +187,14 @@ impl AppState {
             FanoutConfig::default(),
             TokenTtl::new(60, 3_600),
             false,
+            false,
         ))
+    }
+
+    /// Active feed mode.
+    #[must_use]
+    pub const fn feed_mode(&self) -> FeedMode {
+        self.feed_mode
     }
 
     /// Publishes synthetic BTC-USD trades (local demo only).
@@ -172,6 +228,15 @@ impl AppState {
             }
         });
     }
+
+    /// Connects to Coinbase Exchange public WS (BTC-USD) with gap → snapshot recovery.
+    pub fn spawn_coinbase(&self) {
+        crate::coinbase_feed::spawn(
+            Arc::clone(&self.hub),
+            Arc::clone(&self.history),
+            self.master.clone(),
+        );
+    }
 }
 
 /// Logical clock used by the hub (unix seconds).
@@ -196,8 +261,12 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn health() -> Json<Value> {
-    Json(json!({ "status": "ok" }))
+async fn health(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({
+        "status": "ok",
+        "service": "market-data-gateway",
+        "feed": state.feed_mode().as_str(),
+    }))
 }
 
 /// Token query param shared by WebSocket and REST.
@@ -426,6 +495,7 @@ mod tests {
             vec![("cli".into(), "super-secret".into(), "alice".into())],
             FanoutConfig::default(),
             TokenTtl::default(),
+            false,
             false,
         );
         let rendered = format!("{cfg:?}");

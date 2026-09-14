@@ -145,7 +145,7 @@ Health (no auth):
 curl http://127.0.0.1:8080/health
 ```
 
-Expect `{"status":"ok"}`.
+Expect `{"status":"ok","service":"market-data-gateway","feed":"none|synth|coinbase"}`.
 
 ### Authentication
 
@@ -157,6 +157,8 @@ Short-lived access tokens (default **60s**) and rotating refresh tokens.
 | `SHINRAI_MD_TOKENS` | `token:subject,...` — non-expiring bootstrap access tokens (local demos) |
 | `SHINRAI_MD_ACCESS_TTL` | Access lifetime in seconds (default `60`) |
 | `SHINRAI_MD_REFRESH_TTL` | Refresh lifetime in seconds (default `3600`) |
+| `SHINRAI_MD_SYNTH` | `1` / `true` — synthetic BTC-USD publisher (local demo) |
+| `SHINRAI_MD_COINBASE` | `1` / `true` — live Coinbase Exchange public WS + REST snapshots (BTC-USD). Wins if both synth and coinbase are set. |
 
 ```bash
 # Issue
@@ -187,7 +189,7 @@ curl "http://127.0.0.1:8080/v1/bars?symbol=BTC-USD&interval=1m&limit=10&token=$A
 curl "http://127.0.0.1:8080/v1/trades?symbol=BTC-USD&limit=50&token=$ACCESS"
 ```
 
-Optional filters: `start` / `end` (logical or Unix seconds matching the store). Prices and sizes are scaled integers (`*_scaled`, `*_lots`). Gateway startup seeds ~120 synthetic BTC-USD trades so these endpoints work without `SHINRAI_MD_SYNTH`; with synth enabled, additional **synthetic** prints append to the archive (not a live Coinbase socket — the Coinbase decoder lives in `shinrai-md-protocol` for fixture/tests).
+Optional filters: `start` / `end` (logical or Unix seconds matching the store). Prices and sizes are scaled integers (`*_scaled`, `*_lots`). Gateway startup seeds ~120 synthetic BTC-USD trades so these endpoints work without a publisher. With `SHINRAI_MD_SYNTH=1`, additional synthetic prints append to the archive. With `SHINRAI_MD_COINBASE=1`, the gateway opens the public Coinbase Exchange WebSocket (BTC-USD), runs `FeedSupervisor` (gap → REST book snapshot), and fans out ticks / degrade / book-ready to clients.
 
 ### Order gateway (paper trading)
 
@@ -372,7 +374,8 @@ SHINRAI_MD_TOKENS=dev:alice SHINRAI_MD_SYNTH=1 cargo run -p shinrai-md-gateway -
 |---|---|
 | Different host/port | `SHINRAI_MD_BIND=0.0.0.0:9090` (or `127.0.0.1:9090`). Update the WebSocket URL. |
 | Several users | `SHINRAI_MD_CLIENTS=dev:s3cret:alice,other:pass:bob` or static `SHINRAI_MD_TOKENS=dev:alice,other:bob`. |
-| No ticks, only session frames | Omit `SHINRAI_MD_SYNTH` (or set it to anything other than `1` / `true` / `yes`). After subscribe you still get `subscribed` and periodic server `heartbeat` (includes `dropped` if the outbound queue overflowed). |
+| No ticks, only session frames | Omit both `SHINRAI_MD_SYNTH` and `SHINRAI_MD_COINBASE`. After subscribe you still get `subscribed` and periodic server `heartbeat`. |
+| Live Coinbase ticks | `SHINRAI_MD_COINBASE=1` (public feed; CI does not enable this). Optional smoke: `cargo test -p shinrai-md-gateway --test coinbase_live -- --ignored`. |
 | Fail-closed | Unset both `SHINRAI_MD_TOKENS` and `SHINRAI_MD_CLIENTS`. Connect / token issue returns **401**. |
 | Auth rotation | `cargo test -p shinrai-md-gateway --test auth`. |
 | Automated WS path | `cargo test -p shinrai-md-gateway --test health` (health, 401, subscribe `BTC-USD`). |
