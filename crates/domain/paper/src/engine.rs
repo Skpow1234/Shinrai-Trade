@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use shinrai_audit::{AuditKind, AuditLog};
 use shinrai_exchange_simulator::FaultConfig;
-use shinrai_execution::{NewVenueOrder, SandboxConfig};
+use shinrai_execution::{NewVenueOrder, SandboxConfig, SessionId, VenueSessionState};
 use shinrai_instruments::InstrumentMaster;
 use shinrai_ledger::{AccountId, BalancedEntry, LedgerError, PaperBook};
 use shinrai_money::Money;
@@ -47,6 +47,10 @@ pub struct PaperEngine {
     risk: RiskEngine,
     audit: AuditLog,
     logical_now: u64,
+    /// Last applied venue session (None until first report).
+    applied_session: Option<SessionId>,
+    /// Next expected report sequence within [`Self::applied_session`].
+    next_expected_seq: u64,
 }
 
 impl PaperEngine {
@@ -69,6 +73,8 @@ impl PaperEngine {
             risk,
             audit: AuditLog::new(),
             logical_now: 0,
+            applied_session: None,
+            next_expected_seq: 1,
         }
     }
 
@@ -85,6 +91,26 @@ impl PaperEngine {
             risk,
             audit: AuditLog::new(),
             logical_now: 0,
+            applied_session: None,
+            next_expected_seq: 1,
+        }
+    }
+
+    /// Creates a session backed by the REST paper venue (local JSON broker).
+    #[must_use]
+    pub fn with_rest(master: InstrumentMaster, risk: RiskEngine) -> Self {
+        Self {
+            master,
+            book: PaperBook::new(),
+            orders: OrderStore::new(),
+            venue: VenueHandle::rest_happy_path(),
+            remaining_cash_reserve: HashMap::new(),
+            remaining_position_reserve: HashMap::new(),
+            risk,
+            audit: AuditLog::new(),
+            logical_now: 0,
+            applied_session: None,
+            next_expected_seq: 1,
         }
     }
 
@@ -144,6 +170,30 @@ impl PaperEngine {
     #[must_use]
     pub fn venue_orders(&self) -> Vec<shinrai_execution::VenueOrderSnapshot> {
         self.venue.venue_orders()
+    }
+
+    /// Venue session cursor (connected / session / next seq).
+    #[must_use]
+    pub fn venue_session(&self) -> VenueSessionState {
+        self.venue.session_state()
+    }
+
+    /// Consumer-side applied session cursor (for ops / tests).
+    #[must_use]
+    pub const fn applied_venue_cursor(&self) -> (Option<SessionId>, u64) {
+        (self.applied_session, self.next_expected_seq)
+    }
+
+    /// Disconnects the backing venue (tests / fault injection).
+    pub fn disconnect_venue(&mut self) {
+        self.venue.disconnect();
+    }
+
+    /// Reconnects the backing venue on a new session (tests / recovery).
+    pub fn reconnect_venue(&mut self) {
+        self.venue.reconnect();
+        self.applied_session = None;
+        self.next_expected_seq = 1;
     }
 
     /// Pre-trade risk engine.
@@ -439,13 +489,25 @@ impl PaperEngine {
                     }
                 }
 
-                self.venue.submit(&NewVenueOrder {
+                match self.venue.submit(&NewVenueOrder {
                     order_id,
                     instrument_id: req.instrument_id,
                     side: req.side,
                     qty: req.qty,
                     price: req.price,
-                })?;
+                }) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        if matches!(e, shinrai_execution::ExecutionError::Disconnected) {
+                            self.risk.set_global_kill(true);
+                            tracing::warn!(
+                                order_id = order_id.get(),
+                                "paper.submit: venue disconnected after OMS create; kill switch engaged"
+                            );
+                        }
+                        return Err(PaperError::Venue(e));
+                    }
+                }
                 self.audit.record(
                     self.logical_now,
                     Some(req.account_id),
@@ -468,7 +530,19 @@ impl PaperEngine {
         tracing::debug!(order_id = order_id.get(), "paper.cancel");
         self.orders
             .apply_event(order_id, OrderEvent::CancelRequested)?;
-        self.venue.cancel(order_id)?;
+        match self.venue.cancel(order_id) {
+            Ok(()) => {}
+            Err(e) => {
+                if matches!(e, shinrai_execution::ExecutionError::Disconnected) {
+                    self.risk.set_global_kill(true);
+                    tracing::warn!(
+                        order_id = order_id.get(),
+                        "paper.cancel: venue disconnected; kill switch engaged"
+                    );
+                }
+                return Err(PaperError::Venue(e));
+            }
+        }
         self.drain()?;
         Ok(self.orders.get(order_id)?.clone())
     }
@@ -485,48 +559,108 @@ impl PaperEngine {
 
     /// Polls the venue and applies reports to OMS + ledger.
     ///
+    /// Detects sequence gaps within a session and calls [`VenueHandle::poll_recovery`].
+    ///
     /// # Errors
     ///
     /// Returns mapping, OMS, or settle errors. Illegal transitions and duplicate
     /// execs are ignored (defined race / idempotency policy).
     pub fn drain(&mut self) -> Result<(), PaperError> {
         let reports = self.venue.poll();
+        let reports = self.ensure_contiguous(reports)?;
         for report in reports {
-            let exec_label = report.exec_type().name().to_owned();
-            self.audit.record(
-                self.logical_now,
-                self.orders
-                    .get(report.order_id())
-                    .ok()
-                    .map(Order::account_id),
-                Some(report.order_id()),
-                AuditKind::VenueReport {
-                    exec_type: exec_label,
-                },
-            );
-            let Some(event) = report.to_order_event()? else {
-                continue;
-            };
-            let applied = match self.orders.apply_event(report.order_id(), event) {
-                Ok(v) => v,
-                Err(OrderError::IllegalTransition { .. } | OrderError::DuplicateExec { .. }) => {
-                    continue;
-                }
-                Err(e) => return Err(PaperError::Order(e)),
-            };
-            self.audit.record(
-                self.logical_now,
-                self.orders
-                    .get(report.order_id())
-                    .ok()
-                    .map(Order::account_id),
-                Some(report.order_id()),
-                AuditKind::OrderEventApplied {
-                    status: applied.0.status().to_string(),
-                },
-            );
-            self.apply_effects(report.order_id(), &applied.1)?;
+            self.apply_report(&report)?;
         }
+        Ok(())
+    }
+
+    fn ensure_contiguous(
+        &mut self,
+        mut reports: Vec<shinrai_execution::ExecutionReport>,
+    ) -> Result<Vec<shinrai_execution::ExecutionReport>, PaperError> {
+        if reports.is_empty() {
+            return Ok(reports);
+        }
+        let first = &reports[0];
+        if self.applied_session != Some(first.session()) {
+            self.applied_session = Some(first.session());
+            self.next_expected_seq = 1;
+        }
+        if first.seq() > self.next_expected_seq {
+            let recovered = self.venue.poll_recovery(self.next_expected_seq)?;
+            let mut merged = recovered;
+            merged.append(&mut reports);
+            reports = dedupe_session_seq(merged);
+        } else if first.seq() < self.next_expected_seq {
+            let expected = self.next_expected_seq;
+            let session = self.applied_session;
+            reports.retain(|r| Some(r.session()) == session && r.seq() >= expected);
+        }
+        Ok(reports)
+    }
+
+    fn apply_report(
+        &mut self,
+        report: &shinrai_execution::ExecutionReport,
+    ) -> Result<(), PaperError> {
+        if self.applied_session != Some(report.session()) {
+            self.applied_session = Some(report.session());
+            self.next_expected_seq = 1;
+        }
+        if report.seq() < self.next_expected_seq {
+            return Ok(());
+        }
+        if report.seq() > self.next_expected_seq {
+            // Should have been healed by ensure_contiguous; fail closed.
+            self.risk.set_global_kill(true);
+            tracing::warn!(
+                expected = self.next_expected_seq,
+                got = report.seq(),
+                session = report.session().n,
+                "paper.drain: unrecovered seq gap; kill switch engaged"
+            );
+            return Err(PaperError::Venue(
+                shinrai_execution::ExecutionError::InvalidState("seq gap"),
+            ));
+        }
+
+        let exec_label = report.exec_type().name().to_owned();
+        self.audit.record(
+            self.logical_now,
+            self.orders
+                .get(report.order_id())
+                .ok()
+                .map(Order::account_id),
+            Some(report.order_id()),
+            AuditKind::VenueReport {
+                exec_type: exec_label,
+            },
+        );
+        let Some(event) = report.to_order_event()? else {
+            self.next_expected_seq = report.seq().saturating_add(1);
+            return Ok(());
+        };
+        let applied = match self.orders.apply_event(report.order_id(), event) {
+            Ok(v) => v,
+            Err(OrderError::IllegalTransition { .. } | OrderError::DuplicateExec { .. }) => {
+                self.next_expected_seq = report.seq().saturating_add(1);
+                return Ok(());
+            }
+            Err(e) => return Err(PaperError::Order(e)),
+        };
+        self.audit.record(
+            self.logical_now,
+            self.orders
+                .get(report.order_id())
+                .ok()
+                .map(Order::account_id),
+            Some(report.order_id()),
+            AuditKind::OrderEventApplied {
+                status: applied.0.status().to_string(),
+            },
+        );
+        self.apply_effects(report.order_id(), &applied.1)?;
+        self.next_expected_seq = report.seq().saturating_add(1);
         Ok(())
     }
 
@@ -660,6 +794,20 @@ impl PaperEngine {
         }
         Ok(())
     }
+}
+
+fn dedupe_session_seq(
+    reports: Vec<shinrai_execution::ExecutionReport>,
+) -> Vec<shinrai_execution::ExecutionReport> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(reports.len());
+    for report in reports {
+        let key = (report.session().n, report.seq());
+        if seen.insert(key) {
+            out.push(report);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -927,6 +1075,81 @@ mod tests {
         assert_eq!(order.status(), OrderStatus::Filled);
         assert_eq!(engine.book().position(acc, aapl().id()), 5);
         assert!(engine.reconcile().ok);
+    }
+
+    #[test]
+    fn rest_venue_fills_like_happy_path() {
+        let mut engine = PaperEngine::with_rest(
+            phase1_master(),
+            RiskEngine::new(shinrai_risk::RiskLimits::demo()),
+        );
+        assert_eq!(engine.venue_kind(), VenueKind::Rest);
+        let acc = AccountId::from_u64(1);
+        engine
+            .deposit(
+                acc,
+                Money::from_major(10_000, Currency::usd()).expect("d"),
+                "dep",
+            )
+            .expect("dep");
+        let outcome = engine
+            .submit(&aapl_order(acc, "rest-1", Side::Buy, 5, 10_000))
+            .expect("submit");
+        let order = match outcome {
+            SubmitOutcome::Created(o) => o,
+            SubmitOutcome::Duplicate(_) => panic!("created"),
+        };
+        assert_eq!(order.status(), OrderStatus::Filled);
+        assert_eq!(engine.book().position(acc, aapl().id()), 5);
+        assert!(engine.reconcile().ok);
+    }
+
+    #[test]
+    fn disconnect_after_create_engages_kill_switch() {
+        let mut engine = PaperEngine::with_sandbox(
+            phase1_master(),
+            shinrai_execution::SandboxConfig::ack_only(),
+            RiskEngine::new(shinrai_risk::RiskLimits::demo()),
+        );
+        let acc = AccountId::from_u64(1);
+        engine
+            .deposit(
+                acc,
+                Money::from_major(10_000, Currency::usd()).expect("d"),
+                "dep",
+            )
+            .expect("dep");
+        engine.disconnect_venue();
+        let err = engine
+            .submit(&aapl_order(acc, "ambig-1", Side::Buy, 1, 10_000))
+            .expect_err("disconnected");
+        assert!(matches!(
+            err,
+            PaperError::Venue(shinrai_execution::ExecutionError::Disconnected)
+        ));
+        assert!(matches!(
+            engine.risk().check(
+                &RiskOrderIntent {
+                    account_id: acc,
+                    instrument_id: aapl().id(),
+                    side: Side::Buy,
+                    qty: QuantityLots::from_lots(1),
+                    price: shinrai_instruments::PriceTicks::from_scaled(10_000),
+                },
+                &RiskContext {
+                    available_cash: engine.book().available(acc, Currency::usd()),
+                    position_lots: 0,
+                    notional: Money::from_major(1, Currency::usd()).expect("n"),
+                }
+            ),
+            RiskDecision::Rejected(_)
+        ));
+        let pending = engine
+            .orders()
+            .orders()
+            .filter(|o| o.status() == OrderStatus::PendingNew)
+            .count();
+        assert_eq!(pending, 1);
     }
 
     #[test]

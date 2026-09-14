@@ -1,9 +1,9 @@
-//! Paper trading venue handle (sim or sandbox broker).
+//! Paper trading venue handle (sim, sandbox, or REST paper broker).
 
 use shinrai_exchange_simulator::{FaultConfig, SimExchange};
 use shinrai_execution::{
-    ExecutionError, ExecutionReport, ExecutionVenue, NewVenueOrder, SandboxBroker, SandboxConfig,
-    VenueOrderSnapshot,
+    ExecutionError, ExecutionReport, ExecutionVenue, NewVenueOrder, RestPaperVenue, SandboxBroker,
+    SandboxConfig, VenueOrderSnapshot, VenueSessionState,
 };
 use shinrai_orders::OrderId;
 
@@ -14,6 +14,8 @@ pub enum VenueKind {
     Sim,
     /// In-process broker sandbox (ack + optional auto-fill).
     Sandbox,
+    /// REST-shaped paper venue (JSON over local HTTP transport).
+    Rest,
 }
 
 /// Owned venue implementing [`ExecutionVenue`].
@@ -21,6 +23,7 @@ pub enum VenueKind {
 pub(crate) enum VenueHandle {
     Sim(SimExchange),
     Sandbox(SandboxBroker),
+    Rest(RestPaperVenue),
 }
 
 impl VenueHandle {
@@ -32,24 +35,29 @@ impl VenueHandle {
         Self::Sandbox(SandboxBroker::new(config))
     }
 
+    pub(crate) fn rest_happy_path() -> Self {
+        Self::Rest(RestPaperVenue::local_happy_path())
+    }
+
     pub(crate) const fn kind(&self) -> VenueKind {
         match self {
             Self::Sim(_) => VenueKind::Sim,
             Self::Sandbox(_) => VenueKind::Sandbox,
+            Self::Rest(_) => VenueKind::Rest,
         }
     }
 
     pub(crate) fn as_sim(&self) -> Option<&SimExchange> {
         match self {
             Self::Sim(s) => Some(s),
-            Self::Sandbox(_) => None,
+            Self::Sandbox(_) | Self::Rest(_) => None,
         }
     }
 
     pub(crate) fn as_sandbox_mut(&mut self) -> Option<&mut SandboxBroker> {
         match self {
             Self::Sandbox(s) => Some(s),
-            Self::Sim(_) => None,
+            Self::Sim(_) | Self::Rest(_) => None,
         }
     }
 
@@ -57,6 +65,7 @@ impl VenueHandle {
         match self {
             Self::Sim(s) => ExecutionVenue::submit(s, order),
             Self::Sandbox(s) => ExecutionVenue::submit(s, order),
+            Self::Rest(s) => ExecutionVenue::submit(s, order),
         }
     }
 
@@ -64,6 +73,7 @@ impl VenueHandle {
         match self {
             Self::Sim(s) => ExecutionVenue::cancel(s, order_id),
             Self::Sandbox(s) => ExecutionVenue::cancel(s, order_id),
+            Self::Rest(s) => ExecutionVenue::cancel(s, order_id),
         }
     }
 
@@ -71,6 +81,7 @@ impl VenueHandle {
         match self {
             Self::Sim(s) => ExecutionVenue::poll(s),
             Self::Sandbox(s) => ExecutionVenue::poll(s),
+            Self::Rest(s) => ExecutionVenue::poll(s),
         }
     }
 
@@ -78,6 +89,7 @@ impl VenueHandle {
         match self {
             Self::Sim(s) => ExecutionVenue::tick(s, ticks),
             Self::Sandbox(s) => ExecutionVenue::tick(s, ticks),
+            Self::Rest(s) => ExecutionVenue::tick(s, ticks),
         }
     }
 
@@ -85,6 +97,7 @@ impl VenueHandle {
         match self {
             Self::Sim(s) => ExecutionVenue::venue_order(s, order_id),
             Self::Sandbox(s) => ExecutionVenue::venue_order(s, order_id),
+            Self::Rest(s) => ExecutionVenue::venue_order(s, order_id),
         }
     }
 
@@ -92,6 +105,42 @@ impl VenueHandle {
         match self {
             Self::Sim(s) => ExecutionVenue::venue_orders(s),
             Self::Sandbox(s) => ExecutionVenue::venue_orders(s),
+            Self::Rest(s) => ExecutionVenue::venue_orders(s),
+        }
+    }
+
+    pub(crate) fn session_state(&self) -> VenueSessionState {
+        match self {
+            Self::Sim(s) => ExecutionVenue::session_state(s),
+            Self::Sandbox(s) => ExecutionVenue::session_state(s),
+            Self::Rest(s) => ExecutionVenue::session_state(s),
+        }
+    }
+
+    pub(crate) fn disconnect(&mut self) {
+        match self {
+            Self::Sim(s) => ExecutionVenue::disconnect(s),
+            Self::Sandbox(s) => ExecutionVenue::disconnect(s),
+            Self::Rest(s) => ExecutionVenue::disconnect(s),
+        }
+    }
+
+    pub(crate) fn reconnect(&mut self) {
+        match self {
+            Self::Sim(s) => ExecutionVenue::reconnect(s),
+            Self::Sandbox(s) => ExecutionVenue::reconnect(s),
+            Self::Rest(s) => ExecutionVenue::reconnect(s),
+        }
+    }
+
+    pub(crate) fn poll_recovery(
+        &mut self,
+        from_seq: u64,
+    ) -> Result<Vec<ExecutionReport>, ExecutionError> {
+        match self {
+            Self::Sim(s) => ExecutionVenue::poll_recovery(s, from_seq),
+            Self::Sandbox(s) => ExecutionVenue::poll_recovery(s, from_seq),
+            Self::Rest(s) => ExecutionVenue::poll_recovery(s, from_seq),
         }
     }
 
@@ -114,6 +163,9 @@ impl VenueHandle {
                 )
                 .map_err(Into::into),
             Self::Sandbox(s) => {
+                s.restore_working(order.id(), order.order_qty(), order.price(), cum, venue_id)
+            }
+            Self::Rest(s) => {
                 s.restore_working(order.id(), order.order_qty(), order.price(), cum, venue_id)
             }
         }

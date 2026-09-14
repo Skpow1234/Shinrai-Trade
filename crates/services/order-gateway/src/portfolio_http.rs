@@ -175,6 +175,7 @@ pub async fn get_metrics(State(state): State<AppState>) -> Json<Value> {
             json!(match engine.venue_kind() {
                 shinrai_paper::VenueKind::Sim => "sim",
                 shinrai_paper::VenueKind::Sandbox => "sandbox",
+                shinrai_paper::VenueKind::Rest => "rest",
             }),
         );
         obj.insert(

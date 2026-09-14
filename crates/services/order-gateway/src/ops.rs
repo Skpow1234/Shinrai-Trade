@@ -78,6 +78,13 @@ pub fn ops_snapshot(engine: &PaperEngine, now: u64, stuck_age_secs: u64) -> Valu
         "audit_records": engine.audit().len(),
         "reconciliation_ok": recon.ok,
         "reconciliation_mismatches": recon.mismatches.len(),
+        "venue_session": {
+            "session": engine.venue_session().session.n,
+            "next_seq": engine.venue_session().next_seq,
+            "connected": engine.venue_session().connected,
+        },
+        "applied_venue_session": engine.applied_venue_cursor().0.map(|s| s.n),
+        "next_expected_seq": engine.applied_venue_cursor().1,
     })
 }
 

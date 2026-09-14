@@ -234,6 +234,9 @@ impl AppState {
                 SandboxConfig::happy_path(),
                 RiskEngine::new(RiskLimits::demo()),
             ),
+            VenueKind::Rest => {
+                PaperEngine::with_rest(master.clone(), RiskEngine::new(RiskLimits::demo()))
+            }
         };
 
         for (account_raw, major) in &config.deposits {
@@ -388,6 +391,20 @@ impl AppState {
             TokenTtl::default(),
         );
         cfg.venue_kind = VenueKind::Sandbox;
+        Self::from_config(&cfg)
+    }
+
+    /// Test helper with REST paper venue (JSON local broker + auto-fill).
+    #[must_use]
+    pub fn for_test_rest(token: &str, subject: &str, account: u64, deposit_major: i64) -> Self {
+        let mut cfg = GatewayConfig::new(
+            vec![(token.to_owned(), subject.to_owned())],
+            Vec::new(),
+            vec![(subject.to_owned(), account)],
+            vec![(account, deposit_major)],
+            TokenTtl::default(),
+        );
+        cfg.venue_kind = VenueKind::Rest;
         Self::from_config(&cfg)
     }
 
@@ -726,6 +743,7 @@ fn parse_symbol_marks(raw: Option<&str>) -> Vec<(String, i64)> {
 fn parse_venue_kind(raw: Option<&str>) -> VenueKind {
     match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
         Some("sandbox" | "sbx" | "broker") => VenueKind::Sandbox,
+        Some("rest" | "http") => VenueKind::Rest,
         _ => VenueKind::Sim,
     }
 }

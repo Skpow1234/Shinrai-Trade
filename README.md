@@ -53,7 +53,7 @@ Shinrai-Trade/
 | `shinrai-md-fanout` | Sessions, authn, bounded queues, heartbeats |
 | `shinrai-md-gateway` | `GET /health`, bars/trades/quotes, WebSocket |
 | `shinrai-order-gateway` | Orders, portfolio, audit, reconciliation, metrics |
-| `shinrai-execution` | Execution reports + `ExecutionVenue` trait; in-process sandbox broker |
+| `shinrai-execution` | Execution reports + `ExecutionVenue` trait; sandbox + REST paper venues |
 | `shinrai-store` | PostgreSQL: orders, ledger, audit, transactional outbox |
 | `shinrai-telemetry` | Process tracing + optional OTLP export (`SHINRAI_OTEL_ENDPOINT`) |
 | `shinrai-exchange-simulator` | Scripted venue for paper tests (`ExecutionVenue`) |
@@ -225,7 +225,7 @@ Pre-trade risk runs before the OMS. Insufficient buying power returns **422** wi
 | `SHINRAI_OG_MD_URL` | MD gateway base URL for `use_live_marks=1` on portfolio |
 | `SHINRAI_OG_MD_TOKEN` | Access token when calling the MD gateway |
 | `SHINRAI_OG_STUCK_AGE_SECS` | Pending OMS age before “stuck” (default `5`) |
-| `SHINRAI_OG_VENUE` | `sim` (default) or `sandbox` (in-process broker sandbox) |
+| `SHINRAI_OG_VENUE` | `sim` (default), `sandbox` (in-process broker), or `rest` / `http` (JSON REST paper venue) |
 | `SHINRAI_LOG` | `tracing` filter (falls back to `RUST_LOG`, default `info`) |
 | `SHINRAI_OTEL_ENDPOINT` | OTLP/HTTP base URL (e.g. `http://127.0.0.1:4318`); also accepts `OTEL_EXPORTER_OTLP_ENDPOINT` |
 | `SHINRAI_OUTBOX_POLL_MS` | Outbox publisher poll interval when Postgres is enabled (default `1000`) |

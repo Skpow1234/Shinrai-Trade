@@ -10,6 +10,7 @@ use shinrai_orders::{ExecId, OrderId, VenueOrderId};
 
 use crate::error::ExecutionError;
 use crate::report::{ExecType, ExecutionReport, SessionId};
+use crate::session::VenueSessionState;
 use crate::venue::{ExecutionVenue, NewVenueOrder, VenueOrderSnapshot};
 
 /// Sandbox behaviour knobs.
@@ -52,12 +53,15 @@ struct Inflight {
 #[derive(Debug, Clone)]
 pub struct SandboxBroker {
     config: SandboxConfig,
+    connected: bool,
     session: SessionId,
     next_seq: u64,
     next_venue: u64,
     next_exec: u64,
     inflight: HashMap<OrderId, Inflight>,
     outbox: VecDeque<ExecutionReport>,
+    /// Current-session report journal for [`ExecutionVenue::poll_recovery`].
+    history: Vec<ExecutionReport>,
 }
 
 impl Default for SandboxBroker {
@@ -72,12 +76,14 @@ impl SandboxBroker {
     pub fn new(config: SandboxConfig) -> Self {
         Self {
             config,
+            connected: true,
             session: SessionId::new(1),
             next_seq: 1,
             next_venue: 1,
             next_exec: 1,
             inflight: HashMap::new(),
             outbox: VecDeque::new(),
+            history: Vec::new(),
         }
     }
 
@@ -96,6 +102,7 @@ impl SandboxBroker {
                 row.canceled = true;
             }
         }
+        self.history.push(report.clone());
         self.outbox.push_back(report);
     }
 
@@ -150,7 +157,7 @@ impl SandboxBroker {
     ) {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.saturating_add(1);
-        self.outbox.push_back(ExecutionReport::new(
+        let report = ExecutionReport::new(
             order_id,
             venue_order_id,
             exec_id,
@@ -159,7 +166,9 @@ impl SandboxBroker {
             price,
             self.session,
             seq,
-        ));
+        );
+        self.history.push(report.clone());
+        self.outbox.push_back(report);
     }
 
     fn alloc_venue_id(&mut self) -> Result<VenueOrderId, ExecutionError> {
@@ -179,6 +188,9 @@ impl SandboxBroker {
 
 impl ExecutionVenue for SandboxBroker {
     fn submit(&mut self, order: &NewVenueOrder) -> Result<(), ExecutionError> {
+        if !self.connected {
+            return Err(ExecutionError::Disconnected);
+        }
         if order.qty.lots() <= 0 || order.price.scaled() <= 0 {
             return Err(ExecutionError::InvalidQuantity);
         }
@@ -219,6 +231,9 @@ impl ExecutionVenue for SandboxBroker {
     }
 
     fn cancel(&mut self, order_id: OrderId) -> Result<(), ExecutionError> {
+        if !self.connected {
+            return Err(ExecutionError::Disconnected);
+        }
         let Some(row) = self.inflight.get_mut(&order_id) else {
             return Err(ExecutionError::UnknownOrder { id: order_id });
         };
@@ -269,6 +284,38 @@ impl ExecutionVenue for SandboxBroker {
             })
             .collect()
     }
+
+    fn session_state(&self) -> VenueSessionState {
+        if self.connected {
+            VenueSessionState::connected(self.session, self.next_seq)
+        } else {
+            VenueSessionState::disconnected(self.session, self.next_seq)
+        }
+    }
+
+    fn disconnect(&mut self) {
+        self.connected = false;
+    }
+
+    fn reconnect(&mut self) {
+        self.connected = true;
+        self.session = SessionId::new(self.session.n.saturating_add(1));
+        self.next_seq = 1;
+        self.history.clear();
+        self.outbox.clear();
+    }
+
+    fn poll_recovery(&mut self, from_seq: u64) -> Result<Vec<ExecutionReport>, ExecutionError> {
+        if !self.connected {
+            return Err(ExecutionError::Disconnected);
+        }
+        Ok(self
+            .history
+            .iter()
+            .filter(|r| r.session() == self.session && r.seq() >= from_seq)
+            .cloned()
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -293,5 +340,55 @@ mod tests {
         assert!(matches!(reports[0].exec_type(), ExecType::New));
         assert!(matches!(reports[1].exec_type(), ExecType::Trade));
         assert_eq!(sbx.venue_order(OrderId::from_u64(1)).unwrap().cum_qty, 5);
+    }
+
+    #[test]
+    fn disconnect_rejects_submit_reconnect_resets_seq() {
+        let mut sbx = SandboxBroker::new(SandboxConfig::ack_only());
+        sbx.submit(&NewVenueOrder {
+            order_id: OrderId::from_u64(1),
+            instrument_id: InstrumentId::from_u64(1),
+            side: Side::Buy,
+            qty: QuantityLots::from_lots(1),
+            price: PriceTicks::from_scaled(10),
+        })
+        .expect("submit");
+        let _ = sbx.poll();
+        sbx.disconnect();
+        assert!(!sbx.session_state().connected);
+        assert_eq!(
+            sbx.submit(&NewVenueOrder {
+                order_id: OrderId::from_u64(2),
+                instrument_id: InstrumentId::from_u64(1),
+                side: Side::Buy,
+                qty: QuantityLots::from_lots(1),
+                price: PriceTicks::from_scaled(10),
+            }),
+            Err(ExecutionError::Disconnected)
+        );
+        let recovered = sbx.poll_recovery(1);
+        assert_eq!(recovered, Err(ExecutionError::Disconnected));
+        sbx.reconnect();
+        assert_eq!(sbx.session_state().session.n, 2);
+        assert_eq!(sbx.session_state().next_seq, 1);
+        assert!(sbx.session_state().connected);
+    }
+
+    #[test]
+    fn poll_recovery_returns_journal_from_seq() {
+        let mut sbx = SandboxBroker::new(SandboxConfig::happy_path());
+        sbx.submit(&NewVenueOrder {
+            order_id: OrderId::from_u64(9),
+            instrument_id: InstrumentId::from_u64(1),
+            side: Side::Buy,
+            qty: QuantityLots::from_lots(2),
+            price: PriceTicks::from_scaled(5),
+        })
+        .expect("submit");
+        let _ = sbx.poll();
+        let gap = sbx.poll_recovery(2).expect("recovery");
+        assert_eq!(gap.len(), 1);
+        assert_eq!(gap[0].seq(), 2);
+        assert!(matches!(gap[0].exec_type(), ExecType::Trade));
     }
 }

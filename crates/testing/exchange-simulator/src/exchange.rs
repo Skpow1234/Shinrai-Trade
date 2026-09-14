@@ -11,7 +11,7 @@ use crate::faults::{FaultConfig, FillPolicy};
 use crate::md::MdTick;
 use shinrai_execution::{
     ExecType, ExecutionError, ExecutionReport, ExecutionVenue, NewVenueOrder, SessionId,
-    VenueOrderSnapshot,
+    VenueOrderSnapshot, VenueSessionState,
 };
 
 #[derive(Debug, Clone)]
@@ -40,6 +40,8 @@ pub struct SimExchange {
     /// Reports due at or after a clock time.
     scheduled: BTreeMap<u64, Vec<ExecutionReport>>,
     outbox: VecDeque<ExecutionReport>,
+    /// Current-session report journal for [`ExecutionVenue::poll_recovery`].
+    history: Vec<ExecutionReport>,
     md_seq: HashMap<InstrumentId, u64>,
 }
 
@@ -64,6 +66,7 @@ impl SimExchange {
             inflight: HashMap::new(),
             scheduled: BTreeMap::new(),
             outbox: VecDeque::new(),
+            history: Vec::new(),
             md_seq: HashMap::new(),
         }
     }
@@ -149,6 +152,9 @@ impl SimExchange {
         self.connected = true;
         self.session = SessionId::new(self.session.n.saturating_add(1));
         self.next_seq = 1;
+        self.history.clear();
+        self.outbox.clear();
+        self.scheduled.clear();
     }
 
     /// Submits an order. Immediate reports go to the outbox; delayed fills
@@ -456,7 +462,7 @@ impl SimExchange {
     ) -> ExecutionReport {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.saturating_add(1);
-        ExecutionReport::new(
+        let report = ExecutionReport::new(
             order_id,
             venue_order_id,
             exec_id,
@@ -465,7 +471,9 @@ impl SimExchange {
             price,
             self.session,
             seq,
-        )
+        );
+        self.history.push(report.clone());
+        report
     }
 }
 
@@ -504,6 +512,34 @@ impl ExecutionVenue for SimExchange {
 
     fn venue_orders(&self) -> Vec<VenueOrderSnapshot> {
         SimExchange::venue_orders(self).collect()
+    }
+
+    fn session_state(&self) -> VenueSessionState {
+        if self.connected {
+            VenueSessionState::connected(self.session, self.next_seq)
+        } else {
+            VenueSessionState::disconnected(self.session, self.next_seq)
+        }
+    }
+
+    fn disconnect(&mut self) {
+        SimExchange::disconnect(self);
+    }
+
+    fn reconnect(&mut self) {
+        SimExchange::reconnect(self);
+    }
+
+    fn poll_recovery(&mut self, from_seq: u64) -> Result<Vec<ExecutionReport>, ExecutionError> {
+        if !self.connected {
+            return Err(ExecutionError::Disconnected);
+        }
+        Ok(self
+            .history
+            .iter()
+            .filter(|r| r.session() == self.session && r.seq() >= from_seq)
+            .cloned()
+            .collect())
     }
 }
 

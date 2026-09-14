@@ -5,6 +5,7 @@ use shinrai_orders::{OrderId, Side};
 
 use crate::error::ExecutionError;
 use crate::report::ExecutionReport;
+use crate::session::VenueSessionState;
 
 /// New order accepted by a venue adapter.
 #[derive(Debug, Clone)]
@@ -61,4 +62,20 @@ pub trait ExecutionVenue {
 
     /// All known venue orders (for reconciliation).
     fn venue_orders(&self) -> Vec<VenueOrderSnapshot>;
+
+    /// Current session cursor (connected flag, session id, next seq).
+    fn session_state(&self) -> VenueSessionState;
+
+    /// Marks the session disconnected (reject new commands; inflight retained).
+    fn disconnect(&mut self);
+
+    /// Reconnects on a new session id; sequence restarts; inflight retained.
+    fn reconnect(&mut self);
+
+    /// Returns reports for the current session with `seq >= from_seq` (gap fill).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExecutionError::Disconnected`] when the session is down.
+    fn poll_recovery(&mut self, from_seq: u64) -> Result<Vec<ExecutionReport>, ExecutionError>;
 }

@@ -7,10 +7,16 @@
 
 mod error;
 mod report;
+mod rest;
 mod sandbox;
+mod session;
 mod venue;
 
 pub use error::ExecutionError;
 pub use report::{stream_fingerprint, ExecType, ExecutionReport, SessionId};
+pub use rest::{
+    HttpMethod, HttpRequest, HttpResponse, HttpTransport, LocalPaperHttp, RestPaperVenue,
+};
 pub use sandbox::{SandboxBroker, SandboxConfig};
+pub use session::VenueSessionState;
 pub use venue::{ExecutionVenue, NewVenueOrder, VenueOrderSnapshot};

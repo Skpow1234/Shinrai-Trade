@@ -12,3 +12,5 @@ workspace = true
 [dependencies]
 shinrai-instruments = { workspace = true }
 shinrai-orders = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

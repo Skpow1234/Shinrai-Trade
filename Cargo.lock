@@ -1771,6 +1771,8 @@ dependencies = [
 name = "shinrai-execution"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "shinrai-instruments",
  "shinrai-orders",
 ]
