@@ -3,7 +3,7 @@
 use shinrai_exchange_simulator::{FaultConfig, SimExchange};
 use shinrai_execution::{
     ExecutionError, ExecutionReport, ExecutionVenue, NewVenueOrder, RestPaperVenue, SandboxBroker,
-    SandboxConfig, VenueOrderSnapshot, VenueSessionState,
+    SandboxConfig, VenueOrderSnapshot, VenueSessionState, VenueTradeSnapshot,
 };
 use shinrai_orders::OrderId;
 
@@ -106,6 +106,14 @@ impl VenueHandle {
             Self::Sim(s) => ExecutionVenue::venue_orders(s),
             Self::Sandbox(s) => ExecutionVenue::venue_orders(s),
             Self::Rest(s) => ExecutionVenue::venue_orders(s),
+        }
+    }
+
+    pub(crate) fn trade_execs(&self) -> Vec<VenueTradeSnapshot> {
+        match self {
+            Self::Sim(s) => ExecutionVenue::trade_execs(s),
+            Self::Sandbox(s) => ExecutionVenue::trade_execs(s),
+            Self::Rest(s) => ExecutionVenue::trade_execs(s),
         }
     }
 

@@ -245,7 +245,7 @@ curl "http://127.0.0.1:8081/v1/portfolio?token=dev&use_live_marks=1"
 # Append-only audit trail (paginate with after_seq)
 curl "http://127.0.0.1:8081/v1/audit?token=dev"
 
-# OMS vs simulated-venue reconciliation
+# OMS vs venue (order snapshot + Trade drop-copy + ledger fill keys)
 curl "http://127.0.0.1:8081/v1/reconciliation?token=dev"
 ```
 

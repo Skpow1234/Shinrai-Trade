@@ -19,4 +19,4 @@ pub use rest::{
 };
 pub use sandbox::{SandboxBroker, SandboxConfig};
 pub use session::VenueSessionState;
-pub use venue::{ExecutionVenue, NewVenueOrder, VenueOrderSnapshot};
+pub use venue::{ExecutionVenue, NewVenueOrder, VenueOrderSnapshot, VenueTradeSnapshot};

@@ -172,6 +172,12 @@ impl PaperEngine {
         self.venue.venue_orders()
     }
 
+    /// Current-session venue Trade drop-copy (for reconciliation).
+    #[must_use]
+    pub fn venue_trade_execs(&self) -> Vec<shinrai_execution::VenueTradeSnapshot> {
+        self.venue.trade_execs()
+    }
+
     /// Venue session cursor (connected / session / next seq).
     #[must_use]
     pub fn venue_session(&self) -> VenueSessionState {

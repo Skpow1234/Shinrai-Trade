@@ -11,7 +11,7 @@ use crate::faults::{FaultConfig, FillPolicy};
 use crate::md::MdTick;
 use shinrai_execution::{
     ExecType, ExecutionError, ExecutionReport, ExecutionVenue, NewVenueOrder, SessionId,
-    VenueOrderSnapshot, VenueSessionState,
+    VenueOrderSnapshot, VenueSessionState, VenueTradeSnapshot,
 };
 
 #[derive(Debug, Clone)]
@@ -512,6 +512,26 @@ impl ExecutionVenue for SimExchange {
 
     fn venue_orders(&self) -> Vec<VenueOrderSnapshot> {
         SimExchange::venue_orders(self).collect()
+    }
+
+    fn trade_execs(&self) -> Vec<VenueTradeSnapshot> {
+        self.history
+            .iter()
+            .filter_map(|r| {
+                if !matches!(r.exec_type(), ExecType::Trade) {
+                    return None;
+                }
+                let exec_id = r.exec_id()?.clone();
+                Some(VenueTradeSnapshot {
+                    order_id: r.order_id(),
+                    exec_id,
+                    qty: r.qty().lots(),
+                    price: r.price().scaled(),
+                    session: r.session(),
+                    seq: r.seq(),
+                })
+            })
+            .collect()
     }
 
     fn session_state(&self) -> VenueSessionState {

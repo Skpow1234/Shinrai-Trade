@@ -11,7 +11,7 @@ use shinrai_orders::{ExecId, OrderId, VenueOrderId};
 use crate::error::ExecutionError;
 use crate::report::{ExecType, ExecutionReport, SessionId};
 use crate::session::VenueSessionState;
-use crate::venue::{ExecutionVenue, NewVenueOrder, VenueOrderSnapshot};
+use crate::venue::{ExecutionVenue, NewVenueOrder, VenueOrderSnapshot, VenueTradeSnapshot};
 
 /// Sandbox behaviour knobs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -281,6 +281,26 @@ impl ExecutionVenue for SandboxBroker {
                 order_qty: row.order_qty,
                 cum_qty: row.cum_qty,
                 canceled: row.canceled,
+            })
+            .collect()
+    }
+
+    fn trade_execs(&self) -> Vec<VenueTradeSnapshot> {
+        self.history
+            .iter()
+            .filter_map(|r| {
+                if !matches!(r.exec_type(), ExecType::Trade) {
+                    return None;
+                }
+                let exec_id = r.exec_id()?.clone();
+                Some(VenueTradeSnapshot {
+                    order_id: r.order_id(),
+                    exec_id,
+                    qty: r.qty().lots(),
+                    price: r.price().scaled(),
+                    session: r.session(),
+                    seq: r.seq(),
+                })
             })
             .collect()
     }

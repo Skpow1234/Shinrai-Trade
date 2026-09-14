@@ -1,10 +1,10 @@
 //! Execution venue trait (sim, sandbox, or live broker adapter).
 
 use shinrai_instruments::{InstrumentId, PriceTicks, QuantityLots};
-use shinrai_orders::{OrderId, Side};
+use shinrai_orders::{ExecId, OrderId, Side};
 
 use crate::error::ExecutionError;
-use crate::report::ExecutionReport;
+use crate::report::{ExecutionReport, SessionId};
 use crate::session::VenueSessionState;
 
 /// New order accepted by a venue adapter.
@@ -35,6 +35,23 @@ pub struct VenueOrderSnapshot {
     pub canceled: bool,
 }
 
+/// One Trade from the venue drop-copy / report journal (current session).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VenueTradeSnapshot {
+    /// Internal OMS order id.
+    pub order_id: OrderId,
+    /// Venue execution id.
+    pub exec_id: ExecId,
+    /// Last fill quantity in lots.
+    pub qty: i64,
+    /// Fill price (scaled ticks).
+    pub price: i64,
+    /// Session that assigned the report.
+    pub session: SessionId,
+    /// Sequence within the session.
+    pub seq: u64,
+}
+
 /// Venue that accepts orders and emits execution reports for the OMS.
 pub trait ExecutionVenue {
     /// Submits an order to the venue.
@@ -62,6 +79,9 @@ pub trait ExecutionVenue {
 
     /// All known venue orders (for reconciliation).
     fn venue_orders(&self) -> Vec<VenueOrderSnapshot>;
+
+    /// Current-session Trade reports (in-process drop-copy for recon).
+    fn trade_execs(&self) -> Vec<VenueTradeSnapshot>;
 
     /// Current session cursor (connected flag, session id, next seq).
     fn session_state(&self) -> VenueSessionState;

@@ -13,7 +13,7 @@ use shinrai_orders::{ExecId, OrderId, Side, VenueOrderId};
 use crate::error::ExecutionError;
 use crate::report::{ExecType, ExecutionReport, SessionId};
 use crate::session::VenueSessionState;
-use crate::venue::{ExecutionVenue, NewVenueOrder, VenueOrderSnapshot};
+use crate::venue::{ExecutionVenue, NewVenueOrder, VenueOrderSnapshot, VenueTradeSnapshot};
 
 /// HTTP method for the paper REST surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,9 +127,7 @@ impl LocalPaperState {
                 self.handle_cancel(OrderId::from_u64(id))
             }
             (HttpMethod::Get, "/v1/session") => self.handle_session(),
-            (HttpMethod::Get, path) if path.starts_with("/v1/reports") => {
-                self.handle_reports(path)
-            }
+            (HttpMethod::Get, path) if path.starts_with("/v1/reports") => self.handle_reports(path),
             (HttpMethod::Post, "/v1/session/disconnect") => {
                 self.connected = false;
                 Ok(HttpResponse {
@@ -214,15 +212,8 @@ impl LocalPaperState {
                 canceled: false,
             },
         );
-        let mut reports = vec![self.report(
-            order_id,
-            &venue_order_id,
-            None,
-            "New",
-            None,
-            qty,
-            price,
-        )];
+        let mut reports =
+            vec![self.report(order_id, &venue_order_id, None, "New", None, qty, price)];
         if self.auto_fill {
             let exec_id = ExecId::new(format!("REST-E{}", self.next_exec))
                 .map_err(|_| ExecutionError::InvalidIdentifier)?;
@@ -610,6 +601,41 @@ impl ExecutionVenue for RestPaperVenue {
                 order_qty: row.order_qty,
                 cum_qty: row.cum_qty,
                 canceled: row.canceled,
+            })
+            .collect()
+    }
+
+    fn trade_execs(&self) -> Vec<VenueTradeSnapshot> {
+        let mut transport = self.transport.clone();
+        let Ok(resp) = transport.request(&HttpRequest {
+            method: HttpMethod::Get,
+            path: "/v1/reports?from_seq=1".into(),
+            body: String::new(),
+        }) else {
+            return Vec::new();
+        };
+        if resp.status >= 400 {
+            return Vec::new();
+        }
+        let Ok(parsed) = serde_json::from_str::<ReportsResponse>(&resp.body) else {
+            return Vec::new();
+        };
+        parsed
+            .reports
+            .into_iter()
+            .filter_map(|raw| {
+                if raw.exec_type != "Trade" {
+                    return None;
+                }
+                let exec_id = ExecId::new(raw.exec_id?).ok()?;
+                Some(VenueTradeSnapshot {
+                    order_id: OrderId::from_u64(raw.order_id),
+                    exec_id,
+                    qty: raw.qty,
+                    price: raw.price,
+                    session: SessionId::new(raw.session),
+                    seq: raw.seq,
+                })
             })
             .collect()
     }
