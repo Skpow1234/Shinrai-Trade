@@ -5,7 +5,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use shinrai_instruments::{InstrumentId, PriceTicks, QuantityLots};
 use shinrai_ledger::AccountId;
 use shinrai_orders::{
-    ClientOrderId, ExecId, Order, OrderId, OrderStatus, OrderType, Side, VenueOrderId,
+    ClientOrderId, ExecId, Order, OrderId, OrderStatus, OrderType, Side, TimeInForce, VenueOrderId,
 };
 
 use crate::error::StoreError;
@@ -161,8 +161,10 @@ pub struct OrderSnapshot {
     pub instrument_id: InstrumentId,
     /// Side.
     pub side: StoredSide,
-    /// Always Limit today.
+    /// Limit or Market.
     pub order_type: OrderType,
+    /// Time in force.
+    pub time_in_force: TimeInForce,
     /// Status.
     pub status: StoredStatus,
     /// Order qty lots.
@@ -194,6 +196,7 @@ impl OrderSnapshot {
             instrument_id: order.instrument_id(),
             side: order.side().into(),
             order_type: order.order_type(),
+            time_in_force: order.time_in_force(),
             status: order.status().into(),
             order_qty: order.order_qty(),
             price: order.price(),
@@ -219,6 +222,7 @@ impl OrderSnapshot {
             self.instrument_id,
             self.side.to_side(),
             self.order_type,
+            self.time_in_force,
             self.status.to_order_status(),
             self.order_qty,
             self.price,
@@ -229,6 +233,40 @@ impl OrderSnapshot {
             self.reject_reason.clone(),
             self.seen_execs.clone(),
         )
+    }
+}
+
+fn order_type_as_str(order_type: OrderType) -> &'static str {
+    match order_type {
+        OrderType::Limit => "Limit",
+        OrderType::Market => "Market",
+    }
+}
+
+fn parse_order_type(raw: &str) -> Result<OrderType, StoreError> {
+    match raw {
+        "Limit" => Ok(OrderType::Limit),
+        "Market" => Ok(OrderType::Market),
+        other => Err(StoreError::InvalidStored {
+            field: "order_type",
+            value: other.to_owned(),
+        }),
+    }
+}
+
+fn time_in_force_as_str(tif: TimeInForce) -> &'static str {
+    tif.name()
+}
+
+fn parse_time_in_force(raw: &str) -> Result<TimeInForce, StoreError> {
+    match raw {
+        "GTC" => Ok(TimeInForce::Gtc),
+        "IOC" => Ok(TimeInForce::Ioc),
+        "FOK" => Ok(TimeInForce::Fok),
+        other => Err(StoreError::InvalidStored {
+            field: "time_in_force",
+            value: other.to_owned(),
+        }),
     }
 }
 
@@ -248,22 +286,22 @@ pub(crate) async fn upsert_order_tx(
     tx: &mut Transaction<'_, Postgres>,
     snap: &OrderSnapshot,
 ) -> Result<(), StoreError> {
-    let order_type = match snap.order_type {
-        OrderType::Limit => "Limit",
-    };
+    let order_type = order_type_as_str(snap.order_type);
+    let time_in_force = time_in_force_as_str(snap.time_in_force);
     sqlx::query(
         r"
         INSERT INTO orders (
-            id, account_id, client_order_id, instrument_id, side, order_type, status,
+            id, account_id, client_order_id, instrument_id, side, order_type, time_in_force, status,
             order_qty, price_scaled, cum_qty, leaves_qty, avg_px_scaled,
             venue_order_id, reject_reason, updated_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, NOW())
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, NOW())
         ON CONFLICT (id) DO UPDATE SET
             account_id = EXCLUDED.account_id,
             client_order_id = EXCLUDED.client_order_id,
             instrument_id = EXCLUDED.instrument_id,
             side = EXCLUDED.side,
             order_type = EXCLUDED.order_type,
+            time_in_force = EXCLUDED.time_in_force,
             status = EXCLUDED.status,
             order_qty = EXCLUDED.order_qty,
             price_scaled = EXCLUDED.price_scaled,
@@ -281,6 +319,7 @@ pub(crate) async fn upsert_order_tx(
     .bind(i64::try_from(snap.instrument_id.get()).unwrap_or(i64::MAX))
     .bind(snap.side.as_str())
     .bind(order_type)
+    .bind(time_in_force)
     .bind(snap.status.as_str())
     .bind(snap.order_qty.lots())
     .bind(snap.price.scaled())
@@ -318,7 +357,7 @@ pub async fn load_order_by_id(
 ) -> Result<Option<OrderSnapshot>, StoreError> {
     let row = sqlx::query_as::<_, OrderRow>(
         r"
-        SELECT id, account_id, client_order_id, instrument_id, side, order_type, status,
+        SELECT id, account_id, client_order_id, instrument_id, side, order_type, time_in_force, status,
                order_qty, price_scaled, cum_qty, leaves_qty, avg_px_scaled,
                venue_order_id, reject_reason
         FROM orders WHERE id = $1
@@ -346,7 +385,7 @@ pub async fn load_order_by_client(
 ) -> Result<Option<OrderSnapshot>, StoreError> {
     let row = sqlx::query_as::<_, OrderRow>(
         r"
-        SELECT id, account_id, client_order_id, instrument_id, side, order_type, status,
+        SELECT id, account_id, client_order_id, instrument_id, side, order_type, time_in_force, status,
                order_qty, price_scaled, cum_qty, leaves_qty, avg_px_scaled,
                venue_order_id, reject_reason
         FROM orders WHERE account_id = $1 AND client_order_id = $2
@@ -371,7 +410,7 @@ pub async fn load_order_by_client(
 pub async fn list_orders(pool: &PgPool) -> Result<Vec<OrderSnapshot>, StoreError> {
     let rows = sqlx::query_as::<_, OrderRow>(
         r"
-        SELECT id, account_id, client_order_id, instrument_id, side, order_type, status,
+        SELECT id, account_id, client_order_id, instrument_id, side, order_type, time_in_force, status,
                order_qty, price_scaled, cum_qty, leaves_qty, avg_px_scaled,
                venue_order_id, reject_reason
         FROM orders ORDER BY id ASC
@@ -413,6 +452,7 @@ struct OrderRow {
     instrument_id: i64,
     side: String,
     order_type: String,
+    time_in_force: String,
     status: String,
     order_qty: i64,
     price_scaled: i64,
@@ -424,12 +464,8 @@ struct OrderRow {
 }
 
 async fn row_to_snapshot(pool: &PgPool, row: OrderRow) -> Result<OrderSnapshot, StoreError> {
-    if row.order_type != "Limit" {
-        return Err(StoreError::InvalidStored {
-            field: "order_type",
-            value: row.order_type,
-        });
-    }
+    let order_type = parse_order_type(&row.order_type)?;
+    let time_in_force = parse_time_in_force(&row.time_in_force)?;
     let exec_rows: Vec<(String,)> =
         sqlx::query_as("SELECT exec_id FROM order_execs WHERE order_id = $1 ORDER BY exec_id")
             .bind(row.id)
@@ -453,7 +489,8 @@ async fn row_to_snapshot(pool: &PgPool, row: OrderRow) -> Result<OrderSnapshot, 
         })?,
         instrument_id: InstrumentId::from_u64(u64::try_from(row.instrument_id).unwrap_or(0)),
         side: StoredSide::parse(&row.side)?,
-        order_type: OrderType::Limit,
+        order_type,
+        time_in_force,
         status: StoredStatus::parse(&row.status)?,
         order_qty: QuantityLots::from_lots(row.order_qty),
         price: PriceTicks::from_scaled(row.price_scaled),

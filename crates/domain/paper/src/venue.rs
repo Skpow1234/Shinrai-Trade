@@ -77,6 +77,19 @@ impl VenueHandle {
         }
     }
 
+    pub(crate) fn replace(
+        &mut self,
+        order_id: OrderId,
+        new_qty: shinrai_instruments::QuantityLots,
+        new_price: shinrai_instruments::PriceTicks,
+    ) -> Result<(), ExecutionError> {
+        match self {
+            Self::Sim(s) => ExecutionVenue::replace(s, order_id, new_qty, new_price),
+            Self::Sandbox(s) => ExecutionVenue::replace(s, order_id, new_qty, new_price),
+            Self::Rest(s) => ExecutionVenue::replace(s, order_id, new_qty, new_price),
+        }
+    }
+
     pub(crate) fn poll(&mut self) -> Vec<ExecutionReport> {
         match self {
             Self::Sim(s) => ExecutionVenue::poll(s),

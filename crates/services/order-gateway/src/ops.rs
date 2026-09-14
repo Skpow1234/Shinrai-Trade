@@ -139,7 +139,7 @@ mod tests {
     use shinrai_exchange_simulator::FaultConfig;
     use shinrai_instruments::{phase1_master, PriceTicks, QuantityLots};
     use shinrai_ledger::AccountId;
-    use shinrai_orders::{ClientOrderId, Order, OrderId, OrderType, Side};
+    use shinrai_orders::{ClientOrderId, Order, OrderId, OrderType, Side, TimeInForce};
 
     #[test]
     fn pending_new_without_progress_is_stuck() {
@@ -151,6 +151,7 @@ mod tests {
             shinrai_instruments::InstrumentId::from_u64(1),
             Side::Buy,
             OrderType::Limit,
+            TimeInForce::Gtc,
             OrderStatus::PendingNew,
             QuantityLots::from_lots(1),
             PriceTicks::from_scaled(100),

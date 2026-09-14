@@ -225,7 +225,7 @@ mod tests {
     use shinrai_instruments::{aapl, phase1_master, PriceTicks, QuantityLots};
     use shinrai_ledger::AccountId;
     use shinrai_money::{Currency, Money};
-    use shinrai_orders::{ClientOrderId, ExecId, OrderId, Side};
+    use shinrai_orders::{ClientOrderId, ExecId, OrderId, Side, TimeInForce};
     use shinrai_risk::{RiskEngine, RiskLimits};
 
     fn funded_sandbox(auto_fill: bool) -> (PaperEngine, AccountId) {
@@ -255,6 +255,8 @@ mod tests {
             side: Side::Buy,
             qty: QuantityLots::from_lots(qty),
             price: PriceTicks::from_scaled(10_000),
+            order_type: shinrai_orders::OrderType::Limit,
+            time_in_force: TimeInForce::Gtc,
         }
     }
 
@@ -343,6 +345,7 @@ mod tests {
             side: Side::Buy,
             qty: QuantityLots::from_lots(2),
             price: PriceTicks::from_scaled(10),
+            tif: TimeInForce::Gtc,
         })
         .expect("submit");
         let _ = sbx.poll();

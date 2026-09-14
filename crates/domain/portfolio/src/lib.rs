@@ -317,6 +317,8 @@ mod tests {
             side: Side::Buy,
             qty: shinrai_instruments::QuantityLots::from_lots(10),
             price: PriceTicks::from_scaled(10_000),
+            order_type: shinrai_orders::OrderType::Limit,
+            time_in_force: shinrai_orders::TimeInForce::Gtc,
         };
         assert!(matches!(
             engine.submit(&req).expect("s"),
@@ -360,6 +362,8 @@ mod tests {
             side: Side::Buy,
             qty: shinrai_instruments::QuantityLots::from_lots(10),
             price: PriceTicks::from_scaled(10_000),
+            order_type: shinrai_orders::OrderType::Limit,
+            time_in_force: shinrai_orders::TimeInForce::Gtc,
         };
         engine.submit(&buy).expect("buy");
         let sell = SubmitRequest {
@@ -369,6 +373,8 @@ mod tests {
             side: Side::Sell,
             qty: shinrai_instruments::QuantityLots::from_lots(4),
             price: PriceTicks::from_scaled(11_000),
+            order_type: shinrai_orders::OrderType::Limit,
+            time_in_force: shinrai_orders::TimeInForce::Gtc,
         };
         engine.submit(&sell).expect("sell");
 

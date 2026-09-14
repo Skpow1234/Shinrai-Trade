@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use shinrai_audit::{AuditKind, AuditLog};
 use shinrai_exchange_simulator::FaultConfig;
 use shinrai_execution::{NewVenueOrder, SandboxConfig, SessionId, VenueSessionState};
-use shinrai_instruments::InstrumentMaster;
+use shinrai_instruments::{InstrumentMaster, QuantityLots};
 use shinrai_ledger::{AccountId, BalancedEntry, LedgerError, PaperBook};
 use shinrai_money::Money;
 use shinrai_orders::{
@@ -31,8 +31,23 @@ pub struct SubmitRequest {
     pub side: Side,
     /// Quantity in lots.
     pub qty: shinrai_instruments::QuantityLots,
-    /// Limit price in ticks.
+    /// Limit / reference price in ticks.
     pub price: shinrai_instruments::PriceTicks,
+    /// Order type (default Limit).
+    pub order_type: shinrai_orders::OrderType,
+    /// Time in force (default GTC).
+    pub time_in_force: shinrai_orders::TimeInForce,
+}
+
+/// Client request to replace a working paper order.
+#[derive(Debug, Clone)]
+pub struct ReplaceRequest {
+    /// Internal order id.
+    pub order_id: OrderId,
+    /// New total order quantity (must be ≥ cum qty).
+    pub new_qty: shinrai_instruments::QuantityLots,
+    /// New limit price.
+    pub new_price: shinrai_instruments::PriceTicks,
 }
 
 /// Wired paper-trading session.
@@ -425,6 +440,8 @@ impl PaperEngine {
             side: req.side,
             order_qty: req.qty,
             price: req.price,
+            order_type: req.order_type,
+            time_in_force: req.time_in_force,
         };
         let outcome = self.orders.submit(&create)?;
         match outcome {
@@ -501,6 +518,7 @@ impl PaperEngine {
                     side: req.side,
                     qty: req.qty,
                     price: req.price,
+                    tif: req.time_in_force,
                 }) {
                     Ok(()) => {}
                     Err(e) => {
@@ -551,6 +569,108 @@ impl PaperEngine {
         }
         self.drain()?;
         Ok(self.orders.get(order_id)?.clone())
+    }
+
+    /// Requests replace of qty/price, asks the venue, then drains reports.
+    ///
+    /// Tops up cash/position reserves when the new leaves require more margin.
+    ///
+    /// # Errors
+    ///
+    /// Returns OMS, risk/funds, or venue errors.
+    pub fn replace(&mut self, req: &ReplaceRequest) -> Result<Order, PaperError> {
+        tracing::debug!(
+            order_id = req.order_id.get(),
+            new_qty = req.new_qty.lots(),
+            new_price = req.new_price.scaled(),
+            "paper.replace"
+        );
+        let order = self.orders.get(req.order_id)?.clone();
+        let instrument = self.master.get(order.instrument_id())?;
+        instrument.assert_tradable()?;
+        instrument.assert_order_grid(req.new_price, req.new_qty)?;
+        if req.new_qty.lots() < order.cum_qty().lots() {
+            return Err(PaperError::Order(OrderError::ReplaceBelowFilled {
+                new_qty: req.new_qty.lots(),
+                cum_qty: order.cum_qty().lots(),
+            }));
+        }
+        let new_leaves = QuantityLots::from_lots(req.new_qty.lots() - order.cum_qty().lots());
+        match order.side() {
+            Side::Buy => {
+                let target = notional(instrument, req.new_price, new_leaves)?;
+                let current = self
+                    .remaining_cash_reserve
+                    .get(&req.order_id)
+                    .copied()
+                    .unwrap_or_else(|| Money::from_minor(0, instrument.quote_currency()));
+                if target.minor_units() > current.minor_units() {
+                    let delta = target.checked_sub(current)?;
+                    self.book.reserve_for_order(
+                        order.account_id(),
+                        delta,
+                        format!(
+                            "rsv-repl:{}:{}",
+                            order.account_id().get(),
+                            req.order_id.get()
+                        ),
+                    )?;
+                    self.remaining_cash_reserve.insert(req.order_id, target);
+                    self.audit.record(
+                        self.logical_now,
+                        Some(order.account_id()),
+                        Some(req.order_id),
+                        AuditKind::LedgerReserved,
+                    );
+                }
+            }
+            Side::Sell => {
+                let current = self
+                    .remaining_position_reserve
+                    .get(&req.order_id)
+                    .copied()
+                    .unwrap_or(0);
+                let need = new_leaves.lots();
+                if need > current {
+                    let delta = need - current;
+                    self.book.reserve_position_for_order(
+                        order.account_id(),
+                        order.instrument_id(),
+                        delta,
+                    )?;
+                    self.remaining_position_reserve.insert(req.order_id, need);
+                    self.audit.record(
+                        self.logical_now,
+                        Some(order.account_id()),
+                        Some(req.order_id),
+                        AuditKind::LedgerReserved,
+                    );
+                }
+            }
+        }
+
+        self.orders.apply_event(
+            req.order_id,
+            OrderEvent::ReplaceRequested {
+                new_qty: req.new_qty,
+                new_price: req.new_price,
+            },
+        )?;
+        match self.venue.replace(req.order_id, req.new_qty, req.new_price) {
+            Ok(()) => {}
+            Err(e) => {
+                if matches!(e, shinrai_execution::ExecutionError::Disconnected) {
+                    self.risk.set_global_kill(true);
+                    tracing::warn!(
+                        order_id = req.order_id.get(),
+                        "paper.replace: venue disconnected; kill switch engaged"
+                    );
+                }
+                return Err(PaperError::Venue(e));
+            }
+        }
+        self.drain()?;
+        Ok(self.orders.get(req.order_id)?.clone())
     }
 
     /// Advances the venue clock and processes due reports (delayed fills).
@@ -670,6 +790,7 @@ impl PaperEngine {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn apply_effects(
         &mut self,
         order_id: OrderId,
@@ -756,10 +877,72 @@ impl PaperEngine {
                 DomainEffect::Rejected { .. } | DomainEffect::Canceled | DomainEffect::Expired => {
                     self.release_remaining(order_id)?;
                 }
+                DomainEffect::Replaced { qty: _, price } => {
+                    let order = self.orders.get(order_id)?;
+                    let instrument = self.master.get(order.instrument_id())?;
+                    let leaves = order.leaves_qty();
+                    match order.side() {
+                        Side::Buy => {
+                            let target = notional(instrument, *price, leaves)?;
+                            let current = self
+                                .remaining_cash_reserve
+                                .remove(&order_id)
+                                .unwrap_or_else(|| Money::from_minor(0, target.currency()));
+                            if current.minor_units() > target.minor_units() {
+                                let surplus = current.checked_sub(target)?;
+                                self.book.release_reserve(
+                                    order.account_id(),
+                                    surplus,
+                                    format!(
+                                        "rel-repl:{}:{}",
+                                        order.account_id().get(),
+                                        order_id.get()
+                                    ),
+                                )?;
+                                self.audit.record(
+                                    self.logical_now,
+                                    Some(order.account_id()),
+                                    Some(order_id),
+                                    AuditKind::LedgerReleased,
+                                );
+                            }
+                            if target.is_zero() {
+                                self.remaining_cash_reserve.remove(&order_id);
+                            } else {
+                                self.remaining_cash_reserve.insert(order_id, target);
+                            }
+                        }
+                        Side::Sell => {
+                            let target = leaves.lots();
+                            let current = self
+                                .remaining_position_reserve
+                                .remove(&order_id)
+                                .unwrap_or(0);
+                            if current > target {
+                                let surplus = current - target;
+                                self.book.release_position_reserve(
+                                    order.account_id(),
+                                    order.instrument_id(),
+                                    surplus,
+                                )?;
+                                self.audit.record(
+                                    self.logical_now,
+                                    Some(order.account_id()),
+                                    Some(order_id),
+                                    AuditKind::LedgerReleased,
+                                );
+                            }
+                            if target == 0 {
+                                self.remaining_position_reserve.remove(&order_id);
+                            } else {
+                                self.remaining_position_reserve.insert(order_id, target);
+                            }
+                        }
+                    }
+                }
                 DomainEffect::Accepted { .. }
                 | DomainEffect::CancelPending
-                | DomainEffect::ReplacePending
-                | DomainEffect::Replaced { .. } => {}
+                | DomainEffect::ReplacePending => {}
             }
         }
         Ok(())
@@ -851,6 +1034,8 @@ mod tests {
             side,
             qty: QuantityLots::from_lots(qty),
             price: shinrai_instruments::PriceTicks::from_scaled(price_scaled),
+            order_type: shinrai_orders::OrderType::Limit,
+            time_in_force: shinrai_orders::TimeInForce::Gtc,
         }
     }
 
@@ -1011,6 +1196,46 @@ mod tests {
     }
 
     #[test]
+    fn replace_resting_buy_updates_price_and_reserve() {
+        use crate::ReplaceRequest;
+        let (mut engine, acc) = funded_engine(FaultConfig {
+            fill_policy: FillPolicy::Rest,
+            ..FaultConfig::happy_path()
+        });
+        let outcome = engine
+            .submit(&aapl_order(acc, "rest-repl", Side::Buy, 10, 10_000))
+            .expect("submit");
+        let order = match outcome {
+            SubmitOutcome::Created(o) => o,
+            SubmitOutcome::Duplicate(_) => panic!("created"),
+        };
+        assert_eq!(order.status(), OrderStatus::New);
+        let replaced = engine
+            .replace(&ReplaceRequest {
+                order_id: order.id(),
+                new_qty: QuantityLots::from_lots(6),
+                new_price: shinrai_instruments::PriceTicks::from_scaled(9_000),
+            })
+            .expect("replace");
+        assert_eq!(replaced.status(), OrderStatus::New);
+        assert_eq!(replaced.order_qty().lots(), 6);
+        assert_eq!(replaced.price().scaled(), 9_000);
+        assert_eq!(replaced.leaves_qty().lots(), 6);
+        // Remaining reserve should match leaves * new price (AAPL tick/lot → USD).
+        let reserved = engine.book().reserved(acc, Currency::usd()).minor_units();
+        // 6 lots * 9000 ticks → same notional helper as paper uses for AAPL.
+        let expected = crate::notional(
+            engine.master().get(aapl().id()).expect("i"),
+            shinrai_instruments::PriceTicks::from_scaled(9_000),
+            QuantityLots::from_lots(6),
+        )
+        .expect("n")
+        .minor_units();
+        assert_eq!(reserved, expected);
+        assert!(engine.reconcile().ok);
+    }
+
+    #[test]
     fn invalid_qty_rejected_before_oms() {
         let (mut engine, acc) = funded_engine(FaultConfig::happy_path());
         let bad = SubmitRequest {
@@ -1020,6 +1245,8 @@ mod tests {
             side: Side::Buy,
             qty: QuantityLots::from_lots(0),
             price: shinrai_instruments::PriceTicks::from_scaled(10_000),
+            order_type: shinrai_orders::OrderType::Limit,
+            time_in_force: shinrai_orders::TimeInForce::Gtc,
         };
         assert!(engine.submit(&bad).is_err());
         assert!(engine.orders().is_empty());
@@ -1156,6 +1383,34 @@ mod tests {
             .filter(|o| o.status() == OrderStatus::PendingNew)
             .count();
         assert_eq!(pending, 1);
+    }
+
+    #[test]
+    fn ioc_on_resting_sandbox_expires() {
+        let mut engine = PaperEngine::with_sandbox(
+            phase1_master(),
+            shinrai_execution::SandboxConfig::ack_only(),
+            RiskEngine::new(shinrai_risk::RiskLimits::demo()),
+        );
+        let acc = AccountId::from_u64(1);
+        engine
+            .deposit(
+                acc,
+                Money::from_major(10_000, Currency::usd()).expect("d"),
+                "dep",
+            )
+            .expect("dep");
+        let mut req = aapl_order(acc, "ioc-1", Side::Buy, 5, 10_000);
+        req.time_in_force = shinrai_orders::TimeInForce::Ioc;
+        let outcome = engine.submit(&req).expect("submit");
+        let order = match outcome {
+            SubmitOutcome::Created(o) => o,
+            SubmitOutcome::Duplicate(_) => panic!("created"),
+        };
+        assert_eq!(order.status(), OrderStatus::Expired);
+        assert_eq!(order.cum_qty().lots(), 0);
+        assert_eq!(engine.book().position(acc, aapl().id()), 0);
+        assert!(engine.book().reserved(acc, Currency::usd()).is_zero());
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use shinrai_instruments::{InstrumentId, PriceTicks, QuantityLots};
-use shinrai_orders::{ExecId, OrderId, VenueOrderId};
+use shinrai_orders::{ExecId, OrderId, TimeInForce, VenueOrderId};
 
 use crate::clock::VirtualClock;
 use crate::error::SimError;
@@ -158,11 +158,12 @@ impl SimExchange {
     }
 
     /// Submits an order. Immediate reports go to the outbox; delayed fills
-    /// are scheduled on the clock.
+    /// are scheduled on the clock. Honors [`TimeInForce`] against [`FillPolicy`].
     ///
     /// # Errors
     ///
     /// Returns [`SimError::Disconnected`] or identifier errors.
+    #[allow(clippy::too_many_lines)]
     pub fn submit(&mut self, order: &NewVenueOrder) -> Result<(), SimError> {
         if !self.connected {
             return Err(SimError::Disconnected);
@@ -190,6 +191,27 @@ impl SimExchange {
             return Ok(());
         }
 
+        // FOK cannot rest or split: reject without accepting into the book.
+        if order.tif == TimeInForce::Fok
+            && matches!(
+                self.faults.fill_policy,
+                FillPolicy::Rest | FillPolicy::Split { .. }
+            )
+        {
+            let report = self.build_report(
+                order.order_id,
+                venue_order_id,
+                None,
+                ExecType::Rejected {
+                    reason: "fok".into(),
+                },
+                order.qty,
+                order.price,
+            );
+            self.outbox.push_back(report);
+            return Ok(());
+        }
+
         let sim = SimOrder {
             order_id: order.order_id,
             venue_order_id: venue_order_id.clone(),
@@ -203,14 +225,73 @@ impl SimExchange {
 
         let ack = self.build_report(
             order.order_id,
-            venue_order_id,
+            venue_order_id.clone(),
             None,
             ExecType::New,
             order.qty,
             order.price,
         );
         self.outbox.push_back(ack);
-        self.schedule_fills(order.order_id)?;
+
+        match order.tif {
+            TimeInForce::Gtc => {
+                self.schedule_fills(order.order_id)?;
+            }
+            TimeInForce::Fok => {
+                // Only reachable with FillPolicy::Full (checked above).
+                self.schedule_fills(order.order_id)?;
+            }
+            TimeInForce::Ioc => match self.faults.fill_policy {
+                FillPolicy::Rest => {
+                    if let Some(s) = self.inflight.get_mut(&order.order_id) {
+                        s.canceled = true;
+                    }
+                    let expired = self.build_report(
+                        order.order_id,
+                        venue_order_id,
+                        None,
+                        ExecType::Expired,
+                        order.qty,
+                        order.price,
+                    );
+                    self.outbox.push_back(expired);
+                }
+                FillPolicy::Full => {
+                    self.schedule_fills(order.order_id)?;
+                }
+                FillPolicy::Split { first_lots } => {
+                    let leaves = order.qty.lots();
+                    if first_lots <= 0 || first_lots >= leaves {
+                        return Err(SimError::InvalidQuantity);
+                    }
+                    let sim = self
+                        .inflight
+                        .get(&order.order_id)
+                        .cloned()
+                        .ok_or(SimError::UnknownOrder { id: order.order_id })?;
+                    let first = self.trade_report(&sim, first_lots, sim.price)?;
+                    if self.faults.delay_ticks == 0 {
+                        if let Some(s) = self.inflight.get_mut(&order.order_id) {
+                            s.cum_qty = first_lots;
+                        }
+                    }
+                    self.enqueue_fill(first);
+                    let rest = leaves - first_lots;
+                    if let Some(s) = self.inflight.get_mut(&order.order_id) {
+                        s.canceled = true;
+                    }
+                    let expired = self.build_report(
+                        order.order_id,
+                        venue_order_id,
+                        None,
+                        ExecType::Expired,
+                        QuantityLots::from_lots(rest),
+                        order.price,
+                    );
+                    self.outbox.push_back(expired);
+                }
+            },
+        }
         Ok(())
     }
 
@@ -534,6 +615,15 @@ impl ExecutionVenue for SimExchange {
             .collect()
     }
 
+    fn replace(
+        &mut self,
+        order_id: OrderId,
+        new_qty: QuantityLots,
+        new_price: PriceTicks,
+    ) -> Result<(), ExecutionError> {
+        SimExchange::replace(self, order_id, new_qty, new_price).map_err(Into::into)
+    }
+
     fn session_state(&self) -> VenueSessionState {
         if self.connected {
             VenueSessionState::connected(self.session, self.next_seq)
@@ -569,8 +659,8 @@ mod tests {
     use shinrai_execution::stream_fingerprint;
     use shinrai_ledger::AccountId;
     use shinrai_orders::{
-        ClientOrderId, CreateOrder, OrderError, OrderEvent, OrderStatus, OrderStore, Side,
-        SubmitOutcome,
+        ClientOrderId, CreateOrder, OrderError, OrderEvent, OrderStatus, OrderStore, OrderType,
+        Side, SubmitOutcome, TimeInForce,
     };
 
     fn new_order(id: u64, qty: i64) -> NewVenueOrder {
@@ -580,6 +670,20 @@ mod tests {
             side: Side::Buy,
             qty: QuantityLots::from_lots(qty),
             price: PriceTicks::from_scaled(100),
+            tif: TimeInForce::Gtc,
+        }
+    }
+
+    fn create_req(clid: &str, qty: i64, price: i64) -> CreateOrder {
+        CreateOrder {
+            account_id: AccountId::from_u64(1),
+            client_order_id: ClientOrderId::new(clid).expect("c"),
+            instrument_id: InstrumentId::from_u64(1),
+            side: Side::Buy,
+            order_qty: QuantityLots::from_lots(qty),
+            price: PriceTicks::from_scaled(price),
+            order_type: OrderType::Limit,
+            time_in_force: TimeInForce::Gtc,
         }
     }
 
@@ -605,17 +709,7 @@ mod tests {
             ..FaultConfig::happy_path()
         });
         let mut store = OrderStore::new();
-        let created = match store
-            .submit(&CreateOrder {
-                account_id: AccountId::from_u64(1),
-                client_order_id: ClientOrderId::new("c1").expect("c"),
-                instrument_id: InstrumentId::from_u64(1),
-                side: Side::Buy,
-                order_qty: QuantityLots::from_lots(10),
-                price: PriceTicks::from_scaled(100),
-            })
-            .expect("s")
-        {
+        let created = match store.submit(&create_req("c1", 10, 100)).expect("s") {
             SubmitOutcome::Created(o) => o,
             SubmitOutcome::Duplicate(_) => panic!("created"),
         };
@@ -626,6 +720,7 @@ mod tests {
             side: Side::Buy,
             qty: QuantityLots::from_lots(10),
             price: PriceTicks::from_scaled(100),
+            tif: TimeInForce::Gtc,
         })
         .expect("sim");
 
@@ -651,17 +746,7 @@ mod tests {
             ..FaultConfig::happy_path()
         });
         let mut store = OrderStore::new();
-        let created = match store
-            .submit(&CreateOrder {
-                account_id: AccountId::from_u64(1),
-                client_order_id: ClientOrderId::new("c2").expect("c"),
-                instrument_id: InstrumentId::from_u64(1),
-                side: Side::Buy,
-                order_qty: QuantityLots::from_lots(10),
-                price: PriceTicks::from_scaled(100),
-            })
-            .expect("s")
-        {
+        let created = match store.submit(&create_req("c2", 10, 100)).expect("s") {
             SubmitOutcome::Created(o) => o,
             SubmitOutcome::Duplicate(_) => panic!("created"),
         };
@@ -692,17 +777,7 @@ mod tests {
             ..FaultConfig::happy_path()
         });
         let mut store = OrderStore::new();
-        let created = match store
-            .submit(&CreateOrder {
-                account_id: AccountId::from_u64(1),
-                client_order_id: ClientOrderId::new("c3").expect("c"),
-                instrument_id: InstrumentId::from_u64(1),
-                side: Side::Buy,
-                order_qty: QuantityLots::from_lots(3),
-                price: PriceTicks::from_scaled(50),
-            })
-            .expect("s")
-        {
+        let created = match store.submit(&create_req("c3", 3, 50)).expect("s") {
             SubmitOutcome::Created(o) => o,
             SubmitOutcome::Duplicate(_) => panic!("created"),
         };
@@ -713,12 +788,63 @@ mod tests {
             side: Side::Buy,
             qty: QuantityLots::from_lots(3),
             price: PriceTicks::from_scaled(50),
+            tif: TimeInForce::Gtc,
         })
         .expect("sim");
         apply_reports(&mut store, &sim.poll());
         let order = store.get(oid).expect("g");
         assert_eq!(order.status(), OrderStatus::Filled);
         assert_eq!(order.cum_qty().lots(), 3);
+    }
+
+    #[test]
+    fn fok_with_rest_rejects() {
+        let mut sim = SimExchange::new(FaultConfig {
+            fill_policy: FillPolicy::Rest,
+            ..FaultConfig::happy_path()
+        });
+        sim.submit(&NewVenueOrder {
+            order_id: OrderId::from_u64(41),
+            instrument_id: InstrumentId::from_u64(1),
+            side: Side::Buy,
+            qty: QuantityLots::from_lots(5),
+            price: PriceTicks::from_scaled(100),
+            tif: TimeInForce::Fok,
+        })
+        .expect("submit");
+        let reports = sim.poll();
+        assert_eq!(reports.len(), 1);
+        assert!(matches!(
+            reports[0].exec_type(),
+            ExecType::Rejected { reason } if reason == "fok"
+        ));
+        assert!(sim.venue_order(OrderId::from_u64(41)).is_none());
+    }
+
+    #[test]
+    fn ioc_with_rest_expires() {
+        let mut sim = SimExchange::new(FaultConfig {
+            fill_policy: FillPolicy::Rest,
+            ..FaultConfig::happy_path()
+        });
+        sim.submit(&NewVenueOrder {
+            order_id: OrderId::from_u64(42),
+            instrument_id: InstrumentId::from_u64(1),
+            side: Side::Buy,
+            qty: QuantityLots::from_lots(5),
+            price: PriceTicks::from_scaled(100),
+            tif: TimeInForce::Ioc,
+        })
+        .expect("submit");
+        let reports = sim.poll();
+        assert_eq!(reports.len(), 2);
+        assert!(matches!(reports[0].exec_type(), ExecType::New));
+        assert!(matches!(reports[1].exec_type(), ExecType::Expired));
+        assert!(
+            sim.venue_order(OrderId::from_u64(42))
+                .expect("still tracked")
+                .canceled
+        );
     }
 
     #[test]

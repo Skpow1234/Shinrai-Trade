@@ -16,11 +16,48 @@ pub enum Side {
     Sell,
 }
 
-/// Supported order types (Phase 1: limit).
+/// Supported order types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OrderType {
     /// Limit order.
     Limit,
+    /// Market order (paper: still requires a reference price for risk/notional).
+    Market,
+}
+
+/// Time-in-force for order lifetime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TimeInForce {
+    /// Good till cancel (default).
+    #[default]
+    Gtc,
+    /// Immediate or cancel: fill what is available, expire remainder.
+    Ioc,
+    /// Fill or kill: all-or-nothing; reject if not fully fillable immediately.
+    Fok,
+}
+
+impl TimeInForce {
+    /// Stable API / wire name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Gtc => "GTC",
+            Self::Ioc => "IOC",
+            Self::Fok => "FOK",
+        }
+    }
+}
+
+impl OrderType {
+    /// Stable API / wire name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Limit => "Limit",
+            Self::Market => "Market",
+        }
+    }
 }
 
 /// Order aggregate with FIX-like fill fields.
@@ -33,6 +70,7 @@ pub struct Order {
     instrument_id: InstrumentId,
     side: Side,
     order_type: OrderType,
+    time_in_force: TimeInForce,
     status: OrderStatus,
     order_qty: QuantityLots,
     price: PriceTicks,
@@ -64,6 +102,7 @@ impl Order {
         instrument_id: InstrumentId,
         side: Side,
         order_type: OrderType,
+        time_in_force: TimeInForce,
         status: OrderStatus,
         order_qty: QuantityLots,
         price: PriceTicks,
@@ -87,6 +126,7 @@ impl Order {
             instrument_id,
             side,
             order_type,
+            time_in_force,
             status,
             order_qty,
             price,
@@ -117,6 +157,36 @@ impl Order {
         order_qty: QuantityLots,
         price: PriceTicks,
     ) -> Result<Self, OrderError> {
+        Self::new_pending_typed(
+            id,
+            account_id,
+            client_order_id,
+            instrument_id,
+            side,
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            order_qty,
+            price,
+        )
+    }
+
+    /// Creates a pending order with explicit type and time-in-force.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if quantity or price is not positive.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_pending_typed(
+        id: OrderId,
+        account_id: AccountId,
+        client_order_id: ClientOrderId,
+        instrument_id: InstrumentId,
+        side: Side,
+        order_type: OrderType,
+        time_in_force: TimeInForce,
+        order_qty: QuantityLots,
+        price: PriceTicks,
+    ) -> Result<Self, OrderError> {
         if order_qty.lots() <= 0 {
             return Err(OrderError::InvalidQuantity);
         }
@@ -129,7 +199,8 @@ impl Order {
             client_order_id,
             instrument_id,
             side,
-            order_type: OrderType::Limit,
+            order_type,
+            time_in_force,
             status: OrderStatus::PendingNew,
             order_qty,
             price,
@@ -178,6 +249,12 @@ impl Order {
     #[must_use]
     pub const fn order_type(&self) -> OrderType {
         self.order_type
+    }
+
+    /// Time in force.
+    #[must_use]
+    pub const fn time_in_force(&self) -> TimeInForce {
+        self.time_in_force
     }
 
     /// Status.

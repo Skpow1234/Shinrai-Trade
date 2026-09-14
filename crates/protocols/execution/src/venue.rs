@@ -1,7 +1,7 @@
 //! Execution venue trait (sim, sandbox, or live broker adapter).
 
 use shinrai_instruments::{InstrumentId, PriceTicks, QuantityLots};
-use shinrai_orders::{ExecId, OrderId, Side};
+use shinrai_orders::{ExecId, OrderId, Side, TimeInForce};
 
 use crate::error::ExecutionError;
 use crate::report::{ExecutionReport, SessionId};
@@ -18,8 +18,10 @@ pub struct NewVenueOrder {
     pub side: Side,
     /// Remaining / total quantity.
     pub qty: QuantityLots,
-    /// Limit price.
+    /// Limit / reference price.
     pub price: PriceTicks,
+    /// Time in force (default GTC).
+    pub tif: TimeInForce,
 }
 
 /// Read-only view of a working order at the venue.
@@ -82,6 +84,18 @@ pub trait ExecutionVenue {
 
     /// Current-session Trade reports (in-process drop-copy for recon).
     fn trade_execs(&self) -> Vec<VenueTradeSnapshot>;
+
+    /// Requests replace of qty/price for an inflight order.
+    ///
+    /// # Errors
+    ///
+    /// Returns unknown-order, invalid qty, or disconnect errors.
+    fn replace(
+        &mut self,
+        order_id: OrderId,
+        new_qty: QuantityLots,
+        new_price: PriceTicks,
+    ) -> Result<(), ExecutionError>;
 
     /// Current session cursor (connected flag, session id, next seq).
     fn session_state(&self) -> VenueSessionState;

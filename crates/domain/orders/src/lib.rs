@@ -16,7 +16,7 @@ mod transition;
 pub use error::OrderError;
 pub use event::{DomainEffect, OrderEvent};
 pub use ids::{ClientOrderId, ExecId, OrderId, VenueOrderId};
-pub use order::{Order, OrderType, Side};
+pub use order::{Order, OrderType, Side, TimeInForce};
 pub use status::OrderStatus;
 pub use store::{CreateOrder, LoggedEvent, OrderStore, SubmitOutcome};
 pub use transition::apply;

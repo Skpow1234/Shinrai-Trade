@@ -215,6 +215,8 @@ cargo run -p shinrai-order-gateway
 curl -s -X POST "http://127.0.0.1:8081/v1/orders?token=dev" \
   -H 'content-type: application/json' \
   -d '{"client_order_id":"o1","symbol":"AAPL","side":"Buy","qty":10,"price":10000}'
+# Optional order_type (Limit|Market, default Limit) and tif (GTC|IOC|FOK, default GTC):
+# -d '{"client_order_id":"o2","symbol":"AAPL","side":"Buy","qty":10,"price":10000,"order_type":"Limit","tif":"IOC"}'
 ```
 
 Pre-trade risk runs before the OMS. Insufficient buying power returns **422** with `"code":"insufficient_buying_power"`. Duplicate `client_order_id` for the same account is idempotent (returns the existing order).
@@ -230,7 +232,7 @@ Pre-trade risk runs before the OMS. Insufficient buying power returns **422** wi
 | `SHINRAI_OTEL_ENDPOINT` | OTLP/HTTP base URL (e.g. `http://127.0.0.1:4318`); also accepts `OTEL_EXPORTER_OTLP_ENDPOINT` |
 | `SHINRAI_OUTBOX_POLL_MS` | Outbox publisher poll interval when Postgres is enabled (default `1000`) |
 
-Order-path spans (`order.submit`, `order.cancel`) carry `account_id`, `client_order_id` / `order_id`, and `outcome`. HTTP requests get a `tower-http` trace layer. Without an OTLP endpoint, spans still appear on stderr via the fmt layer.
+Order-path spans (`order.submit`, `order.cancel`, `order.replace`) carry `account_id`, `client_order_id` / `order_id`, and `outcome`. HTTP requests get a `tower-http` trace layer. Without an OTLP endpoint, spans still appear on stderr via the fmt layer.
 
 Additional authenticated routes:
 
@@ -244,6 +246,11 @@ curl "http://127.0.0.1:8081/v1/portfolio?token=dev&use_live_marks=1"
 
 # Append-only audit trail (paginate with after_seq)
 curl "http://127.0.0.1:8081/v1/audit?token=dev"
+
+# Replace working limit order (use resting venue / unfilled order)
+curl -s -X POST "http://127.0.0.1:8081/v1/orders/1/replace?token=dev" \
+  -H 'content-type: application/json' \
+  -d '{"qty":6,"price":9000}'
 
 # OMS vs venue (order snapshot + Trade drop-copy + ledger fill keys)
 curl "http://127.0.0.1:8081/v1/reconciliation?token=dev"

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use shinrai_instruments::{PriceTicks, QuantityLots};
-use shinrai_orders::{ExecId, OrderId, Side, VenueOrderId};
+use shinrai_orders::{ExecId, OrderId, Side, TimeInForce, VenueOrderId};
 
 use crate::error::ExecutionError;
 use crate::report::{ExecType, ExecutionReport, SessionId};
@@ -62,6 +62,16 @@ struct SubmitBody {
     order_id: u64,
     instrument_id: u64,
     side: String,
+    qty: i64,
+    price: i64,
+    /// Optional; defaults to GTC when omitted.
+    #[serde(default)]
+    tif: Option<String>,
+}
+
+/// Wire JSON for replace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReplaceBody {
     qty: i64,
     price: i64,
 }
@@ -119,6 +129,17 @@ impl LocalPaperState {
     fn handle(&mut self, req: &HttpRequest) -> Result<HttpResponse, ExecutionError> {
         match (req.method, req.path.as_str()) {
             (HttpMethod::Post, "/v1/orders") => self.handle_submit(&req.body),
+            (HttpMethod::Post, path)
+                if path.starts_with("/v1/orders/") && path.ends_with("/replace") =>
+            {
+                let id = path
+                    .trim_start_matches("/v1/orders/")
+                    .trim_end_matches("/replace")
+                    .trim_end_matches('/')
+                    .parse::<u64>()
+                    .map_err(|_| ExecutionError::InvalidIdentifier)?;
+                self.handle_replace(OrderId::from_u64(id), &req.body)
+            }
             (HttpMethod::Delete, path) if path.starts_with("/v1/orders/") => {
                 let id = path
                     .trim_start_matches("/v1/orders/")
@@ -196,12 +217,29 @@ impl LocalPaperState {
                 body: r#"{"error":"invalid_qty_or_price"}"#.into(),
             });
         }
+        let tif = parse_tif(submit.tif.as_deref());
         let order_id = OrderId::from_u64(submit.order_id);
         let venue_order_id = VenueOrderId::new(format!("REST-{}", self.next_venue))
             .map_err(|_| ExecutionError::InvalidIdentifier)?;
         self.next_venue = self.next_venue.saturating_add(1);
         let price = PriceTicks::from_scaled(submit.price);
         let qty = QuantityLots::from_lots(submit.qty);
+
+        if tif == TimeInForce::Fok && !self.auto_fill {
+            let reports = vec![self.report(
+                order_id,
+                &venue_order_id,
+                None,
+                "Rejected",
+                Some("fok".into()),
+                qty,
+                price,
+            )];
+            let body = serde_json::to_string(&ReportsResponse { reports })
+                .map_err(|_| ExecutionError::InvalidState("encode reports"))?;
+            return Ok(HttpResponse { status: 200, body });
+        }
+
         self.inflight.insert(
             order_id,
             Inflight {
@@ -230,6 +268,11 @@ impl LocalPaperState {
                 qty,
                 price,
             ));
+        } else if tif == TimeInForce::Ioc {
+            if let Some(row) = self.inflight.get_mut(&order_id) {
+                row.canceled = true;
+            }
+            reports.push(self.report(order_id, &venue_order_id, None, "Expired", None, qty, price));
         }
         let body = serde_json::to_string(&ReportsResponse { reports })
             .map_err(|_| ExecutionError::InvalidState("encode reports"))?;
@@ -272,6 +315,62 @@ impl LocalPaperState {
             "Canceled",
             None,
             leaves,
+            price,
+        )];
+        let body = serde_json::to_string(&ReportsResponse { reports })
+            .map_err(|_| ExecutionError::InvalidState("encode reports"))?;
+        Ok(HttpResponse { status: 200, body })
+    }
+
+    fn handle_replace(
+        &mut self,
+        order_id: OrderId,
+        body: &str,
+    ) -> Result<HttpResponse, ExecutionError> {
+        if !self.connected {
+            return Ok(HttpResponse {
+                status: 503,
+                body: r#"{"error":"disconnected"}"#.into(),
+            });
+        }
+        let replace: ReplaceBody = serde_json::from_str(body)
+            .map_err(|_| ExecutionError::InvalidState("bad replace json"))?;
+        if replace.qty <= 0 || replace.price <= 0 {
+            return Ok(HttpResponse {
+                status: 400,
+                body: r#"{"error":"invalid_qty_or_price"}"#.into(),
+            });
+        }
+        let Some(row) = self.inflight.get_mut(&order_id) else {
+            return Ok(HttpResponse {
+                status: 404,
+                body: r#"{"error":"unknown_order"}"#.into(),
+            });
+        };
+        if row.canceled {
+            return Ok(HttpResponse {
+                status: 409,
+                body: r#"{"error":"already_canceled"}"#.into(),
+            });
+        }
+        if replace.qty < row.cum_qty {
+            return Ok(HttpResponse {
+                status: 409,
+                body: r#"{"error":"qty_below_filled"}"#.into(),
+            });
+        }
+        row.order_qty = replace.qty;
+        row.price = PriceTicks::from_scaled(replace.price);
+        let venue_order_id = row.venue_order_id.clone();
+        let qty = QuantityLots::from_lots(replace.qty);
+        let price = PriceTicks::from_scaled(replace.price);
+        let reports = vec![self.report(
+            order_id,
+            &venue_order_id,
+            None,
+            "Replaced",
+            None,
+            qty,
             price,
         )];
         let body = serde_json::to_string(&ReportsResponse { reports })
@@ -492,13 +591,28 @@ impl RestPaperVenue {
                         .min(row.order_qty);
                 }
             }
-            ExecType::Canceled => {
+            ExecType::Canceled | ExecType::Expired => {
                 if let Some(row) = self.inflight.get_mut(&report.order_id()) {
                     row.canceled = true;
                 }
             }
+            ExecType::Replaced => {
+                if let Some(row) = self.inflight.get_mut(&report.order_id()) {
+                    row.order_qty = report.qty().lots();
+                    row.price = report.price();
+                }
+            }
             _ => {}
         }
+    }
+}
+
+fn parse_tif(raw: Option<&str>) -> TimeInForce {
+    let normalized = raw.map_or("GTC", str::trim).to_ascii_uppercase();
+    match normalized.as_str() {
+        "IOC" => TimeInForce::Ioc,
+        "FOK" => TimeInForce::Fok,
+        _ => TimeInForce::Gtc,
     }
 }
 
@@ -550,6 +664,7 @@ impl ExecutionVenue for RestPaperVenue {
             side: side.into(),
             qty: order.qty.lots(),
             price: order.price.scaled(),
+            tif: Some(order.tif.name().to_owned()),
         })
         .map_err(|_| ExecutionError::InvalidState("encode submit"))?;
         let resp = self.transport.request(&HttpRequest {
@@ -574,6 +689,34 @@ impl ExecutionVenue for RestPaperVenue {
         }
         if resp.status == 409 {
             return Err(ExecutionError::InvalidState("cancel conflict"));
+        }
+        self.enqueue_response(&resp)
+    }
+
+    fn replace(
+        &mut self,
+        order_id: OrderId,
+        new_qty: QuantityLots,
+        new_price: PriceTicks,
+    ) -> Result<(), ExecutionError> {
+        let body = serde_json::to_string(&ReplaceBody {
+            qty: new_qty.lots(),
+            price: new_price.scaled(),
+        })
+        .map_err(|_| ExecutionError::InvalidState("encode replace"))?;
+        let resp = self.transport.request(&HttpRequest {
+            method: HttpMethod::Post,
+            path: format!("/v1/orders/{}/replace", order_id.get()),
+            body,
+        })?;
+        if resp.status == 503 {
+            return Err(ExecutionError::Disconnected);
+        }
+        if resp.status == 404 {
+            return Err(ExecutionError::UnknownOrder { id: order_id });
+        }
+        if resp.status == 409 || resp.status == 400 {
+            return Err(ExecutionError::InvalidQuantity);
         }
         self.enqueue_response(&resp)
     }
@@ -707,6 +850,7 @@ mod tests {
                 side: Side::Buy,
                 qty: QuantityLots::from_lots(3),
                 price: PriceTicks::from_scaled(10_000),
+                tif: TimeInForce::Gtc,
             })
             .expect("submit");
         let reports = venue.poll();
@@ -727,6 +871,7 @@ mod tests {
                 side: Side::Buy,
                 qty: QuantityLots::from_lots(2),
                 price: PriceTicks::from_scaled(50),
+                tif: TimeInForce::Gtc,
             })
             .expect("submit");
         let _ = venue.poll();
@@ -746,6 +891,7 @@ mod tests {
                 side: Side::Buy,
                 qty: QuantityLots::from_lots(1),
                 price: PriceTicks::from_scaled(10),
+                tif: TimeInForce::Gtc,
             })
             .expect("submit");
         let _ = venue.poll();
@@ -758,6 +904,7 @@ mod tests {
                 side: Side::Buy,
                 qty: QuantityLots::from_lots(1),
                 price: PriceTicks::from_scaled(10),
+                tif: TimeInForce::Gtc,
             }),
             Err(ExecutionError::Disconnected)
         );
@@ -778,6 +925,7 @@ mod tests {
                 side: Side::Buy,
                 qty: QuantityLots::from_lots(2),
                 price: PriceTicks::from_scaled(5),
+                tif: TimeInForce::Gtc,
             })
             .expect("submit");
         let _ = venue.poll();

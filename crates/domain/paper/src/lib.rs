@@ -8,7 +8,7 @@ mod notional;
 mod reconcile;
 mod venue;
 
-pub use engine::{PaperEngine, SubmitRequest};
+pub use engine::{PaperEngine, ReplaceRequest, SubmitRequest};
 pub use error::PaperError;
 pub use notional::notional;
 pub use reconcile::{ReconciliationKind, ReconciliationMismatch, ReconciliationReport};

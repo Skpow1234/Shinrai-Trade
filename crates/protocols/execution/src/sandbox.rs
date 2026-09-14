@@ -6,7 +6,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use shinrai_instruments::{PriceTicks, QuantityLots};
-use shinrai_orders::{ExecId, OrderId, VenueOrderId};
+use shinrai_orders::{ExecId, OrderId, TimeInForce, VenueOrderId};
 
 use crate::error::ExecutionError;
 use crate::report::{ExecType, ExecutionReport, SessionId};
@@ -195,6 +195,21 @@ impl ExecutionVenue for SandboxBroker {
             return Err(ExecutionError::InvalidQuantity);
         }
         let venue_order_id = self.alloc_venue_id()?;
+
+        if order.tif == TimeInForce::Fok && !self.config.auto_fill {
+            self.push_report(
+                order.order_id,
+                venue_order_id,
+                None,
+                ExecType::Rejected {
+                    reason: "fok".into(),
+                },
+                order.qty,
+                order.price,
+            );
+            return Ok(());
+        }
+
         self.inflight.insert(
             order.order_id,
             Inflight {
@@ -223,6 +238,18 @@ impl ExecutionVenue for SandboxBroker {
                 venue_order_id,
                 Some(exec_id),
                 ExecType::Trade,
+                order.qty,
+                order.price,
+            );
+        } else if order.tif == TimeInForce::Ioc {
+            if let Some(row) = self.inflight.get_mut(&order.order_id) {
+                row.canceled = true;
+            }
+            self.push_report(
+                order.order_id,
+                venue_order_id,
+                None,
+                ExecType::Expired,
                 order.qty,
                 order.price,
             );
@@ -305,6 +332,41 @@ impl ExecutionVenue for SandboxBroker {
             .collect()
     }
 
+    fn replace(
+        &mut self,
+        order_id: OrderId,
+        new_qty: QuantityLots,
+        new_price: PriceTicks,
+    ) -> Result<(), ExecutionError> {
+        if !self.connected {
+            return Err(ExecutionError::Disconnected);
+        }
+        if new_qty.lots() <= 0 || new_price.scaled() <= 0 {
+            return Err(ExecutionError::InvalidQuantity);
+        }
+        let Some(row) = self.inflight.get_mut(&order_id) else {
+            return Err(ExecutionError::UnknownOrder { id: order_id });
+        };
+        if row.canceled {
+            return Err(ExecutionError::InvalidState("already canceled"));
+        }
+        if new_qty.lots() < row.cum_qty {
+            return Err(ExecutionError::InvalidQuantity);
+        }
+        row.order_qty = new_qty.lots();
+        row.price = new_price;
+        let venue_order_id = row.venue_order_id.clone();
+        self.push_report(
+            order_id,
+            venue_order_id,
+            None,
+            ExecType::Replaced,
+            new_qty,
+            new_price,
+        );
+        Ok(())
+    }
+
     fn session_state(&self) -> VenueSessionState {
         if self.connected {
             VenueSessionState::connected(self.session, self.next_seq)
@@ -344,22 +406,65 @@ mod tests {
     use shinrai_instruments::InstrumentId;
     use shinrai_orders::Side;
 
+    fn gtc_order(id: u64, qty: i64) -> NewVenueOrder {
+        NewVenueOrder {
+            order_id: OrderId::from_u64(id),
+            instrument_id: InstrumentId::from_u64(1),
+            side: Side::Buy,
+            qty: QuantityLots::from_lots(qty),
+            price: PriceTicks::from_scaled(10_000),
+            tif: TimeInForce::Gtc,
+        }
+    }
+
     #[test]
     fn auto_fill_emits_new_then_trade() {
         let mut sbx = SandboxBroker::new(SandboxConfig::happy_path());
-        sbx.submit(&NewVenueOrder {
-            order_id: OrderId::from_u64(1),
-            instrument_id: InstrumentId::from_u64(1),
-            side: Side::Buy,
-            qty: QuantityLots::from_lots(5),
-            price: PriceTicks::from_scaled(10_000),
-        })
-        .expect("submit");
+        sbx.submit(&gtc_order(1, 5)).expect("submit");
         let reports = sbx.poll();
         assert_eq!(reports.len(), 2);
         assert!(matches!(reports[0].exec_type(), ExecType::New));
         assert!(matches!(reports[1].exec_type(), ExecType::Trade));
         assert_eq!(sbx.venue_order(OrderId::from_u64(1)).unwrap().cum_qty, 5);
+    }
+
+    #[test]
+    fn fok_ack_only_rejects() {
+        let mut sbx = SandboxBroker::new(SandboxConfig::ack_only());
+        sbx.submit(&NewVenueOrder {
+            order_id: OrderId::from_u64(7),
+            instrument_id: InstrumentId::from_u64(1),
+            side: Side::Buy,
+            qty: QuantityLots::from_lots(3),
+            price: PriceTicks::from_scaled(10),
+            tif: TimeInForce::Fok,
+        })
+        .expect("submit");
+        let reports = sbx.poll();
+        assert_eq!(reports.len(), 1);
+        assert!(matches!(
+            reports[0].exec_type(),
+            ExecType::Rejected { reason } if reason == "fok"
+        ));
+        assert!(sbx.venue_order(OrderId::from_u64(7)).is_none());
+    }
+
+    #[test]
+    fn ioc_ack_only_expires() {
+        let mut sbx = SandboxBroker::new(SandboxConfig::ack_only());
+        sbx.submit(&NewVenueOrder {
+            order_id: OrderId::from_u64(8),
+            instrument_id: InstrumentId::from_u64(1),
+            side: Side::Buy,
+            qty: QuantityLots::from_lots(3),
+            price: PriceTicks::from_scaled(10),
+            tif: TimeInForce::Ioc,
+        })
+        .expect("submit");
+        let reports = sbx.poll();
+        assert_eq!(reports.len(), 2);
+        assert!(matches!(reports[0].exec_type(), ExecType::New));
+        assert!(matches!(reports[1].exec_type(), ExecType::Expired));
     }
 
     #[test]
@@ -371,6 +476,7 @@ mod tests {
             side: Side::Buy,
             qty: QuantityLots::from_lots(1),
             price: PriceTicks::from_scaled(10),
+            tif: TimeInForce::Gtc,
         })
         .expect("submit");
         let _ = sbx.poll();
@@ -383,6 +489,7 @@ mod tests {
                 side: Side::Buy,
                 qty: QuantityLots::from_lots(1),
                 price: PriceTicks::from_scaled(10),
+                tif: TimeInForce::Gtc,
             }),
             Err(ExecutionError::Disconnected)
         );
@@ -403,6 +510,7 @@ mod tests {
             side: Side::Buy,
             qty: QuantityLots::from_lots(2),
             price: PriceTicks::from_scaled(5),
+            tif: TimeInForce::Gtc,
         })
         .expect("submit");
         let _ = sbx.poll();

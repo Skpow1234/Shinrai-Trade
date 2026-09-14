@@ -408,6 +408,21 @@ impl AppState {
         Self::from_config(&cfg)
     }
 
+    /// Test helper with sim venue resting fills (no auto-fill).
+    #[must_use]
+    pub fn for_test_resting(token: &str, subject: &str, account: u64, deposit_major: i64) -> Self {
+        use shinrai_exchange_simulator::{FaultConfig, FillPolicy};
+        let state = Self::for_test(token, subject, account, deposit_major);
+        {
+            let mut engine = lock_engine(&state);
+            engine.set_sim_faults(FaultConfig {
+                fill_policy: FillPolicy::Rest,
+                ..FaultConfig::happy_path()
+            });
+        }
+        state
+    }
+
     /// Test helper with write-through to Postgres (caller migrates the pool).
     pub async fn for_test_with_store(
         token: &str,
@@ -496,6 +511,7 @@ impl AppState {
             shinrai_instruments::InstrumentId::from_u64(1),
             shinrai_orders::Side::Buy,
             shinrai_orders::OrderType::Limit,
+            shinrai_orders::TimeInForce::Gtc,
             shinrai_orders::OrderStatus::PendingNew,
             shinrai_instruments::QuantityLots::from_lots(1),
             shinrai_instruments::PriceTicks::from_scaled(100),
@@ -580,6 +596,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/orders/{id}/cancel",
             post(crate::orders_http::post_cancel),
+        )
+        .route(
+            "/v1/orders/{id}/replace",
+            post(crate::orders_http::post_replace),
         )
         .route("/v1/portfolio", get(crate::portfolio_http::get_portfolio))
         .route("/v1/audit", get(crate::portfolio_http::get_audit))

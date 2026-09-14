@@ -228,6 +228,60 @@ mod tests {
     }
 
     #[test]
+    fn replace_new_qty_and_price() {
+        let o = accept(&seed());
+        let (o, effects) = apply(
+            &o,
+            &OrderEvent::ReplaceRequested {
+                new_qty: QuantityLots::from_lots(8),
+                new_price: PriceTicks::from_scaled(110),
+            },
+        )
+        .expect("replace req");
+        assert_eq!(o.status(), OrderStatus::PendingReplace);
+        assert!(matches!(effects.as_slice(), [DomainEffect::ReplacePending]));
+        let (o, effects) = apply(
+            &o,
+            &OrderEvent::Replaced {
+                new_qty: QuantityLots::from_lots(8),
+                new_price: PriceTicks::from_scaled(110),
+            },
+        )
+        .expect("replaced");
+        assert_eq!(o.status(), OrderStatus::New);
+        assert_eq!(o.order_qty().lots(), 8);
+        assert_eq!(o.price().scaled(), 110);
+        assert_eq!(o.leaves_qty().lots(), 8);
+        assert!(matches!(
+            effects.as_slice(),
+            [DomainEffect::Replaced { .. }]
+        ));
+    }
+
+    #[test]
+    fn replace_below_filled_rejected() {
+        let o = accept(&seed());
+        let (o, _) = apply(
+            &o,
+            &OrderEvent::Trade {
+                exec_id: ExecId::new("e1").expect("e"),
+                qty: QuantityLots::from_lots(4),
+                price: PriceTicks::from_scaled(100),
+            },
+        )
+        .expect("partial");
+        let err = apply(
+            &o,
+            &OrderEvent::ReplaceRequested {
+                new_qty: QuantityLots::from_lots(3),
+                new_price: PriceTicks::from_scaled(100),
+            },
+        )
+        .expect_err("below filled");
+        assert!(matches!(err, OrderError::ReplaceBelowFilled { .. }));
+    }
+
+    #[test]
     fn exhaustive_illegal_from_terminal_filled() {
         let o = accept(&seed());
         let (o, _) = apply(

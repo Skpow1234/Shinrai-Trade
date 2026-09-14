@@ -54,6 +54,96 @@ async fn submit_buy_fills() {
 }
 
 #[tokio::test]
+async fn replace_resting_limit_order() {
+    let app = router(AppState::for_test_resting("repl-tok", "trader", 1, 10_000));
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/orders?token=repl-tok")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "client_order_id": "repl-1",
+                        "symbol": "AAPL",
+                        "side": "Buy",
+                        "qty": 10,
+                        "price": 10000
+                    })
+                    .to_string(),
+                ))
+                .expect("req"),
+        )
+        .await
+        .expect("resp");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("bytes");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["status"], "New");
+    let order_id = json["id"].as_u64().expect("id");
+
+    let repl = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/orders/{order_id}/replace?token=repl-tok"))
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "qty": 6, "price": 9000 }).to_string()))
+                .expect("req"),
+        )
+        .await
+        .expect("repl");
+    assert_eq!(repl.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(repl.into_body(), usize::MAX)
+        .await
+        .expect("bytes");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["status"], "New");
+    assert_eq!(json["order_qty"], 6);
+    assert_eq!(json["price"], 9000);
+    assert_eq!(json["leaves_qty"], 6);
+}
+
+#[tokio::test]
+async fn ioc_on_resting_venue_expires() {
+    let app = router(AppState::for_test_resting("ioc-tok", "trader", 1, 10_000));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/orders?token=ioc-tok")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "client_order_id": "ioc-1",
+                        "symbol": "AAPL",
+                        "side": "Buy",
+                        "qty": 3,
+                        "price": 10000,
+                        "tif": "IOC"
+                    })
+                    .to_string(),
+                ))
+                .expect("req"),
+        )
+        .await
+        .expect("resp");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("bytes");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["status"], "Expired");
+    assert_eq!(json["tif"], "IOC");
+    assert_eq!(json["cum_qty"], 0);
+}
+
+#[tokio::test]
 async fn risk_rejects_insufficient_funds() {
     let app = router(AppState::for_test("paper-tok", "trader", 1, 1));
 

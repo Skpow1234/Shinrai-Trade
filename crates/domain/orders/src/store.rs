@@ -8,7 +8,7 @@ use shinrai_ledger::AccountId;
 use crate::error::OrderError;
 use crate::event::{DomainEffect, OrderEvent};
 use crate::ids::{ClientOrderId, OrderId};
-use crate::order::{Order, Side};
+use crate::order::{Order, OrderType, Side, TimeInForce};
 use crate::transition::apply;
 
 /// Request to create a new order.
@@ -24,8 +24,12 @@ pub struct CreateOrder {
     pub side: Side,
     /// Quantity in lots.
     pub order_qty: QuantityLots,
-    /// Limit price in ticks.
+    /// Limit / reference price in ticks.
     pub price: PriceTicks,
+    /// Order type (default Limit).
+    pub order_type: OrderType,
+    /// Time in force (default GTC).
+    pub time_in_force: TimeInForce,
 }
 
 /// Outcome of [`OrderStore::submit`].
@@ -114,12 +118,14 @@ impl OrderStore {
             .checked_add(1)
             .ok_or(OrderError::InvalidQuantity)?;
         let id = OrderId::from_u64(self.next_id);
-        let order = Order::new_pending(
+        let order = Order::new_pending_typed(
             id,
             req.account_id,
             req.client_order_id.clone(),
             req.instrument_id,
             req.side,
+            req.order_type,
+            req.time_in_force,
             req.order_qty,
             req.price,
         )?;
@@ -207,6 +213,8 @@ mod tests {
             side: Side::Buy,
             order_qty: QuantityLots::from_lots(5),
             price: PriceTicks::from_scaled(50),
+            order_type: OrderType::Limit,
+            time_in_force: TimeInForce::Gtc,
         }
     }
 

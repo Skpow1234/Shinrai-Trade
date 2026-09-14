@@ -84,6 +84,8 @@ fn run_actions(actions: &[Action], faults: FaultConfig) {
                     side: Side::Buy,
                     qty: QuantityLots::from_lots(*qty),
                     price: PriceTicks::from_scaled(*price_scaled),
+                    order_type: shinrai_orders::OrderType::Limit,
+                    time_in_force: shinrai_orders::TimeInForce::Gtc,
                 };
                 let before_orders = engine.orders().len();
                 let before_cash = engine.book().available(acc, Currency::usd()).minor_units();
