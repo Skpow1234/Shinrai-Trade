@@ -33,6 +33,7 @@ pub struct GatewayMetrics {
     orders_risk_rejected: AtomicU64,
     orders_canceled: AtomicU64,
     dual_write_failures: AtomicU64,
+    persist_degraded: AtomicU64,
     risk_reject_codes: Mutex<HashMap<String, u64>>,
 }
 
@@ -67,9 +68,16 @@ impl GatewayMetrics {
         self.orders_canceled.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Records a fail-soft dual-write error.
+    /// Records a required persist failure (store is authoritative when configured).
     pub fn record_dual_write_failure(&self) {
         self.dual_write_failures.fetch_add(1, Ordering::Relaxed);
+        self.persist_degraded.store(1, Ordering::Release);
+    }
+
+    /// Whether the gateway has entered persist-degraded mode (kill switch engaged).
+    #[must_use]
+    pub fn is_persist_degraded(&self) -> bool {
+        self.persist_degraded.load(Ordering::Acquire) != 0
     }
 
     /// JSON snapshot of atomic counters (no OMS lock).
@@ -86,6 +94,7 @@ impl GatewayMetrics {
             "orders_risk_rejected": self.orders_risk_rejected.load(Ordering::Relaxed),
             "orders_canceled": self.orders_canceled.load(Ordering::Relaxed),
             "dual_write_failures": self.dual_write_failures.load(Ordering::Relaxed),
+            "persist_degraded": self.is_persist_degraded(),
             "risk_rejects_by_code": risk_by_code,
         })
     }
@@ -102,12 +111,14 @@ pub struct AppState {
     pub(crate) marks: Arc<Mutex<MarkStore>>,
     pub(crate) md_base_url: Option<String>,
     pub(crate) md_token: Option<String>,
-    /// Optional Postgres dual-write (set when `SHINRAI_DATABASE_URL` is configured).
+    /// Optional Postgres write-through (set when `SHINRAI_DATABASE_URL` is configured).
     pub(crate) store: Option<StorePool>,
-    /// Highest audit `seq` successfully dual-written (watermark).
+    /// Highest audit `seq` successfully persisted (watermark).
     pub(crate) audit_persisted_seq: Arc<AtomicU64>,
     /// Stuck pending age threshold (logical seconds).
     pub(crate) stuck_age_secs: u64,
+    /// Outbox publisher counters (shared with background task).
+    pub(crate) outbox_metrics: Arc<crate::outbox_publisher::OutboxMetrics>,
 }
 
 /// Process configuration (tokens / secrets are not displayed).
@@ -253,11 +264,19 @@ impl AppState {
             store: None,
             audit_persisted_seq: Arc::new(AtomicU64::new(0)),
             stuck_age_secs: config.stuck_age_secs,
+            outbox_metrics: Arc::new(crate::outbox_publisher::OutboxMetrics::default()),
         }
     }
 
-    /// Attaches a Postgres pool for fail-soft dual-write after trading mutations.
-    pub fn attach_store(&mut self, pool: StorePool) {
+    /// Attaches a Postgres pool for write-through after trading mutations.
+    pub async fn attach_store(&mut self, pool: StorePool) {
+        if let Ok(orders) = shinrai_store::list_orders(&pool).await {
+            let max_id = orders.iter().map(|o| o.id.get()).max().unwrap_or(0);
+            if max_id > 0 {
+                let mut engine = lock_engine(self);
+                engine.bump_order_ids_past(max_id);
+            }
+        }
         self.store = Some(pool);
     }
 
@@ -280,17 +299,30 @@ impl AppState {
         Ok(())
     }
 
-    /// Dual-writes bootstrap ledger/audit (deposits) after `attach_store`.
-    pub async fn persist_bootstrap(&self) {
-        self.maybe_persist(None).await;
+    /// Persists bootstrap ledger/audit (deposits) after `attach_store`.
+    ///
+    /// # Errors
+    ///
+    /// Returns store errors when write-through fails.
+    pub async fn persist_bootstrap(&self) -> Result<(), shinrai_store::StoreError> {
+        self.must_persist(None).await
     }
 
-    /// Best-effort dual-write of order (if any), full ledger journal, and new audit rows.
+    /// Required write-through of order (if any), full ledger journal, and new audit rows.
     ///
-    /// In-memory state is already committed; store failures are logged only.
-    pub async fn maybe_persist(&self, order: Option<&Order>) {
+    /// When no store is configured, this is a no-op. On failure: engages the global
+    /// kill switch, marks persist degraded, and returns the store error so HTTP
+    /// handlers can refuse to ack the client.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`shinrai_store::StoreError`] when Postgres write fails.
+    pub async fn must_persist(
+        &self,
+        order: Option<&Order>,
+    ) -> Result<(), shinrai_store::StoreError> {
         let Some(pool) = &self.store else {
-            return;
+            return Ok(());
         };
         let after = self.audit_persisted_seq.load(Ordering::Acquire);
         let batch = {
@@ -307,12 +339,30 @@ impl AppState {
                 if let Some(seq) = max_seq {
                     self.audit_persisted_seq.fetch_max(seq, Ordering::Release);
                 }
+                Ok(())
             }
             Err(err) => {
                 self.metrics.record_dual_write_failure();
-                eprintln!("shinrai-order-gateway: dual-write failed: {err}");
+                {
+                    let mut engine = lock_engine(self);
+                    engine.risk_mut().set_global_kill(true);
+                }
+                eprintln!("shinrai-order-gateway: persist failed (kill switch engaged): {err}");
+                Err(err)
             }
         }
+    }
+
+    /// Shared outbox metrics handle (for background publisher).
+    #[must_use]
+    pub fn outbox_metrics(&self) -> Arc<crate::outbox_publisher::OutboxMetrics> {
+        Arc::clone(&self.outbox_metrics)
+    }
+
+    /// Optional store pool clone for background tasks.
+    #[must_use]
+    pub fn store_pool(&self) -> Option<StorePool> {
+        self.store.clone()
     }
 
     /// Test helper with a single static access token and one mapped account.
@@ -341,7 +391,7 @@ impl AppState {
         Self::from_config(&cfg)
     }
 
-    /// Test helper with dual-write to Postgres (caller migrates the pool).
+    /// Test helper with write-through to Postgres (caller migrates the pool).
     pub async fn for_test_with_store(
         token: &str,
         subject: &str,
@@ -350,8 +400,30 @@ impl AppState {
         pool: StorePool,
     ) -> Self {
         let mut state = Self::for_test(token, subject, account, deposit_major);
-        state.attach_store(pool);
-        state.persist_bootstrap().await;
+        state.attach_store(pool).await;
+        state.persist_bootstrap().await.expect("persist bootstrap");
+        state
+    }
+
+    /// Test helper: sim venue with [`FillPolicy::Rest`] + Postgres write-through.
+    pub async fn for_test_with_store_resting(
+        token: &str,
+        subject: &str,
+        account: u64,
+        deposit_major: i64,
+        pool: StorePool,
+    ) -> Self {
+        use shinrai_exchange_simulator::{FaultConfig, FillPolicy};
+        let mut state = Self::for_test(token, subject, account, deposit_major);
+        {
+            let mut engine = lock_engine(&state);
+            engine.set_sim_faults(FaultConfig {
+                fill_policy: FillPolicy::Rest,
+                ..FaultConfig::happy_path()
+            });
+        }
+        state.attach_store(pool).await;
+        state.persist_bootstrap().await.expect("persist bootstrap");
         state
     }
 
@@ -369,6 +441,15 @@ impl AppState {
             Vec::new(),
             TokenTtl::default(),
         ));
+        // Resting venue so hydrate-restored working orders are not auto-filled.
+        {
+            use shinrai_exchange_simulator::{FaultConfig, FillPolicy};
+            let mut engine = lock_engine(&state);
+            engine.set_sim_faults(FaultConfig {
+                fill_policy: FillPolicy::Rest,
+                ..FaultConfig::happy_path()
+            });
+        }
         state
             .hydrate_from_store(pool)
             .await

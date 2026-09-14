@@ -23,7 +23,7 @@ pub enum PaperError {
     Ledger(LedgerError),
     /// Venue / execution adapter error.
     Venue(ExecutionError),
-    /// Only buy orders are wired to cash reserve / settle in Phase 1.
+    /// Side is not supported by this paper configuration (unused; sells are wired).
     UnsupportedSide,
     /// Fill notional was not exact in the quote currency scale.
     InexactNotional,
@@ -44,7 +44,7 @@ impl fmt::Display for PaperError {
             Self::Order(e) => write!(f, "{e}"),
             Self::Ledger(e) => write!(f, "{e}"),
             Self::Venue(e) => write!(f, "{e}"),
-            Self::UnsupportedSide => f.write_str("only buy orders are supported in phase 1 paper"),
+            Self::UnsupportedSide => f.write_str("unsupported order side"),
             Self::InexactNotional => f.write_str("notional is not exact in quote currency scale"),
             Self::ReservationShortfall { order_id } => {
                 write!(f, "reservation shortfall for order {order_id}")

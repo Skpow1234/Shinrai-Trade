@@ -183,6 +183,11 @@ pub async fn get_metrics(State(state): State<AppState>) -> Json<Value> {
                 .audit_persisted_seq
                 .load(std::sync::atomic::Ordering::Relaxed)),
         );
+        if let Some(outbox) = state.outbox_metrics.snapshot().as_object() {
+            for (k, v) in outbox {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
         if let Some(ops_obj) = ops.as_object() {
             for (k, v) in ops_obj {
                 obj.insert(k.clone(), v.clone());

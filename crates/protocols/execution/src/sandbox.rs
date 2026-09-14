@@ -99,6 +99,46 @@ impl SandboxBroker {
         self.outbox.push_back(report);
     }
 
+    /// Restores a working order without emitting ack/fill reports (startup hydrate).
+    ///
+    /// # Errors
+    ///
+    /// Returns quantity / identifier errors.
+    pub fn restore_working(
+        &mut self,
+        order_id: OrderId,
+        order_qty: QuantityLots,
+        price: PriceTicks,
+        cum_qty: i64,
+        venue_order_id: Option<VenueOrderId>,
+    ) -> Result<(), ExecutionError> {
+        if order_qty.lots() <= 0 || price.scaled() <= 0 {
+            return Err(ExecutionError::InvalidQuantity);
+        }
+        if cum_qty < 0 || cum_qty > order_qty.lots() {
+            return Err(ExecutionError::InvalidQuantity);
+        }
+        let venue_order_id = if let Some(id) = venue_order_id {
+            id
+        } else {
+            let id = VenueOrderId::new(format!("SBX-{}", self.next_venue))
+                .map_err(|_| ExecutionError::InvalidIdentifier)?;
+            self.next_venue = self.next_venue.saturating_add(1);
+            id
+        };
+        self.inflight.insert(
+            order_id,
+            Inflight {
+                venue_order_id,
+                order_qty: order_qty.lots(),
+                cum_qty,
+                price,
+                canceled: false,
+            },
+        );
+        Ok(())
+    }
+
     fn push_report(
         &mut self,
         order_id: OrderId,

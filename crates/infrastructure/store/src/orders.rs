@@ -97,7 +97,9 @@ impl From<OrderStatus> for StoredStatus {
 }
 
 impl StoredStatus {
-    fn as_str(self) -> &'static str {
+    /// Stable status label (matches [`OrderStatus`] Display).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::PendingNew => "PendingNew",
             Self::New => "New",
@@ -242,7 +244,7 @@ pub async fn upsert_order(pool: &PgPool, snap: &OrderSnapshot) -> Result<(), Sto
     Ok(())
 }
 
-async fn upsert_order_tx(
+pub(crate) async fn upsert_order_tx(
     tx: &mut Transaction<'_, Postgres>,
     snap: &OrderSnapshot,
 ) -> Result<(), StoreError> {

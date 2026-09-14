@@ -1,11 +1,11 @@
-//! Dual-write in-memory paper state to `shinrai-store` when Postgres is configured.
+//! Authoritative write-through of paper state to `shinrai-store`.
 
 use shinrai_audit::AuditRecord;
 use shinrai_orders::Order;
 use shinrai_paper::PaperEngine;
 use shinrai_store::{
-    insert_audit_record, insert_ledger_entry, upsert_order, upsert_paper_position,
-    LedgerEntrySnapshot, OrderSnapshot, PaperPositionSnapshot, StoreError, StorePool,
+    persist_trading_batch, LedgerEntrySnapshot, OrderSnapshot, PaperPositionSnapshot, StoreError,
+    StorePool, TradingBatch,
 };
 
 /// Snapshot collected under the engine lock for async persistence.
@@ -55,27 +55,17 @@ pub(crate) fn collect_batch(
     }
 }
 
-/// Writes a batch. Ledger inserts are idempotent; audit uses `ON CONFLICT DO NOTHING`.
+/// Writes a batch in one transaction. Required when Postgres is configured.
 ///
 /// # Errors
 ///
-/// Returns the first store error.
+/// Returns store errors (caller must not ack the client).
 pub(crate) async fn write_batch(pool: &StorePool, batch: &PersistBatch) -> Result<(), StoreError> {
-    if let Some(order) = &batch.order {
-        upsert_order(pool, order).await?;
-    }
-    for entry in &batch.ledger {
-        let payload = serde_json::json!({
-            "idempotency_key": entry.idempotency_key,
-            "kind": "ledger_posted",
-        });
-        insert_ledger_entry(pool, entry, Some("ledger.posted"), Some(payload)).await?;
-    }
-    for record in &batch.audit {
-        insert_audit_record(pool, record).await?;
-    }
-    for pos in &batch.positions {
-        upsert_paper_position(pool, pos).await?;
-    }
-    Ok(())
+    let trading = TradingBatch {
+        order: batch.order.clone(),
+        ledger: batch.ledger.clone(),
+        audit: batch.audit.clone(),
+        positions: batch.positions.clone(),
+    };
+    persist_trading_batch(pool, &trading).await
 }

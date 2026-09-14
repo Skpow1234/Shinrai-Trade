@@ -136,7 +136,10 @@ pub async fn post_order(
                 span.record("outcome", "created");
                 state.metrics.record_accepted();
                 record_fill_mark(&state, &order);
-                state.maybe_persist(Some(&order)).await;
+                if let Err(err) = state.must_persist(Some(&order)).await {
+                    span.record("outcome", "persist_failed");
+                    return persist_failed(&err);
+                }
                 (StatusCode::OK, Json(order_json(&state, &order))).into_response()
             }
             Ok(SubmitOutcome::Duplicate(order)) => {
@@ -145,13 +148,19 @@ pub async fn post_order(
                 span.record("outcome", "duplicate");
                 state.metrics.record_accepted();
                 record_fill_mark(&state, &order);
-                state.maybe_persist(Some(&order)).await;
+                if let Err(err) = state.must_persist(Some(&order)).await {
+                    span.record("outcome", "persist_failed");
+                    return persist_failed(&err);
+                }
                 (StatusCode::OK, Json(order_json(&state, &order))).into_response()
             }
             Err(PaperError::Risk(reason)) => {
                 tracing::Span::current().record("outcome", reason.code());
                 state.metrics.record_risk_rejected_code(reason.code());
-                state.maybe_persist(None).await;
+                if let Err(err) = state.must_persist(None).await {
+                    tracing::Span::current().record("outcome", "persist_failed");
+                    return persist_failed(&err);
+                }
                 risk_rejected(reason.code())
             }
             Err(PaperError::Instrument(_) | PaperError::Order(_)) => {
@@ -287,7 +296,10 @@ pub async fn post_cancel(
         };
         tracing::Span::current().record("outcome", "canceled");
         state.metrics.record_canceled();
-        state.maybe_persist(Some(&canceled)).await;
+        if let Err(err) = state.must_persist(Some(&canceled)).await {
+            tracing::Span::current().record("outcome", "persist_failed");
+            return persist_failed(&err);
+        }
         (StatusCode::OK, Json(order_json(&state, &canceled))).into_response()
     }
     .instrument(span)
@@ -353,6 +365,18 @@ fn risk_rejected(code: &'static str) -> Response {
     (
         StatusCode::UNPROCESSABLE_ENTITY,
         Json(json!({ "type": "error", "code": code })),
+    )
+        .into_response()
+}
+
+fn persist_failed(err: &shinrai_store::StoreError) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "type": "error",
+            "code": "persist_failed",
+            "detail": err.to_string(),
+        })),
     )
         .into_response()
 }

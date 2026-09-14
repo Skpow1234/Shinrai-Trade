@@ -12,7 +12,11 @@ mod md_client;
 mod ops;
 mod ops_http;
 mod orders_http;
+mod outbox_publisher;
 mod persist;
 mod portfolio_http;
 
 pub use app::{router, unix_logical_now, AppState, GatewayConfig};
+pub use outbox_publisher::{
+    publish_once as publish_outbox_once, run_publisher as run_outbox_publisher,
+};

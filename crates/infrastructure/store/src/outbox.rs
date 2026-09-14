@@ -50,7 +50,9 @@ pub(crate) async fn insert_outbox_tx(
     Ok(id)
 }
 
-/// Claims unpublished events (oldest first).
+/// Lists unpublished events (oldest first). Safe for a single publisher process.
+///
+/// Multi-writer claim stamps are Phase 4; consumers must be idempotent.
 ///
 /// # Errors
 ///

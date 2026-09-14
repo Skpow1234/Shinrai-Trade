@@ -1,6 +1,6 @@
 //! Ledger entry + posting persistence (with optional outbox in one transaction).
 
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 
 use shinrai_instruments::InstrumentId;
 use shinrai_ledger::{AccountId, BalancedEntry, Direction, EntryBuilder, LedgerAccount, Posting};
@@ -245,7 +245,17 @@ pub async fn insert_ledger_entry(
     outbox_payload: Option<serde_json::Value>,
 ) -> Result<i64, StoreError> {
     let mut tx = pool.begin().await?;
+    let entry_id = insert_ledger_entry_tx(&mut tx, snap, outbox_topic, outbox_payload).await?;
+    tx.commit().await?;
+    Ok(entry_id)
+}
 
+pub(crate) async fn insert_ledger_entry_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    snap: &LedgerEntrySnapshot,
+    outbox_topic: Option<&str>,
+    outbox_payload: Option<serde_json::Value>,
+) -> Result<i64, StoreError> {
     let inserted: Option<(i64,)> = sqlx::query_as(
         r"
         INSERT INTO ledger_entries (idempotency_key, causation_id, correlation_id)
@@ -257,7 +267,7 @@ pub async fn insert_ledger_entry(
     .bind(&snap.idempotency_key)
     .bind(snap.causation_id.as_deref())
     .bind(snap.correlation_id.as_deref())
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
 
     let entry_id = if let Some((id,)) = inserted {
@@ -287,24 +297,23 @@ pub async fn insert_ledger_entry(
             )
             .bind(direction)
             .bind(p.minor_units.to_string())
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         }
 
         if let (Some(topic), Some(payload)) = (outbox_topic, outbox_payload) {
-            outbox::insert_outbox_tx(&mut tx, topic, &payload).await?;
+            outbox::insert_outbox_tx(tx, topic, &payload).await?;
         }
         id
     } else {
         let (id,): (i64,) =
             sqlx::query_as("SELECT id FROM ledger_entries WHERE idempotency_key = $1")
                 .bind(&snap.idempotency_key)
-                .fetch_one(&mut *tx)
+                .fetch_one(&mut **tx)
                 .await?;
         id
     };
 
-    tx.commit().await?;
     Ok(entry_id)
 }
 

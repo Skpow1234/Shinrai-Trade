@@ -6,7 +6,9 @@
 #![forbid(unsafe_code)]
 
 mod audit;
+mod batch;
 mod error;
+mod inbox;
 mod ledger;
 mod orders;
 mod outbox;
@@ -14,7 +16,9 @@ mod pool;
 mod positions;
 
 pub use audit::{insert_audit_record, load_audit_after};
+pub use batch::{persist_trading_batch, TradingBatch};
 pub use error::StoreError;
+pub use inbox::try_claim_inbox;
 pub use ledger::{
     insert_ledger_entry, list_ledger_entries, load_ledger_entry_by_key, LedgerEntrySnapshot,
     LedgerPostingSnapshot,

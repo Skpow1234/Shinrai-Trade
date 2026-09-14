@@ -66,7 +66,7 @@ Shinrai-Trade/
 
 ## PostgreSQL
 
-Dev Postgres for `shinrai-store` (orders, ledger, audit, transactional outbox). Domain crates stay free of Docker. With `SHINRAI_DATABASE_URL` set, the order gateway **dual-writes** to Postgres and **hydrates** `PaperEngine` from durable rows on restart. Without the URL, OG stays in-memory only.
+Dev Postgres for `shinrai-store` (orders, ledger, audit, transactional outbox). Domain crates stay free of Docker. With `SHINRAI_DATABASE_URL` set, the order gateway **write-through** persists to Postgres before ack and **hydrates** `PaperEngine` (including working orders) on restart. Without the URL, OG stays in-memory only.
 
 ```bash
 # Start (healthcheck: pg_isready)
@@ -187,11 +187,13 @@ curl "http://127.0.0.1:8080/v1/bars?symbol=BTC-USD&interval=1m&limit=10&token=$A
 curl "http://127.0.0.1:8080/v1/trades?symbol=BTC-USD&limit=50&token=$ACCESS"
 ```
 
-Optional filters: `start` / `end` (logical or Unix seconds matching the store). Prices and sizes are scaled integers (`*_scaled`, `*_lots`). Gateway startup seeds ~120 synthetic BTC-USD trades so these endpoints work without `SHINRAI_MD_SYNTH`; with synth enabled, live prints also append to the archive.
+Optional filters: `start` / `end` (logical or Unix seconds matching the store). Prices and sizes are scaled integers (`*_scaled`, `*_lots`). Gateway startup seeds ~120 synthetic BTC-USD trades so these endpoints work without `SHINRAI_MD_SYNTH`; with synth enabled, additional **synthetic** prints append to the archive (not a live Coinbase socket — the Coinbase decoder lives in `shinrai-md-protocol` for fixture/tests).
 
 ### Order gateway (paper trading)
 
 Binds `127.0.0.1:8081` by default. Requires auth and a subject → account mapping.
+
+When `SHINRAI_DATABASE_URL` is set, Postgres is **required write-through**: submit/cancel ack only after a successful transactional persist. Persist failure returns **503** `persist_failed` and engages the global kill switch. Startup hydrates OMS/ledger/audit/positions and reinflates working-order reserves + in-process venue state.
 
 | Env | Meaning |
 |---|---|
@@ -224,6 +226,7 @@ Pre-trade risk runs before the OMS. Insufficient buying power returns **422** wi
 | `SHINRAI_OG_VENUE` | `sim` (default) or `sandbox` (in-process broker sandbox) |
 | `SHINRAI_LOG` | `tracing` filter (falls back to `RUST_LOG`, default `info`) |
 | `SHINRAI_OTEL_ENDPOINT` | OTLP/HTTP base URL (e.g. `http://127.0.0.1:4318`); also accepts `OTEL_EXPORTER_OTLP_ENDPOINT` |
+| `SHINRAI_OUTBOX_POLL_MS` | Outbox publisher poll interval when Postgres is enabled (default `1000`) |
 
 Order-path spans (`order.submit`, `order.cancel`) carry `account_id`, `client_order_id` / `order_id`, and `outcome`. HTTP requests get a `tower-http` trace layer. Without an OTLP endpoint, spans still appear on stderr via the fmt layer.
 

@@ -184,6 +184,13 @@ impl OrderStore {
         self.next_id = self.next_id.max(id.get());
         self.orders.insert(id, order);
     }
+
+    /// Ensures the next allocated id is strictly greater than `min_id`.
+    ///
+    /// Used when attaching to a durable store that already has order rows.
+    pub fn bump_next_id_past(&mut self, min_id: u64) {
+        self.next_id = self.next_id.max(min_id);
+    }
 }
 
 #[cfg(test)]

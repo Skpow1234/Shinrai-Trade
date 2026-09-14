@@ -1,6 +1,7 @@
 //! Order gateway process.
 
 use std::env;
+use std::time::Duration;
 
 use shinrai_order_gateway::{router, AppState, GatewayConfig};
 use shinrai_store::{connect_from_env, migrate, StoreError};
@@ -23,9 +24,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 state.hydrate_from_store(pool).await?;
                 eprintln!("shinrai-order-gateway: hydrated PaperEngine from Postgres");
             } else {
-                state.attach_store(pool);
-                state.persist_bootstrap().await;
-                eprintln!("shinrai-order-gateway: Postgres dual-write enabled (fresh bootstrap)");
+                state.attach_store(pool).await;
+                state.persist_bootstrap().await?;
+                eprintln!(
+                    "shinrai-order-gateway: Postgres write-through enabled (fresh bootstrap)"
+                );
+            }
+            if let Some(pool) = state.store_pool() {
+                let metrics = state.outbox_metrics();
+                let poll_ms: u64 = env::var("SHINRAI_OUTBOX_POLL_MS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1_000);
+                tokio::spawn(shinrai_order_gateway::run_outbox_publisher(
+                    pool,
+                    metrics,
+                    Duration::from_millis(poll_ms),
+                ));
+                eprintln!("shinrai-order-gateway: outbox publisher started (poll {poll_ms}ms)");
             }
         }
         Err(StoreError::MissingDatabaseUrl) => {

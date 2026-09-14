@@ -91,6 +91,54 @@ impl SimExchange {
         self.faults = faults;
     }
 
+    /// Restores a working order into the venue without emitting reports.
+    ///
+    /// Used on process restart so OMS ↔ venue reconciliation stays consistent.
+    ///
+    /// # Errors
+    ///
+    /// Returns disconnect / identifier / quantity errors.
+    pub fn restore_working(
+        &mut self,
+        order_id: OrderId,
+        instrument_id: InstrumentId,
+        order_qty: QuantityLots,
+        price: PriceTicks,
+        cum_qty: i64,
+        venue_order_id: Option<VenueOrderId>,
+    ) -> Result<(), SimError> {
+        if !self.connected {
+            return Err(SimError::Disconnected);
+        }
+        if order_qty.lots() <= 0 || price.scaled() <= 0 {
+            return Err(SimError::InvalidQuantity);
+        }
+        if cum_qty < 0 || cum_qty > order_qty.lots() {
+            return Err(SimError::InvalidQuantity);
+        }
+        let venue_order_id = if let Some(id) = venue_order_id {
+            id
+        } else {
+            let id = VenueOrderId::new(format!("SIM-{}", self.next_venue))
+                .map_err(|_| SimError::InvalidIdentifier)?;
+            self.next_venue = self.next_venue.saturating_add(1);
+            id
+        };
+        self.inflight.insert(
+            order_id,
+            SimOrder {
+                order_id,
+                venue_order_id,
+                instrument_id,
+                qty: order_qty,
+                price,
+                cum_qty,
+                canceled: false,
+            },
+        );
+        Ok(())
+    }
+
     /// Disconnects: new commands fail; queued reports stay until reconnect.
     pub fn disconnect(&mut self) {
         self.connected = false;

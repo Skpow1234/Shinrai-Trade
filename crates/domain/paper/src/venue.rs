@@ -94,4 +94,28 @@ impl VenueHandle {
             Self::Sandbox(s) => ExecutionVenue::venue_orders(s),
         }
     }
+
+    /// Restores a non-terminal OMS order into the venue without new reports.
+    pub(crate) fn restore_working(
+        &mut self,
+        order: &shinrai_orders::Order,
+    ) -> Result<(), ExecutionError> {
+        let cum = order.cum_qty().lots();
+        let venue_id = order.venue_order_id().cloned();
+        match self {
+            Self::Sim(s) => s
+                .restore_working(
+                    order.id(),
+                    order.instrument_id(),
+                    order.order_qty(),
+                    order.price(),
+                    cum,
+                    venue_id,
+                )
+                .map_err(Into::into),
+            Self::Sandbox(s) => {
+                s.restore_working(order.id(), order.order_qty(), order.price(), cum, venue_id)
+            }
+        }
+    }
 }

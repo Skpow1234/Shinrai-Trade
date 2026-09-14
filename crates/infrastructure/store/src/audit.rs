@@ -1,6 +1,6 @@
 //! Audit record persistence.
 
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 
 use shinrai_audit::{AuditKind, AuditRecord};
 use shinrai_ledger::AccountId;
@@ -14,6 +14,16 @@ use crate::error::StoreError;
 ///
 /// Returns sqlx errors.
 pub async fn insert_audit_record(pool: &PgPool, record: &AuditRecord) -> Result<(), StoreError> {
+    let mut tx = pool.begin().await?;
+    insert_audit_record_tx(&mut tx, record).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(crate) async fn insert_audit_record_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    record: &AuditRecord,
+) -> Result<(), StoreError> {
     let (kind, detail) = encode_kind(record.kind());
     sqlx::query(
         r"
@@ -36,7 +46,7 @@ pub async fn insert_audit_record(pool: &PgPool, record: &AuditRecord) -> Result<
     )
     .bind(kind)
     .bind(detail)
-    .execute(pool)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }

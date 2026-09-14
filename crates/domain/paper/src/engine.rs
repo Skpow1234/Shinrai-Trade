@@ -157,6 +157,18 @@ impl PaperEngine {
         &mut self.risk
     }
 
+    /// Updates sim fault config when the venue is [`VenueKind::Sim`].
+    pub fn set_sim_faults(&mut self, faults: FaultConfig) {
+        if let VenueHandle::Sim(sim) = &mut self.venue {
+            sim.set_faults(faults);
+        }
+    }
+
+    /// Ensures new OMS ids do not collide with durable rows (call after attach/hydrate).
+    pub fn bump_order_ids_past(&mut self, min_id: u64) {
+        self.orders.bump_next_id_past(min_id);
+    }
+
     /// Paper deposit.
     ///
     /// # Errors
@@ -174,12 +186,14 @@ impl PaperEngine {
 
     /// Replaces book/OMS/audit from durable snapshots (startup replay).
     ///
-    /// Clears prior book/orders/audit/reserves. Does not reinflate the sim venue
-    /// or working-order cash/position reserves — suitable for terminal fills.
+    /// Reinflates per-order cash/position leftovers and restores working orders
+    /// into the in-process venue (no new execution reports). Pending OMS statuses
+    /// (`PendingNew` / `PendingCancel` / `PendingReplace`) engage the global kill
+    /// switch until an operator clears them.
     ///
     /// # Errors
     ///
-    /// Returns ledger/order errors while applying snapshots.
+    /// Returns ledger/order/venue errors while applying snapshots.
     pub fn hydrate(
         &mut self,
         ledger: impl IntoIterator<Item = BalancedEntry>,
@@ -203,6 +217,75 @@ impl PaperEngine {
             self.orders.restore_order(order);
         }
         self.audit.restore(audit);
+        self.reinflate_working_state()?;
+        Ok(())
+    }
+
+    /// Rebuilds leftover reserves and venue inflight from restored OMS rows.
+    fn reinflate_working_state(&mut self) -> Result<(), PaperError> {
+        use shinrai_orders::OrderStatus;
+
+        let mut pending_ambiguous = false;
+        let mut sell_reserved: HashMap<(AccountId, shinrai_instruments::InstrumentId), i64> =
+            HashMap::new();
+
+        let snapshots: Vec<Order> = self.orders.orders().cloned().collect();
+        for order in &snapshots {
+            if order.status().is_terminal() {
+                continue;
+            }
+
+            if matches!(
+                order.status(),
+                OrderStatus::PendingNew | OrderStatus::PendingCancel | OrderStatus::PendingReplace
+            ) {
+                pending_ambiguous = true;
+            }
+
+            let leaves = order.leaves_qty();
+            if leaves.lots() > 0 {
+                match order.side() {
+                    Side::Buy => {
+                        let instrument = self.master.get(order.instrument_id())?;
+                        let leftover = notional(instrument, order.price(), leaves)?;
+                        self.remaining_cash_reserve.insert(order.id(), leftover);
+                    }
+                    Side::Sell => {
+                        self.remaining_position_reserve
+                            .insert(order.id(), leaves.lots());
+                        *sell_reserved
+                            .entry((order.account_id(), order.instrument_id()))
+                            .or_insert(0) += leaves.lots();
+                    }
+                }
+            }
+
+            // Restore venue row for anything that had (or should have) venue state.
+            if (order.status().is_working()
+                || matches!(
+                    order.status(),
+                    OrderStatus::PendingCancel | OrderStatus::PendingReplace
+                )
+                || (order.status() == OrderStatus::PendingNew && order.venue_order_id().is_some()))
+                && (leaves.lots() > 0 || order.cum_qty().lots() > 0)
+            {
+                self.venue.restore_working(order)?;
+            }
+        }
+
+        // Align position reserved lots with open sell leaves when journal rows are stale.
+        for ((account, instrument), reserved) in sell_reserved {
+            let lots = self.book.position(account, instrument);
+            self.book.set_position(account, instrument, lots, reserved);
+        }
+
+        if pending_ambiguous {
+            self.risk.set_global_kill(true);
+            tracing::warn!(
+                "paper.hydrate: pending OMS statuses present; global kill switch engaged"
+            );
+        }
+
         Ok(())
     }
 
@@ -303,7 +386,7 @@ impl PaperEngine {
                         match self.book.reserve_for_order(
                             req.account_id,
                             order_notional,
-                            format!("rsv:{order_id}"),
+                            format!("rsv:{}:{order_id}", req.account_id.get()),
                         ) {
                             Ok(_) => {
                                 self.remaining_cash_reserve.insert(order_id, order_notional);
@@ -546,8 +629,11 @@ impl PaperEngine {
         if let Some(amount) = self.remaining_cash_reserve.remove(&order_id) {
             if !amount.is_zero() {
                 let account = self.orders.get(order_id)?.account_id();
-                self.book
-                    .release_reserve(account, amount, format!("rel:{order_id}"))?;
+                self.book.release_reserve(
+                    account,
+                    amount,
+                    format!("rel:{}:{order_id}", account.get()),
+                )?;
                 self.audit.record(
                     self.logical_now,
                     Some(account),
@@ -707,6 +793,51 @@ mod tests {
             1_000_000
         );
         assert_eq!(engine.book().position(acc, aapl().id()), 0);
+    }
+
+    #[test]
+    fn hydrate_reinflates_resting_buy_reserves_and_venue() {
+        let (mut engine, acc) = funded_engine(FaultConfig {
+            fill_policy: FillPolicy::Rest,
+            ..FaultConfig::happy_path()
+        });
+        let outcome = engine
+            .submit(&aapl_order(acc, "rest1", Side::Buy, 5, 10_000))
+            .expect("submit");
+        let order = match outcome {
+            SubmitOutcome::Created(o) | SubmitOutcome::Duplicate(o) => o,
+        };
+        assert_eq!(order.status(), OrderStatus::New);
+        assert!(!engine.remaining_cash_reserve.is_empty());
+
+        let ledger: Vec<_> = engine
+            .book()
+            .journal()
+            .entries()
+            .map(|(_, e)| e.clone())
+            .collect();
+        let orders: Vec<_> = engine.orders().orders().cloned().collect();
+        let audit = engine.audit().records().cloned().collect::<Vec<_>>();
+        let positions: Vec<_> = engine.book().positions_iter().collect();
+
+        let mut restarted = PaperEngine::new(
+            phase1_master(),
+            FaultConfig {
+                fill_policy: FillPolicy::Rest,
+                ..FaultConfig::happy_path()
+            },
+        );
+        restarted
+            .hydrate(ledger, orders, audit, positions)
+            .expect("hydrate");
+
+        assert!(restarted.remaining_cash_reserve.contains_key(&order.id()));
+        assert!(restarted.venue_order(order.id()).is_some());
+        assert!(restarted.reconcile().ok);
+
+        let canceled = restarted.cancel(order.id()).expect("cancel after hydrate");
+        assert_eq!(canceled.status(), OrderStatus::Canceled);
+        assert!(restarted.book().reserved(acc, Currency::usd()).is_zero());
     }
 
     #[test]
