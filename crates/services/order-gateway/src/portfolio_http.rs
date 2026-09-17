@@ -162,8 +162,15 @@ pub async fn get_reconciliation(
         .into_response()
 }
 
-/// `GET /v1/metrics` — counters + OMS ops snapshot (no auth; local ops only).
-pub async fn get_metrics(State(state): State<AppState>) -> Json<Value> {
+/// `GET /v1/metrics` — counters + OMS ops snapshot (ops token when configured).
+pub async fn get_metrics(
+    headers: HeaderMap,
+    Query(query): Query<OpsTokenQuery>,
+    State(state): State<AppState>,
+) -> Response {
+    if let Err(resp) = crate::app::require_ops_auth(&state, &headers, query.ops_token.as_deref()) {
+        return resp;
+    }
     let now = crate::app::unix_logical_now();
     let mut body = state.metrics.snapshot();
     let engine = lock_engine(&state);
@@ -184,6 +191,7 @@ pub async fn get_metrics(State(state): State<AppState>) -> Json<Value> {
                 .audit_persisted_seq
                 .load(std::sync::atomic::Ordering::Relaxed)),
         );
+        obj.insert("audit_chain_ok".into(), json!(engine.audit_chain_ok()));
         if let Some(outbox) = state.outbox_metrics.snapshot().as_object() {
             for (k, v) in outbox {
                 obj.insert(k.clone(), v.clone());
@@ -195,7 +203,12 @@ pub async fn get_metrics(State(state): State<AppState>) -> Json<Value> {
             }
         }
     }
-    Json(body)
+    Json(body).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpsTokenQuery {
+    ops_token: Option<String>,
 }
 
 fn authenticate(
@@ -326,6 +339,9 @@ fn audit_row_json(record: &AuditRecord) -> Value {
         "kind": record.kind().name(),
         "account_id": record.account_id().map(shinrai_ledger::AccountId::get),
         "order_id": record.order_id().map(shinrai_orders::OrderId::get),
+        "correlation_id": record.correlation_id(),
+        "prev_hash": record.prev_hash(),
+        "content_hash": record.content_hash(),
     });
     if let AuditKind::RiskRejected { code } = record.kind() {
         row["code"] = json!(code);

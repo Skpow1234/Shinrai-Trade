@@ -27,8 +27,11 @@ pub(crate) async fn insert_audit_record_tx(
     let (kind, detail) = encode_kind(record.kind());
     sqlx::query(
         r"
-        INSERT INTO audit_records (seq, at_unix, account_id, order_id, kind, detail)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO audit_records (
+            seq, at_unix, account_id, order_id, kind, detail,
+            correlation_id, prev_hash, content_hash
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ON CONFLICT (seq) DO NOTHING
         ",
     )
@@ -46,6 +49,9 @@ pub(crate) async fn insert_audit_record_tx(
     )
     .bind(kind)
     .bind(detail)
+    .bind(record.correlation_id())
+    .bind(record.prev_hash())
+    .bind(record.content_hash())
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -63,7 +69,8 @@ pub async fn load_audit_after(
 ) -> Result<Vec<AuditRecord>, StoreError> {
     let rows: Vec<AuditRow> = sqlx::query_as(
         r"
-        SELECT seq, at_unix, account_id, order_id, kind, detail
+        SELECT seq, at_unix, account_id, order_id, kind, detail,
+               correlation_id, prev_hash, content_hash
         FROM audit_records
         WHERE seq > $1
         ORDER BY seq ASC
@@ -130,6 +137,9 @@ fn decode_row(row: AuditRow) -> Result<AuditRecord, StoreError> {
         row.order_id
             .map(|o| OrderId::from_u64(u64::try_from(o).unwrap_or(0))),
         kind,
+        row.correlation_id,
+        row.prev_hash.unwrap_or_default(),
+        row.content_hash.unwrap_or_default(),
     ))
 }
 
@@ -141,4 +151,7 @@ struct AuditRow {
     order_id: Option<i64>,
     kind: String,
     detail: Option<String>,
+    correlation_id: Option<String>,
+    prev_hash: Option<String>,
+    content_hash: Option<String>,
 }

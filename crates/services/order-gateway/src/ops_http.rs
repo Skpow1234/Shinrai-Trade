@@ -1,26 +1,41 @@
-//! Ops HTTP: stuck orders JSON + simple HTML dashboard.
+//! Ops HTTP: stuck orders, risk control plane, and simple HTML dashboard.
 
 use axum::extract::{Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use shinrai_instruments::ExternalId;
+use shinrai_ledger::AccountId;
+use shinrai_risk::RiskLimits;
 
-use crate::app::{lock_engine, unix_logical_now, AppState};
+use crate::app::{lock_engine, require_ops_auth, unix_logical_now, AppState};
 use crate::ops::{find_stuck_orders, DEFAULT_STUCK_AGE_SECS};
 
 #[derive(Debug, Deserialize)]
 pub struct StuckQuery {
     /// Override stuck age threshold (logical seconds).
     max_age_secs: Option<u64>,
+    /// Ops bearer when `SHINRAI_OG_OPS_TOKEN` is configured.
+    ops_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpsAuthQuery {
+    /// Ops bearer when `SHINRAI_OG_OPS_TOKEN` is configured.
+    ops_token: Option<String>,
 }
 
 /// `GET /v1/ops/stuck-orders` — pending OMS rows older than threshold.
 pub async fn get_stuck_orders(
+    headers: HeaderMap,
     Query(query): Query<StuckQuery>,
     State(state): State<AppState>,
-) -> Json<Value> {
+) -> Response {
+    if let Err(resp) = require_ops_auth(&state, &headers, query.ops_token.as_deref()) {
+        return resp;
+    }
     let now = unix_logical_now();
     let max_age = query.max_age_secs.unwrap_or(state.stuck_age_secs);
     let engine = lock_engine(&state);
@@ -36,10 +51,185 @@ pub async fn get_stuck_orders(
             "last_at": s.last_at,
         })).collect::<Vec<_>>(),
     }))
+    .into_response()
+}
+
+/// `GET /v1/ops/risk` — current limits + kill switches.
+pub async fn get_risk(
+    headers: HeaderMap,
+    Query(query): Query<OpsAuthQuery>,
+    State(state): State<AppState>,
+) -> Response {
+    if let Err(resp) = require_ops_auth(&state, &headers, query.ops_token.as_deref()) {
+        return resp;
+    }
+    let engine = lock_engine(&state);
+    let limits = engine.risk().limits();
+    Json(json!({
+        "global_kill": engine.risk().global_kill(),
+        "limits": limits_json(limits),
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RiskPatchBody {
+    /// Enable/disable global kill switch.
+    global_kill: Option<bool>,
+    /// Replace static limits (partial fields allowed).
+    limits: Option<RiskLimitsPatch>,
+    /// Restrict trading for a symbol.
+    restrict_symbol: Option<String>,
+    /// Clear restriction for a symbol.
+    allow_symbol: Option<String>,
+    /// Per-account kill switch.
+    account_kill: Option<AccountKillPatch>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AccountKillPatch {
+    account_id: u64,
+    on: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RiskLimitsPatch {
+    max_order_qty_lots: Option<i64>,
+    max_order_notional_minor: Option<i64>,
+    max_position_lots: Option<i64>,
+    collar_bps: Option<i64>,
+    market_session_utc: Option<(u32, u32)>,
+    clear_market_session: Option<bool>,
+    max_daily_loss_minor: Option<i64>,
+    allow_short: Option<bool>,
+    max_short_lots: Option<i64>,
+    max_asset_class_notional_minor: Option<i64>,
+}
+
+/// `POST /v1/ops/risk` — mutate kill switches / limits (ops control plane).
+pub async fn post_risk(
+    headers: HeaderMap,
+    Query(query): Query<OpsAuthQuery>,
+    State(state): State<AppState>,
+    Json(body): Json<RiskPatchBody>,
+) -> Response {
+    if let Err(resp) = require_ops_auth(&state, &headers, query.ops_token.as_deref()) {
+        return resp;
+    }
+    let mut engine = lock_engine(&state);
+    if let Some(on) = body.global_kill {
+        engine.risk_mut().set_global_kill(on);
+    }
+    if let Some(patch) = body.limits {
+        let mut limits = engine.risk().limits();
+        apply_limits_patch(&mut limits, &patch);
+        engine.risk_mut().set_limits(limits);
+    }
+    if let Some(symbol) = body.restrict_symbol.as_deref() {
+        match resolve_symbol_id(&state, symbol) {
+            Ok(id) => engine.risk_mut().restrict_instrument(id),
+            Err(code) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "type": "error", "code": code })),
+                )
+                    .into_response();
+            }
+        }
+    }
+    if let Some(symbol) = body.allow_symbol.as_deref() {
+        match resolve_symbol_id(&state, symbol) {
+            Ok(id) => engine.risk_mut().allow_instrument(id),
+            Err(code) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "type": "error", "code": code })),
+                )
+                    .into_response();
+            }
+        }
+    }
+    if let Some(ak) = body.account_kill {
+        engine
+            .risk_mut()
+            .set_account_kill(AccountId::from_u64(ak.account_id), ak.on);
+    }
+    let limits = engine.risk().limits();
+    Json(json!({
+        "ok": true,
+        "global_kill": engine.risk().global_kill(),
+        "limits": limits_json(limits),
+    }))
+    .into_response()
+}
+
+fn apply_limits_patch(limits: &mut RiskLimits, patch: &RiskLimitsPatch) {
+    if let Some(v) = patch.max_order_qty_lots {
+        limits.max_order_qty_lots = v;
+    }
+    if let Some(v) = patch.max_order_notional_minor {
+        limits.max_order_notional_minor = i128::from(v);
+    }
+    if let Some(v) = patch.max_position_lots {
+        limits.max_position_lots = v;
+    }
+    if let Some(v) = patch.collar_bps {
+        limits.collar_bps = v;
+    }
+    if patch.clear_market_session == Some(true) {
+        limits.market_session_utc = None;
+    } else if let Some(session) = patch.market_session_utc {
+        limits.market_session_utc = Some(session);
+    }
+    if let Some(v) = patch.max_daily_loss_minor {
+        limits.max_daily_loss_minor = i128::from(v);
+    }
+    if let Some(v) = patch.allow_short {
+        limits.allow_short = v;
+    }
+    if let Some(v) = patch.max_short_lots {
+        limits.max_short_lots = v;
+    }
+    if let Some(v) = patch.max_asset_class_notional_minor {
+        limits.max_asset_class_notional_minor = i128::from(v);
+    }
+}
+
+fn limits_json(limits: RiskLimits) -> Value {
+    json!({
+        "max_order_qty_lots": limits.max_order_qty_lots,
+        "max_order_notional_minor": i64::try_from(limits.max_order_notional_minor).unwrap_or(i64::MAX),
+        "max_position_lots": limits.max_position_lots,
+        "collar_bps": limits.collar_bps,
+        "market_session_utc": limits.market_session_utc,
+        "max_daily_loss_minor": i64::try_from(limits.max_daily_loss_minor).unwrap_or(i64::MAX),
+        "allow_short": limits.allow_short,
+        "max_short_lots": limits.max_short_lots,
+        "max_asset_class_notional_minor": i64::try_from(limits.max_asset_class_notional_minor).unwrap_or(i64::MAX),
+    })
+}
+
+fn resolve_symbol_id(
+    state: &AppState,
+    symbol: &str,
+) -> Result<shinrai_instruments::InstrumentId, &'static str> {
+    let alias = ExternalId::ticker(symbol.trim()).map_err(|_| "invalid_symbol")?;
+    state
+        .master
+        .resolve_alias(&alias)
+        .map_err(|_| "unknown_symbol")
 }
 
 /// `GET /v1/ops` — minimal local HTML dashboard (polls `/v1/metrics`).
-pub async fn get_ops_dashboard() -> Response {
+#[allow(clippy::too_many_lines)]
+pub async fn get_ops_dashboard(
+    headers: HeaderMap,
+    Query(query): Query<OpsAuthQuery>,
+    State(state): State<AppState>,
+) -> Response {
+    if let Err(resp) = require_ops_auth(&state, &headers, query.ops_token.as_deref()) {
+        return resp;
+    }
     let html = format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -91,7 +281,7 @@ pub async fn get_ops_dashboard() -> Response {
     <thead><tr><th>order_id</th><th>status</th><th>age_secs</th><th>last_at</th></tr></thead>
     <tbody id="stuck"></tbody>
   </table>
-  <p class="sub" style="margin-top:1rem"><a href="/v1/metrics">/v1/metrics</a> · <a href="/v1/ops/stuck-orders">/v1/ops/stuck-orders</a></p>
+  <p class="sub" style="margin-top:1rem"><a href="/v1/metrics">/v1/metrics</a> · <a href="/v1/ops/stuck-orders">/v1/ops/stuck-orders</a> · <a href="/v1/ops/risk">/v1/ops/risk</a></p>
   <div id="err"></div>
 <script>
 async function refresh() {{

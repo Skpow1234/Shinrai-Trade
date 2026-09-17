@@ -119,6 +119,10 @@ pub struct AppState {
     pub(crate) stuck_age_secs: u64,
     /// Outbox publisher counters (shared with background task).
     pub(crate) outbox_metrics: Arc<crate::outbox_publisher::OutboxMetrics>,
+    /// Per-subject submit rate limiter.
+    pub(crate) rate_limiter: Arc<crate::rate_limit::RateLimiter>,
+    /// Optional ops bearer token (when set, `/v1/ops*` and `/v1/metrics` require it).
+    pub(crate) ops_token: Option<String>,
 }
 
 /// Process configuration (tokens / secrets are not displayed).
@@ -134,6 +138,7 @@ pub struct GatewayConfig {
     md_token: Option<String>,
     stuck_age_secs: u64,
     venue_kind: VenueKind,
+    ops_token: Option<String>,
 }
 
 impl GatewayConfig {
@@ -157,6 +162,7 @@ impl GatewayConfig {
             md_token: None,
             stuck_age_secs: crate::ops::DEFAULT_STUCK_AGE_SECS,
             venue_kind: VenueKind::Sim,
+            ops_token: None,
         }
     }
 
@@ -183,6 +189,9 @@ impl GatewayConfig {
             cfg.stuck_age_secs = age;
         }
         cfg.venue_kind = parse_venue_kind(std::env::var("SHINRAI_OG_VENUE").ok().as_deref());
+        cfg.ops_token = std::env::var("SHINRAI_OG_OPS_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
         cfg
     }
 }
@@ -200,6 +209,7 @@ impl core::fmt::Debug for GatewayConfig {
             .field("md_token_configured", &self.md_token.is_some())
             .field("stuck_age_secs", &self.stuck_age_secs)
             .field("venue_kind", &self.venue_kind)
+            .field("ops_token_configured", &self.ops_token.is_some())
             .finish()
     }
 }
@@ -268,6 +278,8 @@ impl AppState {
             audit_persisted_seq: Arc::new(AtomicU64::new(0)),
             stuck_age_secs: config.stuck_age_secs,
             outbox_metrics: Arc::new(crate::outbox_publisher::OutboxMetrics::default()),
+            rate_limiter: Arc::new(crate::rate_limit::RateLimiter::demo()),
+            ops_token: config.ops_token.clone(),
         }
     }
 
@@ -366,6 +378,35 @@ impl AppState {
     #[must_use]
     pub fn store_pool(&self) -> Option<StorePool> {
         self.store.clone()
+    }
+
+    /// Closes the Postgres pool so the next `must_persist` fails (chaos tests).
+    pub async fn close_store_for_test(&mut self) {
+        if let Some(pool) = self.store.take() {
+            pool.close().await;
+            // Keep a closed pool so write-through still attempts and fails.
+            self.store = Some(pool);
+        }
+    }
+
+    /// Sets an ops bearer for `/v1/ops*` and `/v1/metrics` (tests).
+    #[must_use]
+    pub fn with_ops_token(mut self, token: &str) -> Self {
+        self.ops_token = Some(token.to_owned());
+        self
+    }
+
+    /// Replaces the submit rate limiter (tests).
+    #[must_use]
+    pub fn with_rate_limiter(mut self, limiter: crate::rate_limit::RateLimiter) -> Self {
+        self.rate_limiter = Arc::new(limiter);
+        self
+    }
+
+    /// Disconnects the paper venue (ambiguous mid-flight / stuck `PendingNew` tests).
+    pub fn disconnect_venue_for_test(&self) {
+        let mut engine = lock_engine(self);
+        engine.disconnect_venue();
     }
 
     /// Test helper with a single static access token and one mapped account.
@@ -613,6 +654,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/ops/stuck-orders",
             get(crate::ops_http::get_stuck_orders),
         )
+        .route(
+            "/v1/ops/risk",
+            get(crate::ops_http::get_risk).post(crate::ops_http::post_risk),
+        )
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -656,6 +701,45 @@ pub(crate) fn extract_bearer(headers: &HeaderMap, query: &AuthQuery) -> Option<S
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
+}
+
+/// When `SHINRAI_OG_OPS_TOKEN` is set, ops/metrics require that bearer (or `?ops_token=`).
+#[allow(clippy::result_large_err)]
+pub(crate) fn require_ops_auth(
+    state: &AppState,
+    headers: &HeaderMap,
+    ops_token_query: Option<&str>,
+) -> Result<(), Response> {
+    let Some(expected) = state.ops_token.as_deref() else {
+        return Ok(());
+    };
+    let provided = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|value| {
+            let (scheme, rest) = value.split_once(' ')?;
+            if scheme.eq_ignore_ascii_case("bearer") {
+                let rest = rest.trim();
+                (!rest.is_empty()).then(|| rest.to_owned())
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            ops_token_query
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        });
+    if provided.as_deref() == Some(expected) {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "type": "error", "code": "ops_unauthorized" })),
+        )
+            .into_response())
+    }
 }
 
 pub(crate) fn lock_engine(state: &AppState) -> MutexGuard<'_, PaperEngine> {

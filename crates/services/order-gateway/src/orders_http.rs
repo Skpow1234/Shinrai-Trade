@@ -96,12 +96,27 @@ pub async fn post_order(
         side = %body.side.trim(),
         qty = body.qty,
         price = body.price,
+        correlation_id = tracing::field::Empty,
         order_id = tracing::field::Empty,
         outcome = tracing::field::Empty,
     );
 
     async move {
         state.metrics.record_submit();
+        if !state.rate_limiter.allow(claims.subject().as_str()) {
+            tracing::Span::current().record("outcome", "rate_limited");
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({ "type": "error", "code": "rate_limited" })),
+            )
+                .into_response();
+        }
+        let correlation = headers
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .filter(|s| !s.is_empty())
+            .map_or_else(|| format!("og-{}", uuid::Uuid::new_v4()), str::to_owned);
+        tracing::Span::current().record("correlation_id", correlation.as_str());
 
         let Ok(client_order_id) = ClientOrderId::new(body.client_order_id.trim()) else {
             tracing::Span::current().record("outcome", "invalid_client_order_id");
@@ -154,6 +169,7 @@ pub async fn post_order(
         let outcome = {
             let mut engine = lock_engine(&state);
             engine.set_logical_now(now);
+            engine.set_correlation_id(Some(correlation.clone()));
             engine.submit(&req)
         };
 

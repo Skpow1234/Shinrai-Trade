@@ -19,6 +19,16 @@ pub enum RiskRejectReason {
     InsufficientBuyingPower,
     /// Sell quantity exceeds available long position.
     InsufficientPosition,
+    /// Limit price outside collar vs reference.
+    PriceCollar,
+    /// Outside configured market hours.
+    MarketClosed,
+    /// Daily loss limit breached.
+    DailyLossLimit,
+    /// Resulting short would exceed max short lots.
+    MaxShort,
+    /// Asset-class exposure would exceed the configured maximum.
+    MaxAssetClassExposure,
 }
 
 impl RiskRejectReason {
@@ -33,6 +43,11 @@ impl RiskRejectReason {
             Self::MaxPosition => "max_position",
             Self::InsufficientBuyingPower => "insufficient_buying_power",
             Self::InsufficientPosition => "insufficient_position",
+            Self::PriceCollar => "price_collar",
+            Self::MarketClosed => "market_closed",
+            Self::DailyLossLimit => "daily_loss_limit",
+            Self::MaxShort => "max_short",
+            Self::MaxAssetClassExposure => "max_asset_class_exposure",
         }
     }
 }
