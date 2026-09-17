@@ -228,6 +228,7 @@ Pre-trade risk runs before the OMS. Insufficient buying power returns **422** wi
 | `SHINRAI_OG_MD_TOKEN` | Access token when calling the MD gateway |
 | `SHINRAI_OG_STUCK_AGE_SECS` | Pending OMS age before “stuck” (default `5`) |
 | `SHINRAI_OG_VENUE` | `sim` (default), `sandbox` (in-process broker), or `rest` / `http` (JSON REST paper venue) |
+| `SHINRAI_OG_OPS_TOKEN` | When set, `/v1/ops*` and `/v1/metrics` require this bearer (or `?ops_token=`) |
 | `SHINRAI_LOG` | `tracing` filter (falls back to `RUST_LOG`, default `info`) |
 | `SHINRAI_OTEL_ENDPOINT` | OTLP/HTTP base URL (e.g. `http://127.0.0.1:4318`); also accepts `OTEL_EXPORTER_OTLP_ENDPOINT` |
 | `SHINRAI_OUTBOX_POLL_MS` | Outbox publisher poll interval when Postgres is enabled (default `1000`) |
@@ -256,7 +257,7 @@ curl -s -X POST "http://127.0.0.1:8081/v1/orders/1/replace?token=dev" \
 curl "http://127.0.0.1:8081/v1/reconciliation?token=dev"
 ```
 
-Unauthenticated local ops (do not expose publicly):
+Unauthenticated local ops by default (set `SHINRAI_OG_OPS_TOKEN` to require a bearer / `?ops_token=`):
 
 ```bash
 # Counters + OMS status histogram + stuck pending + ledger/recon health
@@ -265,9 +266,17 @@ curl http://127.0.0.1:8081/v1/metrics
 # Stuck PendingNew / PendingCancel / PendingReplace
 curl "http://127.0.0.1:8081/v1/ops/stuck-orders?max_age_secs=5"
 
+# Risk control plane (limits + kill switches)
+curl http://127.0.0.1:8081/v1/ops/risk
+curl -X POST http://127.0.0.1:8081/v1/ops/risk \
+  -H 'content-type: application/json' \
+  -d '{"global_kill":true,"limits":{"collar_bps":100}}'
+
 # Minimal HTML dashboard (polls /v1/metrics)
 open http://127.0.0.1:8081/v1/ops   # or browse to that URL
 ```
+
+Phase 4 extras on the order path: expanded pre-trade risk (hours, collars, daily loss, shorts, asset-class exposure), submit rate limiting (429 `rate_limited`), audit hash-chain fields on `GET /v1/audit`, and correlation via `X-Request-Id` (or auto UUID) on order spans.
 
 ## Test
 

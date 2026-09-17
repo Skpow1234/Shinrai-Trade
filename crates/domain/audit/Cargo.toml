@@ -12,3 +12,4 @@ workspace = true
 [dependencies]
 shinrai-ledger = { workspace = true }
 shinrai-orders = { workspace = true }
+sha2 = { workspace = true }

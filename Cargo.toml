@@ -85,6 +85,8 @@ opentelemetry-otlp = { version = "0.30", default-features = false, features = [
     "http-proto",
     "reqwest-client",
 ] }
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
 tracing-opentelemetry = "0.31"
 
 [workspace.lints.rust]
