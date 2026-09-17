@@ -144,20 +144,37 @@ async fn audit_append_and_page() {
     };
 
     let seq = unique_seq(&pool).await;
+    let kind = AuditKind::RiskRejected {
+        code: "insufficient_buying_power".into(),
+    };
+    let correlation = Some("ci-audit-1".to_owned());
+    let prev_hash = shinrai_audit::GENESIS_HASH.to_owned();
+    let content_hash = shinrai_audit::compute_content_hash(
+        seq,
+        1_700_000_000,
+        Some(AccountId::from_u64(1)),
+        Some(OrderId::from_u64(9)),
+        &kind,
+        correlation.as_deref(),
+        &prev_hash,
+    );
     let record = AuditRecord::from_parts(
         seq,
         1_700_000_000,
         Some(AccountId::from_u64(1)),
         Some(OrderId::from_u64(9)),
-        AuditKind::RiskRejected {
-            code: "insufficient_buying_power".into(),
-        },
+        kind,
+        correlation,
+        prev_hash,
+        content_hash,
     );
     insert_audit_record(&pool, &record).await.expect("insert");
     let page = load_audit_after(&pool, seq.saturating_sub(1), 10)
         .await
         .expect("page");
-    assert!(page.iter().any(|r| r.seq() == seq));
+    let loaded = page.iter().find(|r| r.seq() == seq).expect("row");
+    assert_eq!(loaded.correlation_id(), Some("ci-audit-1"));
+    assert!(!loaded.content_hash().is_empty());
 }
 
 #[tokio::test]
