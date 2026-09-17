@@ -152,6 +152,17 @@ impl PaperEngine {
         self.logical_now = now;
     }
 
+    /// Sets correlation id stamped on subsequent audit records.
+    pub fn set_correlation_id(&mut self, id: Option<String>) {
+        self.audit.set_correlation_id(id);
+    }
+
+    /// Verifies the in-memory audit hash chain.
+    #[must_use]
+    pub fn audit_chain_ok(&self) -> bool {
+        self.audit.verify_chain()
+    }
+
     /// Paper book (cash / positions).
     #[must_use]
     pub const fn book(&self) -> &PaperBook {
@@ -413,6 +424,10 @@ impl PaperEngine {
                 .book
                 .available_position(req.account_id, req.instrument_id),
             notional: order_notional,
+            ref_price: Some(req.price),
+            now_unix: self.logical_now,
+            day_pnl_minor: 0,
+            asset_class_exposure_minor: 0,
         };
         let intent = RiskOrderIntent {
             account_id: req.account_id,
@@ -1373,6 +1388,10 @@ mod tests {
                     available_cash: engine.book().available(acc, Currency::usd()),
                     position_lots: 0,
                     notional: Money::from_major(1, Currency::usd()).expect("n"),
+                    ref_price: None,
+                    now_unix: 0,
+                    day_pnl_minor: 0,
+                    asset_class_exposure_minor: 0,
                 }
             ),
             RiskDecision::Rejected(_)
