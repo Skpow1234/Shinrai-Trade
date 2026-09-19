@@ -176,6 +176,31 @@ impl PaperEngine {
         })
     }
 
+    /// Creates a session backed by the licensed sandbox (auto-logon).
+    #[must_use]
+    pub fn with_licensed(
+        master: InstrumentMaster,
+        config: shinrai_execution::LicensedSandboxConfig,
+        risk: RiskEngine,
+    ) -> Self {
+        Self {
+            master,
+            book: PaperBook::new(),
+            orders: OrderStore::new(),
+            venue: VenueHandle::licensed(config),
+            remaining_cash_reserve: HashMap::new(),
+            remaining_position_reserve: HashMap::new(),
+            risk,
+            audit: AuditLog::new(),
+            logical_now: 0,
+            marks: HashMap::new(),
+            risk_day_id: None,
+            realized_at_day_open: HashMap::new(),
+            applied_session: None,
+            next_expected_seq: 1,
+        }
+    }
+
     /// Which venue backs this engine.
     #[must_use]
     pub const fn venue_kind(&self) -> VenueKind {
@@ -307,6 +332,11 @@ impl PaperEngine {
         self.venue.as_sandbox_mut()
     }
 
+    /// Mutable licensed sandbox (when [`VenueKind::Licensed`]).
+    pub fn licensed_mut(&mut self) -> Option<&mut shinrai_execution::LicensedSandboxVenue> {
+        self.venue.as_licensed_mut()
+    }
+
     /// Venue snapshot for one order (reconciliation).
     #[must_use]
     pub fn venue_order(&self, order_id: OrderId) -> Option<shinrai_execution::VenueOrderSnapshot> {
@@ -430,11 +460,13 @@ impl PaperEngine {
 
     /// Rebuilds leftover reserves and venue inflight from restored OMS rows.
     fn reinflate_working_state(&mut self) -> Result<(), PaperError> {
+        use shinrai_money::Currency;
         use shinrai_orders::OrderStatus;
 
         let mut pending_ambiguous = false;
         let mut sell_reserved: HashMap<(AccountId, shinrai_instruments::InstrumentId), i64> =
             HashMap::new();
+        let mut buy_cash: HashMap<(AccountId, Currency), i128> = HashMap::new();
 
         let snapshots: Vec<Order> = self.orders.orders().cloned().collect();
         for order in &snapshots {
@@ -455,6 +487,9 @@ impl PaperEngine {
                     Side::Buy => {
                         let instrument = self.master.get(order.instrument_id())?;
                         let leftover = notional(instrument, order.price(), leaves)?;
+                        *buy_cash
+                            .entry((order.account_id(), leftover.currency()))
+                            .or_insert(0) += leftover.minor_units();
                         self.remaining_cash_reserve.insert(order.id(), leftover);
                     }
                     Side::Sell => {
@@ -484,6 +519,28 @@ impl PaperEngine {
         for ((account, instrument), reserved) in sell_reserved {
             let lots = self.book.position(account, instrument);
             self.book.set_position(account, instrument, lots, reserved);
+        }
+
+        // Align book cash reserved with open buy leaves (mirrors sell position force-align).
+        for ((account, currency), needed) in buy_cash {
+            let current = self.book.reserved(account, currency).minor_units();
+            if needed > current {
+                let delta = Money::from_minor(needed - current, currency);
+                let key = format!(
+                    "hydrate:cash-align:{}:{}",
+                    account.get(),
+                    currency.code().as_str()
+                );
+                self.book.reserve_for_order(account, delta, key)?;
+            } else if current > needed {
+                let delta = Money::from_minor(current - needed, currency);
+                let key = format!(
+                    "hydrate:cash-release:{}:{}",
+                    account.get(),
+                    currency.code().as_str()
+                );
+                self.book.release_reserve(account, delta, key)?;
+            }
         }
 
         if pending_ambiguous {
