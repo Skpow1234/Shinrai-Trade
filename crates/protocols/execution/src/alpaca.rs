@@ -19,6 +19,50 @@ use crate::venue::{ExecutionVenue, NewVenueOrder, VenueOrderSnapshot, VenueTrade
 /// Default Alpaca paper API root.
 pub const ALPACA_PAPER_BASE_URL: &str = "https://paper-api.alpaca.markets";
 
+/// Broker statement pulled from Alpaca for EOD reconciliation.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AlpacaBrokerStatement {
+    /// Account cash snapshot.
+    pub account: AlpacaAccountSnap,
+    /// Open positions.
+    pub positions: Vec<AlpacaPositionSnap>,
+    /// FILL activities.
+    pub fills: Vec<AlpacaFillSnap>,
+}
+
+/// Alpaca account cash (USD minor units / cents).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AlpacaAccountSnap {
+    /// Currency code (typically `USD`).
+    pub currency: String,
+    /// Cash in minor units.
+    pub cash_minor: i128,
+}
+
+/// Alpaca position row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlpacaPositionSnap {
+    /// Ticker symbol.
+    pub symbol: String,
+    /// Signed lots (short = negative).
+    pub qty: i64,
+}
+
+/// Alpaca FILL activity row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlpacaFillSnap {
+    /// Venue activity / exec id.
+    pub exec_id: String,
+    /// Client order id when present (maps to internal order id).
+    pub client_order_id: Option<String>,
+    /// Symbol.
+    pub symbol: String,
+    /// Fill qty.
+    pub qty: i64,
+    /// Fill price in scale-2 ticks.
+    pub price_ticks: i64,
+}
+
 /// Alpaca paper credentials + base URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlpacaConfig {
@@ -185,6 +229,182 @@ impl AlpacaPaperVenue {
             },
         );
         Ok(())
+    }
+
+    /// Pulls Alpaca account / positions / FILL activities for EOD reconciliation.
+    ///
+    /// Cash is reported in USD minor units (cents). Fills include `client_order_id`
+    /// when present so the gateway can map to internal order ids.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport / parse errors.
+    pub fn fetch_broker_statement(&mut self) -> Result<AlpacaBrokerStatement, ExecutionError> {
+        let account = self.fetch_account()?;
+        let positions = self.fetch_positions()?;
+        let fills = self.fetch_fill_activities()?;
+        Ok(AlpacaBrokerStatement {
+            account,
+            positions,
+            fills,
+        })
+    }
+
+    /// Reloads open Alpaca orders into the inflight map (reconnect recovery).
+    ///
+    /// # Errors
+    ///
+    /// Returns transport / parse errors.
+    pub fn rehydrate_open_orders(&mut self) -> Result<(), ExecutionError> {
+        let resp = self.transport.request(&HttpRequest {
+            method: HttpMethod::Get,
+            path: "/v2/orders?status=open".into(),
+            body: String::new(),
+        })?;
+        if resp.status >= 400 {
+            return Err(ExecutionError::Transport(format!(
+                "alpaca open orders {}: {}",
+                resp.status, resp.body
+            )));
+        }
+        let rows: Vec<AlpacaOpenOrderJson> = serde_json::from_str(&resp.body)
+            .map_err(|e| ExecutionError::Transport(e.to_string()))?;
+        for row in rows {
+            let Ok(order_id) = row
+                .client_order_id
+                .as_deref()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(OrderId::from_u64)
+                .ok_or(())
+            else {
+                continue;
+            };
+            let Ok(venue_order_id) = VenueOrderId::new(row.id) else {
+                continue;
+            };
+            let order_qty: i64 = row.qty.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let cum_qty: i64 = row
+                .filled_qty
+                .as_deref()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let price = row
+                .limit_price
+                .as_deref()
+                .and_then(Self::parse_price_to_ticks)
+                .unwrap_or_else(|| PriceTicks::from_scaled(1));
+            if order_qty <= 0 {
+                continue;
+            }
+            self.inflight.insert(
+                order_id,
+                Inflight {
+                    venue_order_id,
+                    order_qty,
+                    cum_qty,
+                    reported_cum: cum_qty,
+                    price,
+                    canceled: false,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn fetch_account(&mut self) -> Result<AlpacaAccountSnap, ExecutionError> {
+        let resp = self.transport.request(&HttpRequest {
+            method: HttpMethod::Get,
+            path: "/v2/account".into(),
+            body: String::new(),
+        })?;
+        if resp.status >= 400 {
+            return Err(ExecutionError::Transport(format!(
+                "alpaca account {}: {}",
+                resp.status, resp.body
+            )));
+        }
+        let v: serde_json::Value = serde_json::from_str(&resp.body)
+            .map_err(|e| ExecutionError::Transport(e.to_string()))?;
+        let cash_raw = v.get("cash").and_then(|x| x.as_str()).unwrap_or("0");
+        let cash_minor = parse_usd_to_cents(cash_raw).unwrap_or(0);
+        Ok(AlpacaAccountSnap {
+            currency: v
+                .get("currency")
+                .and_then(|x| x.as_str())
+                .unwrap_or("USD")
+                .to_owned(),
+            cash_minor,
+        })
+    }
+
+    fn fetch_positions(&mut self) -> Result<Vec<AlpacaPositionSnap>, ExecutionError> {
+        let resp = self.transport.request(&HttpRequest {
+            method: HttpMethod::Get,
+            path: "/v2/positions".into(),
+            body: String::new(),
+        })?;
+        if resp.status >= 400 {
+            return Err(ExecutionError::Transport(format!(
+                "alpaca positions {}: {}",
+                resp.status, resp.body
+            )));
+        }
+        let rows: Vec<AlpacaPositionJson> = serde_json::from_str(&resp.body)
+            .map_err(|e| ExecutionError::Transport(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                let qty: i64 = r.qty.parse().ok()?;
+                let signed = if r.side.eq_ignore_ascii_case("short") {
+                    -qty.abs()
+                } else {
+                    qty.abs()
+                };
+                Some(AlpacaPositionSnap {
+                    symbol: r.symbol,
+                    qty: signed,
+                })
+            })
+            .collect())
+    }
+
+    fn fetch_fill_activities(&mut self) -> Result<Vec<AlpacaFillSnap>, ExecutionError> {
+        let resp = self.transport.request(&HttpRequest {
+            method: HttpMethod::Get,
+            path: "/v2/account/activities/FILL".into(),
+            body: String::new(),
+        })?;
+        if resp.status >= 400 {
+            // Some paper accounts return empty; treat 404 as no fills.
+            if resp.status == 404 {
+                return Ok(Vec::new());
+            }
+            return Err(ExecutionError::Transport(format!(
+                "alpaca activities {}: {}",
+                resp.status, resp.body
+            )));
+        }
+        let rows: Vec<AlpacaActivityJson> = serde_json::from_str(&resp.body)
+            .map_err(|e| ExecutionError::Transport(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                let qty: i64 = r.qty.as_deref()?.parse().ok()?;
+                let price_ticks = r
+                    .price
+                    .as_deref()
+                    .and_then(Self::parse_price_to_ticks)
+                    .map(|p| p.scaled())
+                    .unwrap_or(0);
+                Some(AlpacaFillSnap {
+                    exec_id: r.id,
+                    client_order_id: r.client_order_id,
+                    symbol: r.symbol.unwrap_or_default(),
+                    qty,
+                    price_ticks,
+                })
+            })
+            .collect())
     }
 
     fn symbol_for(&self, id: InstrumentId) -> Result<&str, ExecutionError> {
@@ -512,10 +732,8 @@ impl ExecutionVenue for AlpacaPaperVenue {
             "limit_price": Self::ticks_to_limit_price(new_price),
         })
         .to_string();
-        // Alpaca uses PATCH; our HttpMethod has no Patch — POST to replace path on mock,
-        // remote sends as POST with _method hint via path convention `/v2/orders/{id}/replace`.
         let resp = self.transport.request(&HttpRequest {
-            method: HttpMethod::Post,
+            method: HttpMethod::Patch,
             path: format!("/v2/orders/{venue_id}"),
             body,
         })?;
@@ -611,6 +829,10 @@ impl ExecutionVenue for AlpacaPaperVenue {
         self.next_seq = 1;
         self.history.clear();
         self.outbox.clear();
+        self.inflight.clear();
+        if let Err(err) = self.rehydrate_open_orders() {
+            eprintln!("shinrai-execution: alpaca reconnect rehydrate failed: {err}");
+        }
     }
 
     fn poll_recovery(&mut self, from_seq: u64) -> Result<Vec<ExecutionReport>, ExecutionError> {
@@ -640,6 +862,40 @@ struct AlpacaOrderJson {
     limit_price: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct AlpacaOpenOrderJson {
+    id: String,
+    #[serde(default)]
+    client_order_id: Option<String>,
+    #[serde(default)]
+    qty: Option<String>,
+    #[serde(default)]
+    filled_qty: Option<String>,
+    #[serde(default)]
+    limit_price: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AlpacaPositionJson {
+    symbol: String,
+    qty: String,
+    #[serde(default)]
+    side: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AlpacaActivityJson {
+    id: String,
+    #[serde(default)]
+    qty: Option<String>,
+    #[serde(default)]
+    price: Option<String>,
+    #[serde(default)]
+    symbol: Option<String>,
+    #[serde(default)]
+    client_order_id: Option<String>,
+}
+
 /// In-process Alpaca-shaped mock (JSON round-trip, auto-fill).
 #[derive(Debug, Clone)]
 pub struct LocalAlpacaHttp {
@@ -653,6 +909,9 @@ pub struct LocalAlpacaHttp {
 #[derive(Debug, Clone)]
 struct LocalOrder {
     id: String,
+    symbol: String,
+    client_order_id: String,
+    side: String,
     qty: i64,
     filled: i64,
     limit_price: String,
@@ -681,6 +940,98 @@ impl LocalAlpacaHttp {
             orders: HashMap::new(),
         }
     }
+
+    fn cash_minor_usd(&self) -> i128 {
+        // Mock starting cash ($100,000.00) +/- filled notionals in USD cents.
+        let mut cash: i128 = 10_000_000;
+        for o in self.orders.values() {
+            let cents = parse_usd_to_cents(&o.limit_price).unwrap_or(0);
+            let notional = cents.saturating_mul(i128::from(o.filled.max(0)));
+            if o.side == "buy" {
+                cash = cash.saturating_sub(notional);
+            } else {
+                cash = cash.saturating_add(notional);
+            }
+        }
+        cash
+    }
+
+    fn positions_json(&self) -> serde_json::Value {
+        let mut by_symbol: HashMap<String, i64> = HashMap::new();
+        for o in self.orders.values() {
+            if o.filled <= 0 {
+                continue;
+            }
+            let delta = if o.side == "buy" { o.filled } else { -o.filled };
+            *by_symbol.entry(o.symbol.clone()).or_insert(0) += delta;
+        }
+        let arr: Vec<_> = by_symbol
+            .into_iter()
+            .filter(|(_, q)| *q != 0)
+            .map(|(symbol, qty)| {
+                let side = if qty >= 0 { "long" } else { "short" };
+                json!({
+                    "symbol": symbol,
+                    "qty": qty.abs().to_string(),
+                    "side": side,
+                })
+            })
+            .collect();
+        serde_json::Value::Array(arr)
+    }
+
+    fn fills_json(&self) -> serde_json::Value {
+        let arr: Vec<_> = self
+            .orders
+            .values()
+            .filter(|o| o.filled > 0)
+            .map(|o| {
+                json!({
+                    "id": format!("fill-{}", o.id),
+                    "activity_type": "FILL",
+                    "symbol": o.symbol,
+                    "qty": o.filled.to_string(),
+                    "price": o.limit_price,
+                    "side": o.side,
+                    "order_id": o.id,
+                    "client_order_id": o.client_order_id,
+                })
+            })
+            .collect();
+        serde_json::Value::Array(arr)
+    }
+}
+
+fn parse_usd_to_cents(raw: &str) -> Option<i128> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let (neg, s) = raw
+        .strip_prefix('-')
+        .map_or((false, raw), |rest| (true, rest));
+    let mut parts = s.splitn(2, '.');
+    let whole: i128 = parts.next()?.parse().ok()?;
+    let frac_str = parts.next().unwrap_or("0");
+    let mut frac_digits: String = frac_str.chars().take(2).collect();
+    while frac_digits.len() < 2 {
+        frac_digits.push('0');
+    }
+    let frac: i128 = frac_digits.parse().ok()?;
+    let cents = whole.saturating_mul(100).saturating_add(frac);
+    Some(if neg { -cents } else { cents })
+}
+
+fn format_usd_from_cents(cents: i128) -> String {
+    let neg = cents < 0;
+    let abs = cents.unsigned_abs();
+    let whole = abs / 100;
+    let frac = abs % 100;
+    if neg {
+        format!("-{whole}.{frac:02}")
+    } else {
+        format!("{whole}.{frac:02}")
+    }
 }
 
 impl HttpTransport for LocalAlpacaHttp {
@@ -694,12 +1045,22 @@ impl HttpTransport for LocalAlpacaHttp {
                 self.next_id = self.next_id.saturating_add(1);
                 let qty: i64 = v["qty"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
                 let limit_price = v["limit_price"].as_str().unwrap_or("0").to_owned();
+                let symbol = v["symbol"].as_str().unwrap_or("UNKNOWN").to_owned();
+                let side = v["side"].as_str().unwrap_or("buy").to_owned();
+                let client_order_id = v["client_order_id"]
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .or_else(|| v["client_order_id"].as_u64().map(|n| n.to_string()))
+                    .unwrap_or_default();
                 let filled = if self.auto_fill { qty } else { 0 };
                 let status = if self.auto_fill { "filled" } else { "accepted" };
                 self.orders.insert(
                     id.clone(),
                     LocalOrder {
                         id: id.clone(),
+                        symbol,
+                        client_order_id: client_order_id.clone(),
+                        side,
                         qty,
                         filled,
                         limit_price: limit_price.clone(),
@@ -711,7 +1072,7 @@ impl HttpTransport for LocalAlpacaHttp {
                     "status": status,
                     "filled_qty": filled.to_string(),
                     "limit_price": limit_price,
-                    "client_order_id": v["client_order_id"],
+                    "client_order_id": client_order_id,
                 })
                 .to_string();
                 Ok(HttpResponse { status: 200, body })
@@ -764,7 +1125,7 @@ impl HttpTransport for LocalAlpacaHttp {
                     })
                 }
             }
-            (HttpMethod::Post, path) if path.starts_with("/v2/orders/") => {
+            (HttpMethod::Patch, path) if path.starts_with("/v2/orders/") => {
                 let id = path.trim_start_matches("/v2/orders/");
                 let v: serde_json::Value = serde_json::from_str(&req.body).unwrap_or_default();
                 if let Some(o) = self.orders.get_mut(id) {
@@ -790,6 +1151,83 @@ impl HttpTransport for LocalAlpacaHttp {
                         body: json!({"message":"not found"}).to_string(),
                     })
                 }
+            }
+            (HttpMethod::Post, path) if path.starts_with("/v2/orders/") => {
+                // Back-compat: treat POST replace like PATCH.
+                let id = path.trim_start_matches("/v2/orders/");
+                let v: serde_json::Value = serde_json::from_str(&req.body).unwrap_or_default();
+                if let Some(o) = self.orders.get_mut(id) {
+                    if let Some(q) = v["qty"].as_str().and_then(|s| s.parse().ok()) {
+                        o.qty = q;
+                    }
+                    if let Some(p) = v["limit_price"].as_str() {
+                        p.clone_into(&mut o.limit_price);
+                    }
+                    Ok(HttpResponse {
+                        status: 200,
+                        body: json!({
+                            "id": o.id,
+                            "status": "accepted",
+                            "filled_qty": o.filled.to_string(),
+                            "limit_price": o.limit_price,
+                        })
+                        .to_string(),
+                    })
+                } else {
+                    Ok(HttpResponse {
+                        status: 404,
+                        body: json!({"message":"not found"}).to_string(),
+                    })
+                }
+            }
+            (HttpMethod::Get, "/v2/account") => {
+                let cash = format_usd_from_cents(self.cash_minor_usd());
+                Ok(HttpResponse {
+                    status: 200,
+                    body: json!({
+                        "cash": cash,
+                        "equity": cash,
+                        "buying_power": cash,
+                        "currency": "USD",
+                    })
+                    .to_string(),
+                })
+            }
+            (HttpMethod::Get, "/v2/positions") => {
+                let positions = self.positions_json();
+                Ok(HttpResponse {
+                    status: 200,
+                    body: positions.to_string(),
+                })
+            }
+            (HttpMethod::Get, path) if path.starts_with("/v2/account/activities") => {
+                let fills = self.fills_json();
+                Ok(HttpResponse {
+                    status: 200,
+                    body: fills.to_string(),
+                })
+            }
+            (HttpMethod::Get, path) if path == "/v2/orders" || path.starts_with("/v2/orders?") => {
+                let list: Vec<_> = self
+                    .orders
+                    .values()
+                    .filter(|o| !o.canceled && o.filled < o.qty)
+                    .map(|o| {
+                        json!({
+                            "id": o.id,
+                            "status": "accepted",
+                            "filled_qty": o.filled.to_string(),
+                            "qty": o.qty.to_string(),
+                            "limit_price": o.limit_price,
+                            "symbol": o.symbol,
+                            "client_order_id": o.client_order_id,
+                        })
+                    })
+                    .collect();
+                Ok(HttpResponse {
+                    status: 200,
+                    body: serde_json::Value::Array(list).to_string(),
+                })
             }
             _ => Ok(HttpResponse {
                 status: 404,
@@ -834,6 +1272,7 @@ impl HttpTransport for RemoteAlpacaHttp {
         let builder = match req.method {
             HttpMethod::Get => self.client.get(&url),
             HttpMethod::Post => self.client.post(&url).body(req.body.clone()),
+            HttpMethod::Patch => self.client.patch(&url).body(req.body.clone()),
             HttpMethod::Delete => self.client.delete(&url),
         };
         let resp = builder
@@ -914,6 +1353,23 @@ mod tests {
         assert_eq!(second.len(), 1);
         assert!(matches!(second[0].exec_type(), ExecType::Trade));
         assert_eq!(v.venue_order(OrderId::from_u64(5)).unwrap().cum_qty, 2);
+    }
+
+    #[test]
+    fn local_mock_broker_statement_after_fill() {
+        let mut v = AlpacaPaperVenue::local_mock(symbols());
+        v.submit(&order(9)).expect("submit");
+        let _ = v.poll();
+        let stmt = v.fetch_broker_statement().expect("statement");
+        assert!(stmt.account.cash_minor < 10_000_000);
+        assert!(
+            stmt.positions
+                .iter()
+                .any(|p| p.symbol == "AAPL" && p.qty == 2),
+            "expected AAPL position: {:?}",
+            stmt.positions
+        );
+        assert!(!stmt.fills.is_empty());
     }
 
     #[test]

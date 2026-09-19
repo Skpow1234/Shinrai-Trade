@@ -97,6 +97,13 @@ impl VenueHandle {
         }
     }
 
+    pub(crate) fn as_alpaca_mut(&mut self) -> Option<&mut AlpacaPaperVenue> {
+        match self {
+            Self::Alpaca(s) => Some(s),
+            Self::Sim(_) | Self::Sandbox(_) | Self::Rest(_) | Self::Licensed(_) => None,
+        }
+    }
+
     pub(crate) fn as_licensed_mut(&mut self) -> Option<&mut LicensedSandboxVenue> {
         match self {
             Self::Licensed(s) => Some(s),

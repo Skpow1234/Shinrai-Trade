@@ -429,6 +429,20 @@ impl PaperEngine {
         self.venue.trade_execs()
     }
 
+    /// Pulls an Alpaca broker statement when the venue is Alpaca.
+    ///
+    /// # Errors
+    ///
+    /// Returns venue transport errors, or `PaperError::Venue` when not Alpaca.
+    pub fn fetch_alpaca_broker_statement(
+        &mut self,
+    ) -> Result<shinrai_execution::AlpacaBrokerStatement, PaperError> {
+        let venue = self.venue.as_alpaca_mut().ok_or(PaperError::Venue(
+            shinrai_execution::ExecutionError::InvalidState("not alpaca venue"),
+        ))?;
+        venue.fetch_broker_statement().map_err(PaperError::Venue)
+    }
+
     /// Venue session cursor (connected / session / next seq).
     #[must_use]
     pub fn venue_session(&self) -> VenueSessionState {

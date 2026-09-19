@@ -282,26 +282,29 @@ impl PaperEngine {
             }
         }
 
-        let mut broker_execs: HashSet<String> = HashSet::new();
-        for fill in &snapshot.fills {
-            let key = fill.exec_id.as_str().to_owned();
-            broker_execs.insert(key.clone());
-            if !oms_execs.contains(&key) {
-                mismatches.push(ReconciliationMismatch {
-                    kind: ReconciliationKind::BrokerFillMissingInOms,
-                    order_id: fill.order_id,
-                    detail: format!("exec_id={}", fill.exec_id.as_str()),
-                });
+        // Empty `snapshot.fills` means "skip fill recon" (e.g. Alpaca auto-EOD positions-only).
+        if !snapshot.fills.is_empty() {
+            let mut broker_execs: HashSet<String> = HashSet::new();
+            for fill in &snapshot.fills {
+                let key = fill.exec_id.as_str().to_owned();
+                broker_execs.insert(key.clone());
+                if !oms_execs.contains(&key) {
+                    mismatches.push(ReconciliationMismatch {
+                        kind: ReconciliationKind::BrokerFillMissingInOms,
+                        order_id: fill.order_id,
+                        detail: format!("exec_id={}", fill.exec_id.as_str()),
+                    });
+                }
             }
-        }
 
-        for (exec, order_id) in &exec_to_order {
-            if !broker_execs.contains(exec) {
-                mismatches.push(ReconciliationMismatch {
-                    kind: ReconciliationKind::OmsFillMissingAtBroker,
-                    order_id: *order_id,
-                    detail: format!("exec_id={exec}"),
-                });
+            for (exec, order_id) in &exec_to_order {
+                if !broker_execs.contains(exec) {
+                    mismatches.push(ReconciliationMismatch {
+                        kind: ReconciliationKind::OmsFillMissingAtBroker,
+                        order_id: *order_id,
+                        detail: format!("exec_id={exec}"),
+                    });
+                }
             }
         }
 

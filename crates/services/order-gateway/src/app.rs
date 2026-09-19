@@ -164,6 +164,8 @@ pub struct GatewayConfig {
     admin_override_token: Option<String>,
     /// Fail-hard on store write (default true).
     store_fail_hard: bool,
+    /// Force local Alpaca mock even if env credentials exist (tests).
+    alpaca_force_local: bool,
 }
 
 impl GatewayConfig {
@@ -196,6 +198,7 @@ impl GatewayConfig {
             kyc_raw: None,
             admin_override_token: None,
             store_fail_hard: true,
+            alpaca_force_local: false,
         }
     }
 
@@ -288,6 +291,7 @@ impl core::fmt::Debug for GatewayConfig {
                 &self.admin_override_token.is_some(),
             )
             .field("store_fail_hard", &self.store_fail_hard)
+            .field("alpaca_force_local", &self.alpaca_force_local)
             .finish_non_exhaustive()
     }
 }
@@ -357,19 +361,20 @@ impl AppState {
                     .iter()
                     .map(|i| (i.id(), i.symbol_display().to_owned()))
                     .collect();
-                if let Some(cfg) = shinrai_execution::AlpacaConfig::from_env() {
+                if config.alpaca_force_local {
+                    PaperEngine::with_alpaca(master.clone(), risk.clone(), symbols)
+                } else if let Some(cfg) = shinrai_execution::AlpacaConfig::from_env() {
                     match PaperEngine::with_alpaca_remote(
                         master.clone(),
                         risk.clone(),
                         cfg,
-                        symbols.clone(),
+                        symbols,
                     ) {
                         Ok(e) => e,
                         Err(err) => {
-                            eprintln!(
-                                "shinrai-order-gateway: Alpaca remote failed ({err}); using local mock"
+                            panic!(
+                                "shinrai-order-gateway: Alpaca remote required but failed: {err}"
                             );
-                            PaperEngine::with_alpaca(master.clone(), risk.clone(), symbols)
                         }
                     }
                 } else {
@@ -589,6 +594,21 @@ impl AppState {
             TokenTtl::default(),
         );
         cfg.venue_kind = VenueKind::Sandbox;
+        Self::from_config(&cfg)
+    }
+
+    /// Test helper with local Alpaca paper mock (no network).
+    #[must_use]
+    pub fn for_test_alpaca(token: &str, subject: &str, account: u64, deposit_major: i64) -> Self {
+        let mut cfg = GatewayConfig::new(
+            vec![(token.to_owned(), subject.to_owned())],
+            Vec::new(),
+            vec![(subject.to_owned(), account)],
+            vec![(account, deposit_major)],
+            TokenTtl::default(),
+        );
+        cfg.venue_kind = VenueKind::Alpaca;
+        cfg.alpaca_force_local = true;
         Self::from_config(&cfg)
     }
 

@@ -352,6 +352,19 @@ pub struct EodFillRow {
 
 #[derive(Debug, Deserialize)]
 pub struct EodBody {
+    /// When `alpaca`, pull statement from the Alpaca venue (positions + fills).
+    /// Manual cash/position/fill rows in the body are merged on top.
+    #[serde(default)]
+    source: Option<String>,
+    /// Include Alpaca cash in the snapshot (default false — paper ledgers diverge).
+    #[serde(default)]
+    include_cash: Option<bool>,
+    /// Include Alpaca FILL activities (default false — activity ids ≠ OMS exec ids).
+    #[serde(default)]
+    include_fills: Option<bool>,
+    /// Account id used when mapping Alpaca positions/fills (default first gateway account).
+    #[serde(default)]
+    account_id: Option<u64>,
     cash: Option<Vec<EodCashRow>>,
     positions: Option<Vec<EodPositionRow>>,
     fills: Option<Vec<EodFillRow>>,
@@ -368,7 +381,53 @@ pub async fn post_eod_reconciliation(
         return resp;
     }
 
+    let source = body
+        .source
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     let mut snapshot = shinrai_paper::BrokerEodSnapshot::default();
+
+    if source == "alpaca" {
+        let account_id = body.account_id.or_else(|| {
+            state
+                .accounts
+                .values()
+                .next()
+                .map(|a| a.get())
+        });
+        let account_id = account_id.unwrap_or(1);
+        let include_cash = body.include_cash.unwrap_or(false);
+        let include_fills = body.include_fills.unwrap_or(false);
+        let mut engine = lock_engine(&state);
+        let statement = match engine.fetch_alpaca_broker_statement() {
+            Ok(s) => s,
+            Err(err) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "type": "error",
+                        "code": "alpaca_eod_fetch_failed",
+                        "message": err.to_string(),
+                    })),
+                )
+                    .into_response();
+            }
+        };
+        drop(engine);
+        match alpaca_statement_to_snapshot(
+            &state,
+            AccountId::from_u64(account_id),
+            &statement,
+            include_cash,
+            include_fills,
+        ) {
+            Ok(s) => snapshot = s,
+            Err(resp) => return resp,
+        }
+    }
+
     for row in body.cash.unwrap_or_default() {
         let currency = match row.currency.trim().to_ascii_uppercase().as_str() {
             "USD" => shinrai_money::Currency::usd(),
@@ -450,6 +509,7 @@ pub async fn post_eod_reconciliation(
     let report = engine.reconcile_eod(&snapshot);
     Json(json!({
         "ok": report.ok,
+        "source": if source.is_empty() { "manual" } else { source.as_str() },
         "mismatches": report.mismatches.iter().map(|m| json!({
             "kind": m.kind.code(),
             "order_id": m.order_id.get(),
@@ -457,6 +517,74 @@ pub async fn post_eod_reconciliation(
         })).collect::<Vec<_>>(),
     }))
     .into_response()
+}
+
+fn alpaca_statement_to_snapshot(
+    state: &AppState,
+    account_id: AccountId,
+    statement: &shinrai_execution::AlpacaBrokerStatement,
+    include_cash: bool,
+    include_fills: bool,
+) -> Result<shinrai_paper::BrokerEodSnapshot, Response> {
+    let mut snapshot = shinrai_paper::BrokerEodSnapshot::default();
+    if include_cash {
+        let currency = if statement.account.currency.eq_ignore_ascii_case("USD") {
+            shinrai_money::Currency::usd()
+        } else {
+            let Ok(code) = shinrai_money::CurrencyCode::new(&statement.account.currency) else {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "type": "error", "code": "invalid_currency" })),
+                )
+                    .into_response());
+            };
+            shinrai_money::Currency::from_code(code, 2).map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "type": "error", "code": "invalid_currency" })),
+                )
+                    .into_response()
+            })?
+        };
+        snapshot.cash.push(shinrai_paper::BrokerEodCash {
+            account_id,
+            currency,
+            minor_units: statement.account.cash_minor,
+        });
+    }
+    for pos in &statement.positions {
+        let Ok(alias) = ExternalId::ticker(pos.symbol.trim()) else {
+            continue;
+        };
+        let Ok(instrument_id) = state.master.resolve_alias(&alias) else {
+            continue;
+        };
+        snapshot.positions.push(shinrai_paper::BrokerEodPosition {
+            account_id,
+            instrument_id,
+            lots: pos.qty,
+        });
+    }
+    if include_fills {
+        for fill in &statement.fills {
+            let Ok(exec_id) = shinrai_orders::ExecId::new(fill.exec_id.trim()) else {
+                continue;
+            };
+            let order_id = fill
+                .client_order_id
+                .as_deref()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(shinrai_orders::OrderId::from_u64)
+                .unwrap_or_else(|| shinrai_orders::OrderId::from_u64(0));
+            snapshot.fills.push(shinrai_paper::BrokerEodFill {
+                order_id,
+                exec_id,
+                qty: fill.qty,
+                price_ticks: fill.price_ticks,
+            });
+        }
+    }
+    Ok(snapshot)
 }
 
 #[derive(Debug, Deserialize)]

@@ -50,26 +50,59 @@ pub(crate) async fn insert_outbox_tx(
     Ok(id)
 }
 
-/// Lists unpublished events (oldest first). Safe for a single publisher process.
+/// Claims unpublished events with `FOR UPDATE SKIP LOCKED` (safe for multiple publishers).
 ///
-/// Multi-writer claim stamps are Phase 4; consumers must be idempotent.
+/// Rows are stamped with `claimed_at` / `claimed_by` for observability; consumers must
+/// still be idempotent (inbox).
 ///
 /// # Errors
 ///
 /// Returns sqlx errors.
 pub async fn claim_unpublished(pool: &PgPool, limit: i64) -> Result<Vec<OutboxEvent>, StoreError> {
+    claim_unpublished_as(pool, limit, "order-gateway").await
+}
+
+/// Claims unpublished events under a named publisher identity.
+///
+/// # Errors
+///
+/// Returns sqlx errors.
+pub async fn claim_unpublished_as(
+    pool: &PgPool,
+    limit: i64,
+    claimed_by: &str,
+) -> Result<Vec<OutboxEvent>, StoreError> {
+    let mut tx = pool.begin().await?;
     let rows: Vec<(i64, String, serde_json::Value)> = sqlx::query_as(
         r"
         SELECT id, topic, payload
         FROM outbox_events
         WHERE published_at IS NULL
+          AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '5 minutes')
         ORDER BY id ASC
         LIMIT $1
+        FOR UPDATE SKIP LOCKED
         ",
     )
     .bind(limit.max(1))
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
+
+    for (id, _, _) in &rows {
+        sqlx::query(
+            r"
+            UPDATE outbox_events
+            SET claimed_at = NOW(), claimed_by = $2
+            WHERE id = $1
+            ",
+        )
+        .bind(id)
+        .bind(claimed_by)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
     Ok(rows
         .into_iter()
         .map(|(id, topic, payload)| OutboxEvent { id, topic, payload })

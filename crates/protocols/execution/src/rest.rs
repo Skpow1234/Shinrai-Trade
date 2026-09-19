@@ -22,6 +22,8 @@ pub enum HttpMethod {
     Get,
     /// POST.
     Post,
+    /// PATCH (Alpaca order replace).
+    Patch,
     /// DELETE.
     Delete,
 }
@@ -109,6 +111,7 @@ impl HttpTransport for RemotePaperHttp {
         let mut builder = match req.method {
             HttpMethod::Get => self.client.get(&url),
             HttpMethod::Post => self.client.post(&url),
+            HttpMethod::Patch => self.client.patch(&url).body(req.body.clone()),
             HttpMethod::Delete => self.client.delete(&url),
         };
         if let Some(tok) = &self.bearer {

@@ -289,10 +289,14 @@ curl -X POST http://127.0.0.1:8081/v1/ops/risk \
   -H 'content-type: application/json' \
   -d '{"global_kill":true,"limits":{"collar_bps":100}}'
 
-# EOD broker snapshot recon + restricted-instrument approval (ops auth)
+# EOD broker snapshot recon (manual body or Alpaca auto-pull) + approvals
 curl -X POST http://127.0.0.1:8081/v1/ops/reconciliation/eod \
   -H 'content-type: application/json' \
   -d '{"cash":[{"account_id":1,"currency":"USD","minor_units":1000000}],"positions":[],"fills":[]}'
+# When SHINRAI_OG_VENUE=alpaca: pull positions from the venue (cash/fills optional)
+curl -X POST http://127.0.0.1:8081/v1/ops/reconciliation/eod \
+  -H 'content-type: application/json' \
+  -d '{"source":"alpaca","account_id":1}'
 curl -X POST http://127.0.0.1:8081/v1/ops/approvals \
   -H 'content-type: application/json' \
   -d '{"account_id":1,"symbol":"AAPL"}'
@@ -301,7 +305,7 @@ curl -X POST http://127.0.0.1:8081/v1/ops/approvals \
 open http://127.0.0.1:8081/v1/ops   # or browse to that URL
 ```
 
-Phase 4 extras on the order path: expanded pre-trade risk (hours, collars, daily loss, shorts, asset-class exposure), submit rate limiting (429 `rate_limited`), audit hash-chain fields on `GET /v1/audit`, and correlation via `X-Request-Id` (or auto UUID) on order spans.
+Phase 4 is complete for the licensed-broker paper path: Alpaca paper REST (`SHINRAI_OG_VENUE=alpaca`) with async fill polling, durable OMS + drop-copy + session cursor, Postgres outbox with `SKIP LOCKED` claim, KYC/approvals/audit export, and Alpaca-sourced EOD position recon. FIX remains optional. Phase 5 (customer money) stays gated.
 
 ## Test
 

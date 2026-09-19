@@ -1,7 +1,7 @@
 //! Execution venue contract shared by the paper simulator and broker adapters.
 //!
-//! Reports map onto [`shinrai_orders::OrderEvent`]. A real FIX/REST adapter
-//! should emit the same shapes so the OMS path stays unchanged.
+//! Reports map onto [`shinrai_orders::OrderEvent`]. Phase 4 live path is Alpaca
+//! paper REST (`AlpacaPaperVenue`); FIX remains optional for a later track.
 
 #![forbid(unsafe_code)]
 
@@ -15,7 +15,8 @@ mod session;
 mod venue;
 
 pub use alpaca::{
-    AlpacaConfig, AlpacaPaperVenue, LocalAlpacaHttp, RemoteAlpacaHttp, ALPACA_PAPER_BASE_URL,
+    AlpacaAccountSnap, AlpacaBrokerStatement, AlpacaConfig, AlpacaFillSnap, AlpacaPaperVenue,
+    AlpacaPositionSnap, LocalAlpacaHttp, RemoteAlpacaHttp, ALPACA_PAPER_BASE_URL,
 };
 pub use error::ExecutionError;
 pub use licensed::{LicensedSandboxConfig, LicensedSandboxVenue, OutboundMsg, SessionPhase};

@@ -67,14 +67,16 @@ fn alpaca_paper_async_fill_poll() {
     let mut symbols = HashMap::new();
     symbols.insert(InstrumentId::from_u64(1), "AAPL".into());
     let mut venue = AlpacaPaperVenue::remote(config, symbols).expect("client");
-    let order_id = OrderId::from_u64(u64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time")
-            .as_millis()
-            % u128::from(u64::MAX),
-    )
-    .unwrap_or(1));
+    let order_id = OrderId::from_u64(
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_millis()
+                % u128::from(u64::MAX),
+        )
+        .unwrap_or(1),
+    );
     // Limit well above a typical AAPL print so paper fills quickly.
     venue
         .submit(&NewVenueOrder {
@@ -112,4 +114,9 @@ fn alpaca_paper_async_fill_poll() {
     );
     let snap = venue.venue_order(order_id).expect("inflight");
     assert!(snap.cum_qty >= 1);
+
+    // EOD statement pull against paper account (positions may be empty if
+    // the aggressive limit did not rest; still exercises /v2/account).
+    let stmt = venue.fetch_broker_statement().expect("eod statement");
+    assert_eq!(stmt.account.currency.to_ascii_uppercase(), "USD");
 }
