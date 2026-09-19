@@ -349,6 +349,30 @@ impl AppState {
                 LicensedSandboxConfig::happy_path(),
                 risk.clone(),
             ),
+            VenueKind::Alpaca => {
+                let symbols: HashMap<_, _> = master
+                    .iter()
+                    .map(|i| (i.id(), i.symbol_display().to_owned()))
+                    .collect();
+                if let Some(cfg) = shinrai_execution::AlpacaConfig::from_env() {
+                    match PaperEngine::with_alpaca_remote(
+                        master.clone(),
+                        risk.clone(),
+                        cfg,
+                        symbols.clone(),
+                    ) {
+                        Ok(e) => e,
+                        Err(err) => {
+                            eprintln!(
+                                "shinrai-order-gateway: Alpaca remote failed ({err}); using local mock"
+                            );
+                            PaperEngine::with_alpaca(master.clone(), risk.clone(), symbols)
+                        }
+                    }
+                } else {
+                    PaperEngine::with_alpaca(master.clone(), risk.clone(), symbols)
+                }
+            }
         };
 
         for (account_raw, major) in &config.deposits {
@@ -990,6 +1014,7 @@ fn parse_venue_kind(raw: Option<&str>) -> VenueKind {
         Some("sandbox" | "sbx" | "broker") => VenueKind::Sandbox,
         Some("rest" | "http") => VenueKind::Rest,
         Some("licensed" | "fix" | "broker_sandbox") => VenueKind::Licensed,
+        Some("alpaca" | "alpaca_paper") => VenueKind::Alpaca,
         _ => VenueKind::Sim,
     }
 }
