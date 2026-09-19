@@ -312,6 +312,8 @@ curl -X POST http://127.0.0.1:8081/v1/ops/reconciliation/eod \
 curl -X POST http://127.0.0.1:8081/v1/ops/approvals \
   -H 'content-type: application/json' \
   -d '{"account_id":1,"symbol":"AAPL"}'
+# Paper withdraw audit (Postgres when configured)
+curl "http://127.0.0.1:8081/v1/ops/withdraw-audit"
 
 # Minimal HTML dashboard (polls /v1/metrics)
 open http://127.0.0.1:8081/v1/ops   # or browse to that URL
