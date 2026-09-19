@@ -139,6 +139,7 @@ pub struct GatewayConfig {
     stuck_age_secs: u64,
     venue_kind: VenueKind,
     ops_token: Option<String>,
+    risk_limits: RiskLimits,
 }
 
 impl GatewayConfig {
@@ -163,6 +164,7 @@ impl GatewayConfig {
             stuck_age_secs: crate::ops::DEFAULT_STUCK_AGE_SECS,
             venue_kind: VenueKind::Sim,
             ops_token: None,
+            risk_limits: RiskLimits::demo(),
         }
     }
 
@@ -192,6 +194,7 @@ impl GatewayConfig {
         cfg.ops_token = std::env::var("SHINRAI_OG_OPS_TOKEN")
             .ok()
             .filter(|s| !s.is_empty());
+        cfg.risk_limits = RiskLimits::demo_from_env();
         cfg
     }
 }
@@ -210,6 +213,11 @@ impl core::fmt::Debug for GatewayConfig {
             .field("stuck_age_secs", &self.stuck_age_secs)
             .field("venue_kind", &self.venue_kind)
             .field("ops_token_configured", &self.ops_token.is_some())
+            .field("risk_collar_bps", &self.risk_limits.collar_bps)
+            .field(
+                "risk_max_daily_loss_minor",
+                &self.risk_limits.max_daily_loss_minor,
+            )
             .finish()
     }
 }
@@ -233,20 +241,15 @@ impl AppState {
             .collect();
 
         let master = phase1_master();
+        let risk = RiskEngine::new(config.risk_limits);
         let mut engine = match config.venue_kind {
-            VenueKind::Sim => PaperEngine::with_risk(
-                master.clone(),
-                FaultConfig::happy_path(),
-                RiskEngine::new(RiskLimits::demo()),
-            ),
-            VenueKind::Sandbox => PaperEngine::with_sandbox(
-                master.clone(),
-                SandboxConfig::happy_path(),
-                RiskEngine::new(RiskLimits::demo()),
-            ),
-            VenueKind::Rest => {
-                PaperEngine::with_rest(master.clone(), RiskEngine::new(RiskLimits::demo()))
+            VenueKind::Sim => {
+                PaperEngine::with_risk(master.clone(), FaultConfig::happy_path(), risk.clone())
             }
+            VenueKind::Sandbox => {
+                PaperEngine::with_sandbox(master.clone(), SandboxConfig::happy_path(), risk.clone())
+            }
+            VenueKind::Rest => PaperEngine::with_rest(master.clone(), risk),
         };
 
         for (account_raw, major) in &config.deposits {

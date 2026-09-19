@@ -229,6 +229,11 @@ Pre-trade risk runs before the OMS. Insufficient buying power returns **422** wi
 | `SHINRAI_OG_STUCK_AGE_SECS` | Pending OMS age before “stuck” (default `5`) |
 | `SHINRAI_OG_VENUE` | `sim` (default), `sandbox` (in-process broker), or `rest` / `http` (JSON REST paper venue) |
 | `SHINRAI_OG_OPS_TOKEN` | When set, `/v1/ops*` and `/v1/metrics` require this bearer (or `?ops_token=`) |
+| `SHINRAI_RISK_COLLAR_BPS` | Price collar vs fill/mark (0 = off) |
+| `SHINRAI_RISK_MAX_DAILY_LOSS_MINOR` | Day loss limit in quote minor units (0 = off) |
+| `SHINRAI_RISK_MAX_ASSET_CLASS_NOTIONAL_MINOR` | Cap on same-asset-class exposure + new order (0 = off) |
+| `SHINRAI_RISK_MARKET_SESSION` | Optional `open_secs:close_secs` from midnight UTC |
+| `SHINRAI_RISK_ALLOW_SHORT` / `SHINRAI_RISK_MAX_SHORT_LOTS` | Short policy overlays on demo limits |
 | `SHINRAI_LOG` | `tracing` filter (falls back to `RUST_LOG`, default `info`) |
 | `SHINRAI_OTEL_ENDPOINT` | OTLP/HTTP base URL (e.g. `http://127.0.0.1:4318`); also accepts `OTEL_EXPORTER_OTLP_ENDPOINT` |
 | `SHINRAI_OUTBOX_POLL_MS` | Outbox publisher poll interval when Postgres is enabled (default `1000`) |

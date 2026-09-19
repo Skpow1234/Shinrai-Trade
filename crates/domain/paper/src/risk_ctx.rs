@@ -445,4 +445,40 @@ mod tests {
             PaperError::Risk(shinrai_risk::RiskRejectReason::MaxAssetClassExposure)
         ));
     }
+
+    #[test]
+    fn collar_rejects_far_from_fill_mark() {
+        let mut limits = RiskLimits::demo();
+        limits.collar_bps = 50; // 0.5%
+        let mut engine = PaperEngine::with_risk(
+            phase1_master(),
+            FaultConfig::happy_path(),
+            RiskEngine::new(limits),
+        );
+        let acc = AccountId::from_u64(1);
+        engine
+            .deposit(
+                acc,
+                Money::from_major(10_000, Currency::usd()).expect("d"),
+                "dep",
+            )
+            .expect("dep");
+        buy(&mut engine, acc, "c1", 1, 10_000); // seeds mark at 10000
+        let err = engine
+            .submit(&SubmitRequest {
+                account_id: acc,
+                client_order_id: ClientOrderId::new("c2").expect("c"),
+                instrument_id: aapl().id(),
+                side: Side::Buy,
+                qty: QuantityLots::from_lots(1),
+                price: PriceTicks::from_scaled(10_100), // 1% above mark
+                order_type: OrderType::Limit,
+                time_in_force: TimeInForce::Gtc,
+            })
+            .expect_err("collar");
+        assert!(matches!(
+            err,
+            PaperError::Risk(shinrai_risk::RiskRejectReason::PriceCollar)
+        ));
+    }
 }
