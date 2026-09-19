@@ -84,6 +84,7 @@ async fn persist_failure_returns_503_and_engages_kill() {
     assert!(mjson["dual_write_failures"].as_u64().unwrap_or(0) >= 1);
 
     let risk = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/v1/ops/risk")
@@ -100,7 +101,6 @@ async fn persist_failure_returns_503_and_engages_kill() {
 
     // Memory rolled back: order must not appear.
     let list = app
-        .clone()
         .oneshot(
             Request::builder()
                 .uri("/v1/orders?token=chaos-tok")
