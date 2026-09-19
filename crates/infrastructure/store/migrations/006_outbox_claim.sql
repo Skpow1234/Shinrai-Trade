@@ -1,4 +1,4 @@
-!-- Outbox multi-publisher claim stamps (SKIP LOCKED).
+-- Outbox multi-publisher claim stamps (SKIP LOCKED).
 
 ALTER TABLE outbox_events
     ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ,
