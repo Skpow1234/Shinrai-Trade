@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Shinrai · paper trader</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --panel: #1a222c;
+    --text: #e7ecf1;
+    --muted: #8b9aab;
+    --ok: #3d9a6a;
+    --warn: #c9852c;
+    --bad: #c44b4b;
+    --accent: #5b8def;
+    --border: #2a3542;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 1.5rem;
+    font-family: "IBM Plex Mono", "Consolas", ui-monospace, monospace;
+    background: radial-gradient(1200px 600px at 10% -10%, #1c2a3a, var(--bg));
+    color: var(--text);
+    line-height: 1.45;
+  }
+  h1 { font-size: 1.15rem; font-weight: 600; letter-spacing: 0.04em; margin: 0 0 0.25rem; }
+  h2 { font-size: 0.85rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin: 0 0 0.75rem; }
+  .sub { color: var(--muted); font-size: 0.8rem; margin: 0 0 1.25rem; }
+  a { color: var(--accent); }
+  .layout { display: grid; gap: 1rem; max-width: 960px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    padding: 1rem 1.1rem;
+  }
+  .row { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: end; }
+  label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.7rem; color: var(--muted); text-transform: uppercase; }
+  input, select, button {
+    font: inherit; font-size: 0.85rem; color: var(--text);
+    background: #121820; border: 1px solid var(--border); border-radius: 4px;
+    padding: 0.45rem 0.6rem;
+  }
+  input, select { min-width: 7rem; }
+  button {
+    background: #243044; border-color: #3a4d66; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: #2a4570; border-color: var(--accent); }
+  button.ghost { background: transparent; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+  th, td { text-align: left; padding: 0.35rem 0.4rem; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  #toast { color: var(--bad); white-space: pre-wrap; font-size: 0.8rem; min-height: 1.2rem; margin-top: 0.5rem; }
+  #toast.ok { color: var(--ok); }
+  .hidden { display: none !important; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
+  .hint { font-size: 0.72rem; color: var(--muted); margin-top: 0.5rem; }
+  .bal { font-size: 1.1rem; }
+</style>
+</head>
+<body>
+  <h1>Shinrai · paper trader</h1>
+  <p class="sub">Same-origin UI for order-gateway · prices/qty are scaled integers · cash in minor units (USD cents) · <a href="/v1/ops">ops</a></p>
+
+  <div class="layout">
+    <section class="panel" id="login-panel">
+      <h2>Session</h2>
+      <div class="row">
+        <label>Static token
+          <input id="static-token" placeholder="dev" autocomplete="off"/>
+        </label>
+        <button type="button" class="primary" id="btn-token">Use token</button>
+      </div>
+      <p class="hint">Or client credentials (<code>SHINRAI_OG_CLIENTS</code>):</p>
+      <div class="row">
+        <label>client_id <input id="client-id" placeholder="dev" autocomplete="off"/></label>
+        <label>client_secret <input id="client-secret" type="password" placeholder="s3cret" autocomplete="off"/></label>
+        <button type="button" id="btn-creds">Get access token</button>
+      </div>
+      <div class="row" style="margin-top:0.75rem">
+        <button type="button" class="ghost" id="btn-logout">Logout</button>
+        <span class="hint" id="session-status">Not signed in</span>
+      </div>
+    </section>
+
+    <div id="app" class="hidden">
+      <div class="grid2">
+        <section class="panel">
+          <h2>Balances</h2>
+          <div id="balances" class="bal">—</div>
+          <button type="button" id="btn-refresh-bal" style="margin-top:0.75rem">Refresh</button>
+        </section>
+        <section class="panel">
+          <h2>Portfolio</h2>
+          <div id="portfolio">—</div>
+          <button type="button" id="btn-refresh-pf" style="margin-top:0.75rem">Refresh</button>
+        </section>
+      </div>
+
+      <section class="panel">
+        <h2>Place order</h2>
+        <div class="row">
+          <label>Symbol <input id="symbol" value="AAPL"/></label>
+          <label>Side
+            <select id="side"><option>Buy</option><option>Sell</option></select>
+          </label>
+          <label>Qty (lots) <input id="qty" type="number" value="1" min="1"/></label>
+          <label>Price (scaled) <input id="price" type="number" value="10000" min="1"/></label>
+          <label>TIF
+            <select id="tif"><option>GTC</option><option>IOC</option><option>FOK</option></select>
+          </label>
+          <button type="button" class="primary" id="btn-submit">Submit</button>
+        </div>
+        <p class="hint">Example: AAPL Buy qty=1 price=10000 → $100.00/share paper limit.</p>
+      </section>
+
+      <section class="panel">
+        <h2>Orders</h2>
+        <button type="button" id="btn-refresh-orders">Refresh</button>
+        <table>
+          <thead>
+            <tr>
+              <th>id</th><th>clid</th><th>sym</th><th>side</th><th>qty</th><th>px</th><th>status</th><th>cum</th>
+            </tr>
+          </thead>
+          <tbody id="orders"></tbody>
+        </table>
+      </section>
+    </div>
+
+    <div id="toast"></div>
+  </div>
+
+<script>
+(function () {
+  const KEY = "shinrai.og.access";
+  const toast = document.getElementById("toast");
+
+  function token() { return sessionStorage.getItem(KEY) || ""; }
+  function setToken(t) {
+    if (t) sessionStorage.setItem(KEY, t);
+    else sessionStorage.removeItem(KEY);
+    syncUi();
+  }
+  function setToast(msg, ok) {
+    toast.textContent = msg || "";
+    toast.className = ok ? "ok" : "";
+  }
+
+  async function api(path, opts) {
+    opts = opts || {};
+    const headers = Object.assign({ "content-type": "application/json" }, opts.headers || {});
+    const t = token();
+    if (t) headers["Authorization"] = "Bearer " + t;
+    const r = await fetch(path, Object.assign({}, opts, { headers }));
+    const text = await r.text();
+    let body = null;
+    try { body = text ? JSON.parse(text) : null; } catch (_) { body = { raw: text }; }
+    if (!r.ok) {
+      const code = body && (body.code || body.error) || r.status;
+      const detail = body && (body.detail || body.message) || text;
+      throw new Error(code + (detail ? ": " + detail : ""));
+    }
+    return body;
+  }
+
+  function syncUi() {
+    const signed = !!token();
+    document.getElementById("app").classList.toggle("hidden", !signed);
+    document.getElementById("session-status").textContent = signed
+      ? "Signed in (Bearer in sessionStorage)"
+      : "Not signed in";
+    if (signed) {
+      refreshAll().catch((e) => setToast(String(e)));
+    }
+  }
+
+  function fmtMinor(n) {
+    if (n == null) return "—";
+    return (Number(n) / 100).toFixed(2);
+  }
+
+  async function refreshBalances() {
+    const b = await api("/v1/accounts/balances");
+    const rows = (b.balances || []).map((x) =>
+      `<div><strong>${x.currency}</strong> avail ${fmtMinor(x.available_minor)} · reserved ${fmtMinor(x.reserved_minor)} · total ${fmtMinor(x.total_minor)}</div>`
+    ).join("") || "<div class='hint'>no balances</div>";
+    document.getElementById("balances").innerHTML = rows;
+  }
+
+  async function refreshPortfolio() {
+    const p = await api("/v1/portfolio?use_stored_marks=1");
+    const pos = (p.positions || []).map((x) =>
+      `<div>${x.symbol || x.instrument_id}: lots ${x.lots} · uPnL ${fmtMinor(x.unrealized_pnl_minor)}</div>`
+    ).join("") || "<div class='hint'>flat</div>";
+    document.getElementById("portfolio").innerHTML =
+      `<div>equity ${fmtMinor(p.total_equity_minor)} · realized ${fmtMinor(p.realized_pnl_minor)}</div>${pos}`;
+  }
+
+  async function refreshOrders() {
+    const data = await api("/v1/orders");
+    const rows = (data.orders || []).map((o) =>
+      `<tr>
+        <td>${o.id}</td><td>${o.client_order_id}</td><td>${o.symbol || o.instrument_id}</td>
+        <td>${o.side}</td><td>${o.order_qty}</td><td>${o.price}</td>
+        <td>${o.status}</td><td>${o.cum_qty}</td>
+      </tr>`
+    ).join("") || `<tr><td colspan="8" style="color:var(--muted)">none</td></tr>`;
+    document.getElementById("orders").innerHTML = rows;
+  }
+
+  async function refreshAll() {
+    setToast("");
+    await Promise.all([refreshBalances(), refreshPortfolio(), refreshOrders()]);
+  }
+
+  document.getElementById("btn-token").onclick = () => {
+    const t = document.getElementById("static-token").value.trim();
+    if (!t) { setToast("enter a token"); return; }
+    setToken(t);
+    setToast("token stored", true);
+  };
+
+  document.getElementById("btn-creds").onclick = async () => {
+    try {
+      const body = {
+        grant_type: "client_credentials",
+        client_id: document.getElementById("client-id").value.trim(),
+        client_secret: document.getElementById("client-secret").value,
+      };
+      const r = await fetch("/v1/auth/token", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || j.code || r.status);
+      setToken(j.access_token);
+      setToast("access token issued", true);
+    } catch (e) {
+      setToast(String(e));
+    }
+  };
+
+  document.getElementById("btn-logout").onclick = async () => {
+    const t = token();
+    if (t) {
+      try {
+        await fetch("/v1/auth/revoke", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ token: t }),
+        });
+      } catch (_) { /* ignore */ }
+    }
+    setToken("");
+    setToast("logged out", true);
+  };
+
+  document.getElementById("btn-refresh-bal").onclick = () =>
+    refreshBalances().then(() => setToast("balances ok", true)).catch((e) => setToast(String(e)));
+  document.getElementById("btn-refresh-pf").onclick = () =>
+    refreshPortfolio().then(() => setToast("portfolio ok", true)).catch((e) => setToast(String(e)));
+  document.getElementById("btn-refresh-orders").onclick = () =>
+    refreshOrders().then(() => setToast("orders ok", true)).catch((e) => setToast(String(e)));
+
+  document.getElementById("btn-submit").onclick = async () => {
+    try {
+      const clid = "ui-" + Date.now() + "-" + Math.floor(Math.random() * 1e6);
+      const body = {
+        client_order_id: clid,
+        symbol: document.getElementById("symbol").value.trim().toUpperCase(),
+        side: document.getElementById("side").value,
+        qty: Number(document.getElementById("qty").value),
+        price: Number(document.getElementById("price").value),
+        order_type: "Limit",
+        tif: document.getElementById("tif").value,
+      };
+      const o = await api("/v1/orders", { method: "POST", body: JSON.stringify(body) });
+      setToast("order " + o.id + " → " + o.status, true);
+      await refreshAll();
+    } catch (e) {
+      setToast(String(e));
+    }
+  };
+
+  syncUi();
+})();
+</script>
+</body>
+</html>

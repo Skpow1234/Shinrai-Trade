@@ -19,6 +19,7 @@ mod outbox_publisher;
 mod persist;
 mod portfolio_http;
 mod rate_limit;
+mod ui_http;
 
 pub use app::{router, unix_logical_now, AppState, GatewayConfig};
 pub use outbox_publisher::{

@@ -912,6 +912,8 @@ pub fn unix_logical_now() -> u64 {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/ui", get(crate::ui_http::get_ui))
+        .route("/ui/", get(crate::ui_http::get_ui))
         .route("/v1/auth/token", post(crate::auth_http::post_token))
         .route("/v1/auth/revoke", post(crate::auth_http::post_revoke))
         .route(

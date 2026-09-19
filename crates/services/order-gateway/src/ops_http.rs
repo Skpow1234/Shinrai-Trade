@@ -281,7 +281,7 @@ pub async fn get_ops_dashboard(
     <thead><tr><th>order_id</th><th>status</th><th>age_secs</th><th>last_at</th></tr></thead>
     <tbody id="stuck"></tbody>
   </table>
-  <p class="sub" style="margin-top:1rem"><a href="/v1/metrics">/v1/metrics</a> · <a href="/v1/ops/stuck-orders">/v1/ops/stuck-orders</a> · <a href="/v1/ops/risk">/v1/ops/risk</a></p>
+  <p class="sub" style="margin-top:1rem"><a href="/ui">/ui</a> · <a href="/v1/metrics">/v1/metrics</a> · <a href="/v1/ops/stuck-orders">/v1/ops/stuck-orders</a> · <a href="/v1/ops/risk">/v1/ops/risk</a></p>
   <div id="err"></div>
 <script>
 async function refresh() {{

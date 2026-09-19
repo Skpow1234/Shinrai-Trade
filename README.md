@@ -218,11 +218,37 @@ SHINRAI_OG_ACCOUNTS=trader:1 \
 SHINRAI_OG_DEPOSITS=1:10000 \
 cargo run -p shinrai-order-gateway
 
+# Paper trader UI (browser)
+# open http://127.0.0.1:8081/ui
+# Sign in with static token `dev`, or configure SHINRAI_OG_CLIENTS and use client credentials.
+
 curl -s -X POST "http://127.0.0.1:8081/v1/orders?token=dev" \
   -H 'content-type: application/json' \
   -d '{"client_order_id":"o1","symbol":"AAPL","side":"Buy","qty":10,"price":10000}'
 # Optional order_type (Limit|Market, default Limit) and tif (GTC|IOC|FOK, default GTC):
 # -d '{"client_order_id":"o2","symbol":"AAPL","side":"Buy","qty":10,"price":10000,"order_type":"Limit","tif":"IOC"}'
+```
+
+#### Paper trader UI
+
+Same-origin HTML at **`http://127.0.0.1:8081/ui`** (no separate frontend build).
+
+1. Start OG with the env block above (`cargo run -p shinrai-order-gateway`).
+2. Open `/ui` in a browser.
+3. Sign in:
+   - **Static token** — paste `dev` (from `SHINRAI_OG_TOKENS=dev:trader`), or
+   - **Client credentials** — set `SHINRAI_OG_CLIENTS=dev:s3cret:trader` then use client_id `dev` / secret `s3cret` (calls `POST /v1/auth/token`).
+4. Place a limit order (qty in lots, price in scaled ticks — e.g. `10000` = $100.00), then refresh balances / orders / portfolio.
+
+The UI stores the access token in **`sessionStorage`** and sends `Authorization: Bearer …` (not `?token=`). Ops remains at `/v1/ops` (separate ops token when `SHINRAI_OG_OPS_TOKEN` is set).
+
+```bash
+# Optional: client credentials for the UI token form
+SHINRAI_OG_TOKENS=dev:trader \
+SHINRAI_OG_CLIENTS=dev:s3cret:trader \
+SHINRAI_OG_ACCOUNTS=trader:1 \
+SHINRAI_OG_DEPOSITS=1:10000 \
+cargo run -p shinrai-order-gateway
 ```
 
 Pre-trade risk runs before the OMS. Insufficient buying power returns **422** with `"code":"insufficient_buying_power"`. Duplicate `client_order_id` for the same account is idempotent (returns the existing order). Day P&L uses UTC-midnight anchors of average-cost realized plus mark-to-market unrealized; asset-class exposure is absolute notional of open positions in the same class (risk engine adds the new order’s notional).
@@ -328,7 +354,8 @@ curl -X POST http://127.0.0.1:8081/v1/ops/approvals \
 curl "http://127.0.0.1:8081/v1/ops/withdraw-audit"
 
 # Minimal HTML dashboard (polls /v1/metrics)
-open http://127.0.0.1:8081/v1/ops   # or browse to that URL
+open http://127.0.0.1:8081/ui      # paper trader
+open http://127.0.0.1:8081/v1/ops  # ops metrics (ops token when configured)
 ```
 
 Phase 4 is complete for the licensed-broker paper path: Alpaca paper REST (`SHINRAI_OG_VENUE=alpaca`) with async fill polling, durable OMS + drop-copy + session cursor, Postgres outbox with `SKIP LOCKED` claim, KYC/approvals/audit export, and Alpaca-sourced EOD position recon. Local FIX 4.2 subset (`SHINRAI_OG_VENUE=fix`) speaks SOH-delimited wire over an in-process acceptor (no vendor TCP yet).
