@@ -371,6 +371,7 @@ pub struct EodBody {
 }
 
 /// `POST /v1/ops/reconciliation/eod` — compare internal state to a broker EOD snapshot.
+#[allow(clippy::too_many_lines)]
 pub async fn post_eod_reconciliation(
     headers: HeaderMap,
     Query(query): Query<OpsAuthQuery>,
@@ -519,6 +520,7 @@ pub async fn post_eod_reconciliation(
     .into_response()
 }
 
+#[allow(clippy::result_large_err)]
 fn alpaca_statement_to_snapshot(
     state: &AppState,
     account_id: AccountId,
@@ -574,8 +576,10 @@ fn alpaca_statement_to_snapshot(
                 .client_order_id
                 .as_deref()
                 .and_then(|s| s.parse::<u64>().ok())
-                .map(shinrai_orders::OrderId::from_u64)
-                .unwrap_or_else(|| shinrai_orders::OrderId::from_u64(0));
+                .map_or_else(
+                    || shinrai_orders::OrderId::from_u64(0),
+                    shinrai_orders::OrderId::from_u64,
+                );
             snapshot.fills.push(shinrai_paper::BrokerEodFill {
                 order_id,
                 exec_id,
