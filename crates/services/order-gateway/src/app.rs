@@ -123,6 +123,10 @@ pub struct AppState {
     pub(crate) rate_limiter: Arc<crate::rate_limit::RateLimiter>,
     /// Optional ops bearer token (when set, `/v1/ops*` and `/v1/metrics` require it).
     pub(crate) ops_token: Option<String>,
+    /// When non-empty, ops/metrics only from these client IPs / CIDRs.
+    pub(crate) ops_allowlist: Vec<crate::ops_allowlist::AllowEntry>,
+    /// Shared MD HTTP client (optional mTLS).
+    pub(crate) md_client: Arc<crate::md_client::MdHttpClient>,
 }
 
 /// Process configuration (tokens / secrets are not displayed).
@@ -140,6 +144,10 @@ pub struct GatewayConfig {
     venue_kind: VenueKind,
     ops_token: Option<String>,
     risk_limits: RiskLimits,
+    /// Remote REST venue URL when `venue_kind == Rest` (local when unset).
+    rest_url: Option<String>,
+    rest_bearer: Option<String>,
+    ops_allowlist_raw: Option<String>,
 }
 
 impl GatewayConfig {
@@ -165,6 +173,9 @@ impl GatewayConfig {
             venue_kind: VenueKind::Sim,
             ops_token: None,
             risk_limits: RiskLimits::demo(),
+            rest_url: None,
+            rest_bearer: None,
+            ops_allowlist_raw: None,
         }
     }
 
@@ -195,6 +206,15 @@ impl GatewayConfig {
             .ok()
             .filter(|s| !s.is_empty());
         cfg.risk_limits = RiskLimits::demo_from_env();
+        cfg.rest_url = std::env::var("SHINRAI_OG_REST_URL")
+            .ok()
+            .filter(|s| !s.is_empty());
+        cfg.rest_bearer = std::env::var("SHINRAI_OG_REST_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
+        cfg.ops_allowlist_raw = std::env::var("SHINRAI_OG_OPS_ALLOWLIST")
+            .ok()
+            .filter(|s| !s.is_empty());
         cfg
     }
 }
@@ -217,6 +237,11 @@ impl core::fmt::Debug for GatewayConfig {
             .field(
                 "risk_max_daily_loss_minor",
                 &self.risk_limits.max_daily_loss_minor,
+            )
+            .field("rest_url_configured", &self.rest_url.is_some())
+            .field(
+                "ops_allowlist_configured",
+                &self.ops_allowlist_raw.is_some(),
             )
             .finish()
     }
@@ -249,7 +274,26 @@ impl AppState {
             VenueKind::Sandbox => {
                 PaperEngine::with_sandbox(master.clone(), SandboxConfig::happy_path(), risk.clone())
             }
-            VenueKind::Rest => PaperEngine::with_rest(master.clone(), risk),
+            VenueKind::Rest => {
+                if let Some(url) = config.rest_url.as_deref() {
+                    match PaperEngine::with_rest_remote(
+                        master.clone(),
+                        risk.clone(),
+                        url,
+                        config.rest_bearer.clone(),
+                    ) {
+                        Ok(e) => e,
+                        Err(err) => {
+                            eprintln!(
+                                "shinrai-order-gateway: remote REST venue failed ({err}); using local paper REST"
+                            );
+                            PaperEngine::with_rest(master.clone(), risk)
+                        }
+                    }
+                } else {
+                    PaperEngine::with_rest(master.clone(), risk)
+                }
+            }
         };
 
         for (account_raw, major) in &config.deposits {
@@ -263,7 +307,9 @@ impl AppState {
         for (symbol, scaled) in &config.bootstrap_marks {
             if let Ok(alias) = shinrai_instruments::ExternalId::ticker(symbol) {
                 if let Ok(id) = master.resolve_alias(&alias) {
-                    marks.set(id, shinrai_instruments::PriceTicks::from_scaled(*scaled));
+                    let px = shinrai_instruments::PriceTicks::from_scaled(*scaled);
+                    marks.set(id, px);
+                    engine.set_mark(id, px);
                 }
             }
         }
@@ -283,6 +329,10 @@ impl AppState {
             outbox_metrics: Arc::new(crate::outbox_publisher::OutboxMetrics::default()),
             rate_limiter: Arc::new(crate::rate_limit::RateLimiter::demo()),
             ops_token: config.ops_token.clone(),
+            ops_allowlist: crate::ops_allowlist::parse_allowlist(
+                config.ops_allowlist_raw.as_deref(),
+            ),
+            md_client: Arc::new(crate::md_client::MdHttpClient::from_env()),
         }
     }
 
@@ -706,13 +756,32 @@ pub(crate) fn extract_bearer(headers: &HeaderMap, query: &AuthQuery) -> Option<S
         .map(str::to_owned)
 }
 
-/// When `SHINRAI_OG_OPS_TOKEN` is set, ops/metrics require that bearer (or `?ops_token=`).
+/// When `SHINRAI_OG_OPS_TOKEN` / allowlist is set, ops/metrics require auth.
 #[allow(clippy::result_large_err)]
 pub(crate) fn require_ops_auth(
     state: &AppState,
     headers: &HeaderMap,
     ops_token_query: Option<&str>,
+    peer_ip: Option<std::net::IpAddr>,
 ) -> Result<(), Response> {
+    let xff = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok());
+    let client = crate::ops_allowlist::client_ip(xff, peer_ip);
+    if !crate::ops_allowlist::ip_allowed(
+        client.unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+        &state.ops_allowlist,
+    ) {
+        // Empty allowlist → open; non-empty without a resolvable client IP fails closed.
+        if !state.ops_allowlist.is_empty() {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(json!({ "type": "error", "code": "ops_ip_forbidden" })),
+            )
+                .into_response());
+        }
+    }
+
     let Some(expected) = state.ops_token.as_deref() else {
         return Ok(());
     };
@@ -864,7 +933,20 @@ pub(crate) fn record_fill_mark(state: &AppState, order: &shinrai_orders::Order) 
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .set(order.instrument_id(), price);
+        let mut engine = lock_engine(state);
+        engine.set_mark(order.instrument_id(), price);
     }
+}
+
+/// Pushes gateway portfolio marks into the paper engine (risk path).
+pub(crate) fn sync_marks_to_engine(state: &AppState) {
+    let snap = state
+        .marks
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .snapshot();
+    let mut engine = lock_engine(state);
+    engine.merge_marks(snap);
 }
 
 #[cfg(test)]

@@ -56,6 +56,77 @@ pub trait HttpTransport: Send {
     fn request(&mut self, req: &HttpRequest) -> Result<HttpResponse, ExecutionError>;
 }
 
+/// Cloneable transport backing [`RestPaperVenue`].
+#[derive(Debug, Clone)]
+enum RestTransport {
+    Local(LocalPaperHttp),
+    /// Remote paper/broker REST that speaks the same JSON wire protocol.
+    Remote(RemotePaperHttp),
+}
+
+impl HttpTransport for RestTransport {
+    fn request(&mut self, req: &HttpRequest) -> Result<HttpResponse, ExecutionError> {
+        match self {
+            Self::Local(t) => t.request(req),
+            Self::Remote(t) => t.request(req),
+        }
+    }
+}
+
+/// Blocking HTTP client for a remote paper REST venue (`SHINRAI_OG_REST_URL`).
+#[derive(Debug, Clone)]
+pub struct RemotePaperHttp {
+    base_url: String,
+    bearer: Option<String>,
+    client: reqwest::blocking::Client,
+}
+
+impl RemotePaperHttp {
+    /// Creates a remote transport. `base_url` is the service root (no trailing slash required).
+    ///
+    /// # Errors
+    ///
+    /// Returns disconnect when the HTTP client cannot be built.
+    pub fn new(base_url: impl Into<String>, bearer: Option<String>) -> Result<Self, ExecutionError> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| ExecutionError::Transport(e.to_string()))?;
+        Ok(Self {
+            base_url: base_url.into().trim_end_matches('/').to_owned(),
+            bearer,
+            client,
+        })
+    }
+}
+
+impl HttpTransport for RemotePaperHttp {
+    fn request(&mut self, req: &HttpRequest) -> Result<HttpResponse, ExecutionError> {
+        let url = format!("{}{}", self.base_url, req.path);
+        let mut builder = match req.method {
+            HttpMethod::Get => self.client.get(&url),
+            HttpMethod::Post => self.client.post(&url),
+            HttpMethod::Delete => self.client.delete(&url),
+        };
+        if let Some(tok) = &self.bearer {
+            builder = builder.bearer_auth(tok);
+        }
+        if !req.body.is_empty() {
+            builder = builder
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(req.body.clone());
+        }
+        let resp = builder
+            .send()
+            .map_err(|e| ExecutionError::Transport(e.to_string()))?;
+        let status = resp.status().as_u16();
+        let body = resp
+            .text()
+            .map_err(|e| ExecutionError::Transport(e.to_string()))?;
+        Ok(HttpResponse { status, body })
+    }
+}
+
 /// Wire JSON for submit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SubmitBody {
@@ -473,7 +544,7 @@ impl HttpTransport for LocalPaperHttp {
 /// REST-shaped execution venue (queues reports from HTTP responses for [`poll`](ExecutionVenue::poll)).
 #[derive(Debug, Clone)]
 pub struct RestPaperVenue {
-    transport: LocalPaperHttp,
+    transport: RestTransport,
     outbox: VecDeque<ExecutionReport>,
     /// Local mirror for `venue_order` snapshots (updated from successful responses).
     inflight: HashMap<OrderId, Inflight>,
@@ -484,7 +555,7 @@ impl RestPaperVenue {
     #[must_use]
     pub fn local_happy_path() -> Self {
         Self {
-            transport: LocalPaperHttp::happy_path(),
+            transport: RestTransport::Local(LocalPaperHttp::happy_path()),
             outbox: VecDeque::new(),
             inflight: HashMap::new(),
         }
@@ -494,10 +565,26 @@ impl RestPaperVenue {
     #[must_use]
     pub fn local_ack_only() -> Self {
         Self {
-            transport: LocalPaperHttp::ack_only(),
+            transport: RestTransport::Local(LocalPaperHttp::ack_only()),
             outbox: VecDeque::new(),
             inflight: HashMap::new(),
         }
+    }
+
+    /// Creates a venue over a remote paper/broker REST endpoint (same JSON wire as local).
+    ///
+    /// # Errors
+    ///
+    /// Returns transport errors when the HTTP client cannot be built.
+    pub fn remote(
+        base_url: impl Into<String>,
+        bearer: Option<String>,
+    ) -> Result<Self, ExecutionError> {
+        Ok(Self {
+            transport: RestTransport::Remote(RemotePaperHttp::new(base_url, bearer)?),
+            outbox: VecDeque::new(),
+            inflight: HashMap::new(),
+        })
     }
 
     /// Restores a working order without HTTP (startup hydrate).
@@ -532,12 +619,14 @@ impl RestPaperVenue {
             price,
             canceled: false,
         };
-        self.transport
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .inflight
-            .insert(order_id, row.clone());
+        if let RestTransport::Local(local) = &mut self.transport {
+            local
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .inflight
+                .insert(order_id, row.clone());
+        }
         self.inflight.insert(order_id, row);
         Ok(())
     }

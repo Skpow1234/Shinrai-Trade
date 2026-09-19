@@ -15,7 +15,8 @@ mod venue;
 pub use error::ExecutionError;
 pub use report::{stream_fingerprint, ExecType, ExecutionReport, SessionId};
 pub use rest::{
-    HttpMethod, HttpRequest, HttpResponse, HttpTransport, LocalPaperHttp, RestPaperVenue,
+    HttpMethod, HttpRequest, HttpResponse, HttpTransport, LocalPaperHttp, RemotePaperHttp,
+    RestPaperVenue,
 };
 pub use sandbox::{SandboxBroker, SandboxConfig};
 pub use session::VenueSessionState;
