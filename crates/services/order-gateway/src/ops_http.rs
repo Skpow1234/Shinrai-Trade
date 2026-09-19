@@ -608,7 +608,7 @@ pub async fn get_audit_export(
                 "at": r.at(),
                 "kind": format!("{:?}", r.kind()),
                 "account_id": r.account_id().map(AccountId::get),
-                "order_id": r.order_id().map(|o| o.get()),
+                "order_id": r.order_id().map(shinrai_orders::OrderId::get),
                 "correlation_id": r.correlation_id(),
                 "content_hash": r.content_hash(),
                 "previous_hash": r.prev_hash(),

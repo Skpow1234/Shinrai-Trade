@@ -295,6 +295,7 @@ impl core::fmt::Debug for GatewayConfig {
 impl AppState {
     /// Builds state from config.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn from_config(config: &GatewayConfig) -> Self {
         let auth = TokenAuth::new(config.ttl);
         for (token, subject) in &config.static_tokens {
