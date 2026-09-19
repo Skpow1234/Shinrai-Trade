@@ -20,6 +20,8 @@ pub enum ExecutionError {
     InvalidQuantity,
     /// Identifier construction failed.
     InvalidIdentifier,
+    /// HTTP / wire transport failure (remote REST venue).
+    Transport(String),
 }
 
 impl fmt::Display for ExecutionError {
@@ -30,6 +32,7 @@ impl fmt::Display for ExecutionError {
             Self::InvalidState(msg) => write!(f, "invalid venue order state: {msg}"),
             Self::InvalidQuantity => f.write_str("invalid quantity or price"),
             Self::InvalidIdentifier => f.write_str("invalid identifier"),
+            Self::Transport(msg) => write!(f, "venue transport: {msg}"),
         }
     }
 }

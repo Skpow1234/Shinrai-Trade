@@ -39,6 +39,13 @@ impl VenueHandle {
         Self::Rest(RestPaperVenue::local_happy_path())
     }
 
+    pub(crate) fn rest_remote(
+        base_url: impl Into<String>,
+        bearer: Option<String>,
+    ) -> Result<Self, ExecutionError> {
+        Ok(Self::Rest(RestPaperVenue::remote(base_url, bearer)?))
+    }
+
     pub(crate) const fn kind(&self) -> VenueKind {
         match self {
             Self::Sim(_) => VenueKind::Sim,

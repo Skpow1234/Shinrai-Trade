@@ -147,6 +147,35 @@ impl PaperEngine {
         }
     }
 
+    /// Creates a session backed by a remote REST paper/broker (`SHINRAI_OG_REST_URL`).
+    ///
+    /// # Errors
+    ///
+    /// Returns venue transport errors when the HTTP client cannot be built.
+    pub fn with_rest_remote(
+        master: InstrumentMaster,
+        risk: RiskEngine,
+        base_url: impl Into<String>,
+        bearer: Option<String>,
+    ) -> Result<Self, PaperError> {
+        Ok(Self {
+            master,
+            book: PaperBook::new(),
+            orders: OrderStore::new(),
+            venue: VenueHandle::rest_remote(base_url, bearer)?,
+            remaining_cash_reserve: HashMap::new(),
+            remaining_position_reserve: HashMap::new(),
+            risk,
+            audit: AuditLog::new(),
+            logical_now: 0,
+            marks: HashMap::new(),
+            risk_day_id: None,
+            realized_at_day_open: HashMap::new(),
+            applied_session: None,
+            next_expected_seq: 1,
+        })
+    }
+
     /// Which venue backs this engine.
     #[must_use]
     pub const fn venue_kind(&self) -> VenueKind {
@@ -185,6 +214,20 @@ impl PaperEngine {
     #[must_use]
     pub const fn marks(&self) -> &HashMap<InstrumentId, PriceTicks> {
         &self.marks
+    }
+
+    /// Sets a mark used for collars / MTM / asset-class exposure.
+    pub fn set_mark(&mut self, id: InstrumentId, price: PriceTicks) {
+        if price.scaled() > 0 {
+            self.marks.insert(id, price);
+        }
+    }
+
+    /// Merges marks (e.g. gateway bootstrap / live MD) into the engine.
+    pub fn merge_marks(&mut self, marks: impl IntoIterator<Item = (InstrumentId, PriceTicks)>) {
+        for (id, px) in marks {
+            self.set_mark(id, px);
+        }
     }
 
     /// Builds pre-trade risk context (day P&L + asset-class exposure).
