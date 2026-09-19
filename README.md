@@ -227,11 +227,15 @@ Pre-trade risk runs before the OMS. Insufficient buying power returns **422** wi
 | `SHINRAI_OG_MD_URL` | MD gateway base URL for `use_live_marks=1` on portfolio |
 | `SHINRAI_OG_MD_TOKEN` | Access token when calling the MD gateway |
 | `SHINRAI_OG_STUCK_AGE_SECS` | Pending OMS age before “stuck” (default `5`) |
-| `SHINRAI_OG_VENUE` | `sim` (default), `sandbox` (in-process broker), or `rest` / `http` (JSON REST paper venue) |
+| `SHINRAI_OG_VENUE` | `sim` (default), `sandbox`, `rest` / `http`, or `licensed` (logon/heartbeat session) |
 | `SHINRAI_OG_OPS_TOKEN` | When set, `/v1/ops*` and `/v1/metrics` require this bearer (or `?ops_token=`) |
 | `SHINRAI_OG_OPS_ALLOWLIST` | Comma-separated IPs/CIDRs (or `*`) for ops/metrics; empty = open |
 | `SHINRAI_OG_REST_URL` | When `SHINRAI_OG_VENUE=rest`, remote paper/broker base URL (local JSON venue if unset) |
 | `SHINRAI_OG_REST_TOKEN` | Optional bearer for remote REST venue |
+| `SHINRAI_OG_STORE_FAIL_HARD` | Fail-hard on Postgres write-through (default on; `0`/`false` = fail-soft) |
+| `SHINRAI_OG_KYC_STATUS` | `subject:approved|pending|rejected,...`; empty = all approved |
+| `SHINRAI_OG_RESTRICTED_SYMBOLS` | Comma-separated symbols restricted at bootstrap |
+| `SHINRAI_OG_ADMIN_OVERRIDE_TOKEN` | Bearer for `X-Admin-Override` on restricted instruments |
 | `SHINRAI_OG_MD_CLIENT_CERT` / `_KEY` / `_CA` | Optional mTLS PEM paths for OG → MD quote client |
 | `SHINRAI_RISK_COLLAR_BPS` | Price collar vs fill/mark (0 = off) |
 | `SHINRAI_RISK_MAX_DAILY_LOSS_MINOR` | Day loss limit in quote minor units (0 = off) |
@@ -280,6 +284,14 @@ curl http://127.0.0.1:8081/v1/ops/risk
 curl -X POST http://127.0.0.1:8081/v1/ops/risk \
   -H 'content-type: application/json' \
   -d '{"global_kill":true,"limits":{"collar_bps":100}}'
+
+# EOD broker snapshot recon + restricted-instrument approval (ops auth)
+curl -X POST http://127.0.0.1:8081/v1/ops/reconciliation/eod \
+  -H 'content-type: application/json' \
+  -d '{"cash":[{"account_id":1,"currency":"USD","minor_units":1000000}],"positions":[],"fills":[]}'
+curl -X POST http://127.0.0.1:8081/v1/ops/approvals \
+  -H 'content-type: application/json' \
+  -d '{"account_id":1,"symbol":"AAPL"}'
 
 # Minimal HTML dashboard (polls /v1/metrics)
 open http://127.0.0.1:8081/v1/ops   # or browse to that URL
