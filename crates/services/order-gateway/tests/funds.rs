@@ -7,6 +7,7 @@ use shinrai_order_gateway::{router, AppState};
 use tower::ServiceExt;
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn deposit_withdraw_and_balances() {
     let app = router(AppState::for_test("funds-tok", "trader", 1, 1_000));
 

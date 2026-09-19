@@ -147,6 +147,7 @@ pub struct AppState {
 
 /// Process configuration (tokens / secrets are not displayed).
 #[derive(Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct GatewayConfig {
     static_tokens: Vec<(String, String)>,
     clients: Vec<(String, String, String)>,

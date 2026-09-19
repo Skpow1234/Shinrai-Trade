@@ -108,7 +108,7 @@ pub async fn post_deposit(
         engine.set_logical_now(now);
         engine.set_correlation_id(Some(key.clone()));
         if let Err(err) = engine.deposit(account, amount, key.clone()) {
-            return funds_error(err);
+            return funds_error(&err);
         }
     }
     if let Err(err) = state.must_persist(None).await {
@@ -141,6 +141,7 @@ pub async fn post_deposit(
 }
 
 /// `POST /v1/accounts/withdraw` — paper cash withdrawal (available only, idempotent).
+#[allow(clippy::too_many_lines)]
 pub async fn post_withdraw(
     headers: HeaderMap,
     Query(auth): Query<AuthQuery>,
@@ -227,7 +228,7 @@ pub async fn post_withdraw(
         engine.set_logical_now(now);
         engine.set_correlation_id(Some(key.clone()));
         if let Err(err) = engine.withdraw(account, amount, key.clone()) {
-            return funds_error(err);
+            return funds_error(&err);
         }
     }
     if let Err(err) = state.must_persist(None).await {
@@ -259,6 +260,7 @@ pub async fn post_withdraw(
     .into_response()
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_amount(body: &FundsBody) -> Result<Money, Response> {
     if body.amount_minor <= 0 {
         return Err(bad_request("invalid_amount"));
@@ -284,8 +286,8 @@ fn parse_amount(body: &FundsBody) -> Result<Money, Response> {
     Ok(Money::from_minor(body.amount_minor, ccy))
 }
 
-fn funds_error(err: PaperError) -> Response {
-    let code = match &err {
+fn funds_error(err: &PaperError) -> Response {
+    let code = match err {
         PaperError::Ledger(shinrai_ledger::LedgerError::InsufficientFunds) => "insufficient_funds",
         PaperError::Ledger(shinrai_ledger::LedgerError::ZeroAmount) => "invalid_amount",
         _ => "funds_failed",
