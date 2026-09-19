@@ -1,20 +1,19 @@
-//! Background outbox publisher (log sink + inbox dedup).
+//! Background outbox publisher: claim → sink → mark published.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use shinrai_store::{
-    claim_unpublished, mark_published, try_claim_inbox, OutboxEvent, StoreError, StorePool,
-};
-
-const CONSUMER: &str = "order-gateway.log";
+use shinrai_messaging::{EventEnvelope, EventSink, LogSink, MessagingError};
+use shinrai_store::{claim_unpublished, mark_published, OutboxEvent, StoreError, StorePool};
+use thiserror::Error;
 
 /// Shared counters for ops metrics.
 #[derive(Debug, Default)]
 pub struct OutboxMetrics {
     published: AtomicU64,
     publish_errors: AtomicU64,
+    /// Retained for ops JSON compatibility (inbox no longer gates publisher).
     duplicates_skipped: AtomicU64,
 }
 
@@ -30,10 +29,26 @@ impl OutboxMetrics {
     }
 }
 
+/// Outbox poll / deliver failures.
+#[derive(Debug, Error)]
+pub enum OutboxPublishError {
+    /// Postgres claim / mark failure.
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    /// External bus (NATS) failure — row stays unpublished for retry.
+    #[error(transparent)]
+    Sink(#[from] MessagingError),
+}
+
 /// Runs until the process exits: poll unpublished outbox rows and deliver.
-pub async fn run_publisher(pool: StorePool, metrics: Arc<OutboxMetrics>, interval: Duration) {
+pub async fn run_publisher(
+    pool: StorePool,
+    metrics: Arc<OutboxMetrics>,
+    sink: Arc<dyn EventSink>,
+    interval: Duration,
+) {
     loop {
-        if let Err(err) = publish_once(&pool, &metrics).await {
+        if let Err(err) = publish_once(&pool, &metrics, sink.as_ref()).await {
             metrics.publish_errors.fetch_add(1, Ordering::Relaxed);
             eprintln!("shinrai-order-gateway: outbox publish error: {err}");
         }
@@ -41,16 +56,34 @@ pub async fn run_publisher(pool: StorePool, metrics: Arc<OutboxMetrics>, interva
     }
 }
 
-/// One poll cycle (also used by tests).
+/// One poll cycle (also used by tests). Uses [`LogSink`] when no sink is passed
+/// via [`publish_once_with`].
 ///
 /// # Errors
 ///
-/// Returns store errors.
-pub async fn publish_once(pool: &StorePool, metrics: &OutboxMetrics) -> Result<usize, StoreError> {
+/// Returns store or sink errors.
+pub async fn publish_once(
+    pool: &StorePool,
+    metrics: &OutboxMetrics,
+) -> Result<usize, OutboxPublishError> {
+    publish_once_with(pool, metrics, &LogSink).await
+}
+
+/// One poll cycle with an explicit sink.
+///
+/// # Errors
+///
+/// Returns store or sink errors. On sink failure the current event is not
+/// marked published so a later poll can retry (at-least-once).
+pub async fn publish_once_with(
+    pool: &StorePool,
+    metrics: &OutboxMetrics,
+    sink: &dyn EventSink,
+) -> Result<usize, OutboxPublishError> {
     let events = claim_unpublished(pool, 64).await?;
     let mut n = 0;
     for event in events {
-        deliver(pool, metrics, &event).await?;
+        deliver(pool, metrics, sink, &event).await?;
         n += 1;
     }
     Ok(n)
@@ -59,21 +92,16 @@ pub async fn publish_once(pool: &StorePool, metrics: &OutboxMetrics) -> Result<u
 async fn deliver(
     pool: &StorePool,
     metrics: &OutboxMetrics,
+    sink: &dyn EventSink,
     event: &OutboxEvent,
-) -> Result<(), StoreError> {
-    if !try_claim_inbox(pool, CONSUMER, event.id).await? {
-        metrics.duplicates_skipped.fetch_add(1, Ordering::Relaxed);
-        mark_published(pool, event.id).await?;
-        return Ok(());
-    }
-    // Log sink — stand-in until Kafka/NATS. Payload must not contain secrets.
-    tracing::info!(
-        target: "shinrai_outbox",
-        event_id = event.id,
-        topic = %event.topic,
-        payload = %event.payload,
-        "outbox.delivered"
-    );
+) -> Result<(), OutboxPublishError> {
+    let envelope = EventEnvelope {
+        event_id: event.id,
+        topic: event.topic.clone(),
+        payload: event.payload.clone(),
+    };
+    // Deliver before mark_published so a sink failure leaves the row for retry.
+    sink.publish(&envelope).await?;
     mark_published(pool, event.id).await?;
     metrics.published.fetch_add(1, Ordering::Relaxed);
     Ok(())

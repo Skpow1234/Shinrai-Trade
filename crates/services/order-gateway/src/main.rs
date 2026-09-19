@@ -2,12 +2,14 @@
 
 use std::env;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ConnectInfo;
 use axum::http::Request;
 use axum::middleware::{from_fn, Next};
 use axum::response::Response;
+use shinrai_messaging::{connect_nats, EventSink, LogSink};
 use shinrai_order_gateway::{router, AppState, GatewayConfig};
 use shinrai_store::{connect_from_env, migrate, StoreError};
 
@@ -41,12 +43,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     .ok()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(1_000);
+                let sink = build_event_sink().await?;
+                let kind = sink.kind();
                 tokio::spawn(shinrai_order_gateway::run_outbox_publisher(
                     pool,
                     metrics,
+                    sink,
                     Duration::from_millis(poll_ms),
                 ));
-                eprintln!("shinrai-order-gateway: outbox publisher started (poll {poll_ms}ms)");
+                eprintln!(
+                    "shinrai-order-gateway: outbox publisher started (poll {poll_ms}ms, sink={kind:?})"
+                );
             }
         }
         Err(StoreError::MissingDatabaseUrl) => {
@@ -64,6 +71,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     )
     .await?;
     Ok(())
+}
+
+async fn build_event_sink()
+-> Result<Arc<dyn EventSink>, Box<dyn std::error::Error + Send + Sync>> {
+    let url = env::var("SHINRAI_NATS_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    match url {
+        Some(url) => {
+            let prefix = env::var("SHINRAI_NATS_SUBJECT_PREFIX")
+                .unwrap_or_else(|_| "shinrai".into());
+            let sink = connect_nats(&url, prefix).await?;
+            Ok(Arc::new(sink) as Arc<dyn EventSink>)
+        }
+        None => Ok(Arc::new(LogSink) as Arc<dyn EventSink>),
+    }
 }
 
 /// Sets `X-Real-IP` from the TCP peer when not already present (ops allowlist).

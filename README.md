@@ -33,7 +33,7 @@ Shinrai-Trade/
 ├── crates/services/        # market-data-gateway, order-gateway (Axum binaries)
 ├── crates/infrastructure/  # shinrai-store (Postgres), shinrai-telemetry (tracing/OTLP)
 ├── crates/testing/         # exchange simulator
-├── compose.yaml            # optional Postgres for durable store
+├── compose.yaml            # optional Postgres + NATS for durable store / event bus
 ├── .env.example            # SHINRAI_DATABASE_URL and related placeholders
 └── .github/workflows/ci.yml
 ```
@@ -55,6 +55,7 @@ Shinrai-Trade/
 | `shinrai-order-gateway` | Orders, portfolio, audit, reconciliation, metrics |
 | `shinrai-execution` | Execution reports + `ExecutionVenue` trait; sandbox + REST paper venues |
 | `shinrai-store` | PostgreSQL: orders, ledger, audit, transactional outbox |
+| `shinrai-messaging` | Outbox sinks: log (default) + optional NATS publish |
 | `shinrai-telemetry` | Process tracing + optional OTLP export (`SHINRAI_OTEL_ENDPOINT`) |
 | `shinrai-exchange-simulator` | Scripted venue for paper tests (`ExecutionVenue`) |
 
@@ -252,6 +253,8 @@ Pre-trade risk runs before the OMS. Insufficient buying power returns **422** wi
 | `SHINRAI_LOG` | `tracing` filter (falls back to `RUST_LOG`, default `info`) |
 | `SHINRAI_OTEL_ENDPOINT` | OTLP/HTTP base URL (e.g. `http://127.0.0.1:4318`); also accepts `OTEL_EXPORTER_OTLP_ENDPOINT` |
 | `SHINRAI_OUTBOX_POLL_MS` | Outbox publisher poll interval when Postgres is enabled (default `1000`) |
+| `SHINRAI_NATS_URL` | Optional NATS URL for outbox delivery (e.g. `nats://127.0.0.1:4222`); unset keeps the log sink |
+| `SHINRAI_NATS_SUBJECT_PREFIX` | NATS subject prefix (default `shinrai` → `shinrai.ledger.posted`, `shinrai.order.upserted`) |
 
 Order-path spans (`order.submit`, `order.cancel`, `order.replace`) carry `account_id`, `client_order_id` / `order_id`, and `outcome`. HTTP requests get a `tower-http` trace layer. Without an OTLP endpoint, spans still appear on stderr via the fmt layer.
 

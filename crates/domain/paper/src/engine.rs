@@ -1539,6 +1539,44 @@ mod tests {
     }
 
     #[test]
+    fn hydrate_clears_stale_venue_consumer_cursor() {
+        // Regression: restoring a pre-restart applied cursor (as dual-write once did)
+        // filters new venue reports whose seq restarts at 1, leaving PendingCancel.
+        let (mut engine, acc) = funded_engine(FaultConfig {
+            fill_policy: FillPolicy::Rest,
+            ..FaultConfig::happy_path()
+        });
+        let outcome = engine
+            .submit(&aapl_order(acc, "cursor1", Side::Buy, 3, 10_000))
+            .expect("submit");
+        let order = match outcome {
+            SubmitOutcome::Created(o) | SubmitOutcome::Duplicate(o) => o,
+        };
+        let (sess_before, seq_before) = engine.applied_venue_cursor();
+        assert!(sess_before.is_some());
+        assert!(seq_before > 1, "ack should have advanced consumer cursor");
+
+        let ledger: Vec<_> = engine
+            .book()
+            .journal()
+            .entries()
+            .map(|(_, e)| e.clone())
+            .collect();
+        let orders: Vec<_> = engine.orders().orders().cloned().collect();
+        let audit = engine.audit().records().cloned().collect::<Vec<_>>();
+        let positions: Vec<_> = engine.book().positions_iter().collect();
+
+        engine
+            .hydrate(ledger, orders, audit, positions)
+            .expect("hydrate");
+        assert_eq!(engine.applied_venue_cursor(), (None, 1));
+        assert!(engine.venue_order(order.id()).is_some());
+
+        let canceled = engine.cancel(order.id()).expect("cancel");
+        assert_eq!(canceled.status(), OrderStatus::Canceled);
+    }
+
+    #[test]
     fn hydrate_reinflates_resting_sell_position_reserves() {
         let mut engine = PaperEngine::with_sandbox(
             phase1_master(),
