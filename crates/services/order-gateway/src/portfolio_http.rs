@@ -168,7 +168,9 @@ pub async fn get_metrics(
     Query(query): Query<OpsTokenQuery>,
     State(state): State<AppState>,
 ) -> Response {
-    if let Err(resp) = crate::app::require_ops_auth(&state, &headers, query.ops_token.as_deref()) {
+    if let Err(resp) =
+        crate::app::require_ops_auth(&state, &headers, query.ops_token.as_deref(), None)
+    {
         return resp;
     }
     let now = crate::app::unix_logical_now();
@@ -320,14 +322,9 @@ async fn resolve_marks(
         };
         let token = state.md_token.as_deref();
         for symbol in position_symbols {
-            if let Some(px) = crate::md_client::fetch_quote(
-                state.md_client.as_ref(),
-                base,
-                token,
-                &state.master,
-                symbol,
-            )
-            .await
+            if let Some(px) =
+                crate::md_client::fetch_quote(&state.md_client, base, token, &state.master, symbol)
+                    .await
             {
                 if let Some(id) = crate::md_client::instrument_for_symbol(&state.master, symbol) {
                     marks.insert(id, px);

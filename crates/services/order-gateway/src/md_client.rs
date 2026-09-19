@@ -1,7 +1,6 @@
 //! Shared MD gateway HTTP client (optional mTLS).
 
 use std::fs;
-use std::sync::Arc;
 use std::time::Duration;
 
 use shinrai_instruments::{ExternalId, InstrumentId, InstrumentMaster, PriceTicks};
@@ -42,7 +41,8 @@ impl MdHttpClient {
         }
         let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(5));
         if let (Some(cert_path), Some(key_path)) = (client_pem, key_pem) {
-            let mut identity_pem = fs::read(cert_path).map_err(|e| format!("md client cert: {e}"))?;
+            let mut identity_pem =
+                fs::read(cert_path).map_err(|e| format!("md client cert: {e}"))?;
             let mut key = fs::read(key_path).map_err(|e| format!("md client key: {e}"))?;
             identity_pem.push(b'\n');
             identity_pem.append(&mut key);
@@ -56,10 +56,13 @@ impl MdHttpClient {
         }
         if let Some(ca_path) = ca_pem {
             let ca = fs::read(ca_path).map_err(|e| format!("md ca: {e}"))?;
-            let cert = reqwest::Certificate::from_pem(&ca).map_err(|e| format!("md ca pem: {e}"))?;
+            let cert =
+                reqwest::Certificate::from_pem(&ca).map_err(|e| format!("md ca pem: {e}"))?;
             builder = builder.add_root_certificate(cert);
         }
-        let inner = builder.build().map_err(|e| format!("md client build: {e}"))?;
+        let inner = builder
+            .build()
+            .map_err(|e| format!("md client build: {e}"))?;
         Ok(Self { inner })
     }
 
@@ -82,7 +85,9 @@ impl MdHttpClient {
         ) {
             Ok(c) => c,
             Err(err) => {
-                eprintln!("shinrai-order-gateway: MD mTLS client config failed ({err}); using plain TLS");
+                eprintln!(
+                    "shinrai-order-gateway: MD mTLS client config failed ({err}); using plain TLS"
+                );
                 Self::plain()
             }
         }
@@ -93,7 +98,7 @@ impl MdHttpClient {
 ///
 /// Returns `None` when the symbol is unknown or the quote is missing.
 pub async fn fetch_quote(
-    client: Option<&Arc<MdHttpClient>>,
+    client: &MdHttpClient,
     base_url: &str,
     token: Option<&str>,
     master: &InstrumentMaster,
@@ -106,8 +111,7 @@ pub async fn fetch_quote(
         base_url.trim_end_matches('/'),
         symbol
     );
-    let http = client.map(|c| c.inner.clone()).unwrap_or_else(reqwest::Client::new);
-    let mut req = http.get(&url);
+    let mut req = client.inner.get(&url);
     if let Some(t) = token.filter(|s| !s.is_empty()) {
         req = req.query(&[("token", t)]);
     }

@@ -87,7 +87,10 @@ impl RemotePaperHttp {
     /// # Errors
     ///
     /// Returns disconnect when the HTTP client cannot be built.
-    pub fn new(base_url: impl Into<String>, bearer: Option<String>) -> Result<Self, ExecutionError> {
+    pub fn new(
+        base_url: impl Into<String>,
+        bearer: Option<String>,
+    ) -> Result<Self, ExecutionError> {
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()

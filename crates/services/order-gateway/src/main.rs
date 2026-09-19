@@ -1,8 +1,13 @@
 //! Order gateway process.
 
 use std::env;
+use std::net::SocketAddr;
 use std::time::Duration;
 
+use axum::extract::ConnectInfo;
+use axum::http::Request;
+use axum::middleware::{from_fn, Next};
+use axum::response::Response;
 use shinrai_order_gateway::{router, AppState, GatewayConfig};
 use shinrai_store::{connect_from_env, migrate, StoreError};
 
@@ -50,10 +55,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Err(err) => return Err(err.into()),
     }
 
+    let app = router(state).layer(from_fn(inject_real_ip));
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     eprintln!("shinrai-order-gateway listening on {bind}");
-    axum::serve(listener, router(state)).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
+}
+
+/// Sets `X-Real-IP` from the TCP peer when not already present (ops allowlist).
+async fn inject_real_ip(mut req: Request<axum::body::Body>, next: Next) -> Response {
+    if req.headers().get("x-real-ip").is_none() {
+        if let Some(ConnectInfo(addr)) = req.extensions().get::<ConnectInfo<SocketAddr>>() {
+            if let Ok(value) = addr.ip().to_string().parse() {
+                req.headers_mut().insert("x-real-ip", value);
+            }
+        }
+    }
+    next.run(req).await
 }
 
 fn env_truthy(key: &str) -> bool {

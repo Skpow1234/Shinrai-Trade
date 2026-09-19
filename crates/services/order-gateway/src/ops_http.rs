@@ -1,6 +1,6 @@
 //! Ops HTTP: stuck orders, risk control plane, and simple HTML dashboard.
 
-use axum::extract::{ConnectInfo, Query, State};
+use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::Json;
@@ -9,14 +9,9 @@ use serde_json::{json, Value};
 use shinrai_instruments::ExternalId;
 use shinrai_ledger::AccountId;
 use shinrai_risk::RiskLimits;
-use std::net::SocketAddr;
 
 use crate::app::{lock_engine, require_ops_auth, unix_logical_now, AppState};
 use crate::ops::{find_stuck_orders, DEFAULT_STUCK_AGE_SECS};
-
-fn peer_ip(conn: Option<&ConnectInfo<SocketAddr>>) -> Option<std::net::IpAddr> {
-    conn.map(|c| c.0.ip())
-}
 
 #[derive(Debug, Deserialize)]
 pub struct StuckQuery {
@@ -34,17 +29,11 @@ pub struct OpsAuthQuery {
 
 /// `GET /v1/ops/stuck-orders` — pending OMS rows older than threshold.
 pub async fn get_stuck_orders(
-    conn: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
     Query(query): Query<StuckQuery>,
     State(state): State<AppState>,
 ) -> Response {
-    if let Err(resp) = require_ops_auth(
-        &state,
-        &headers,
-        query.ops_token.as_deref(),
-        peer_ip(conn.as_ref()),
-    ) {
+    if let Err(resp) = require_ops_auth(&state, &headers, query.ops_token.as_deref(), None) {
         return resp;
     }
     let now = unix_logical_now();
@@ -71,7 +60,7 @@ pub async fn get_risk(
     Query(query): Query<OpsAuthQuery>,
     State(state): State<AppState>,
 ) -> Response {
-    if let Err(resp) = require_ops_auth(&state, &headers, query.ops_token.as_deref()) {
+    if let Err(resp) = require_ops_auth(&state, &headers, query.ops_token.as_deref(), None) {
         return resp;
     }
     let engine = lock_engine(&state);
@@ -124,7 +113,7 @@ pub async fn post_risk(
     State(state): State<AppState>,
     Json(body): Json<RiskPatchBody>,
 ) -> Response {
-    if let Err(resp) = require_ops_auth(&state, &headers, query.ops_token.as_deref()) {
+    if let Err(resp) = require_ops_auth(&state, &headers, query.ops_token.as_deref(), None) {
         return resp;
     }
     let mut engine = lock_engine(&state);
@@ -238,7 +227,7 @@ pub async fn get_ops_dashboard(
     Query(query): Query<OpsAuthQuery>,
     State(state): State<AppState>,
 ) -> Response {
-    if let Err(resp) = require_ops_auth(&state, &headers, query.ops_token.as_deref()) {
+    if let Err(resp) = require_ops_auth(&state, &headers, query.ops_token.as_deref(), None) {
         return resp;
     }
     let html = format!(

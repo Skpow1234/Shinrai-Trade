@@ -76,7 +76,7 @@ pub fn ip_allowed(ip: IpAddr, allowlist: &[AllowEntry]) -> bool {
     })
 }
 
-/// Client IP from `X-Forwarded-For` (leftmost) or peer address.
+/// Client IP from `X-Forwarded-For` (leftmost), else `X-Real-IP`, else peer.
 #[must_use]
 pub fn client_ip(forwarded_for: Option<&str>, peer: Option<IpAddr>) -> Option<IpAddr> {
     if let Some(xff) = forwarded_for {
@@ -89,6 +89,19 @@ pub fn client_ip(forwarded_for: Option<&str>, peer: Option<IpAddr>) -> Option<Ip
     peer
 }
 
+/// Resolves client IP from ops request headers (`X-Forwarded-For` or `X-Real-IP`).
+#[must_use]
+pub fn client_ip_from_headers(headers: &axum::http::HeaderMap) -> Option<IpAddr> {
+    let xff = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
+    if let Some(ip) = client_ip(xff, None) {
+        return Some(ip);
+    }
+    headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse().ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,6 +111,9 @@ mod tests {
         let list = parse_allowlist(Some("127.0.0.1,10.0.0.0/8"));
         assert!(ip_allowed(IpAddr::V4(Ipv4Addr::LOCALHOST), &list));
         assert!(ip_allowed(IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3)), &list));
-        assert!(!ip_allowed(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), &list));
+        assert!(!ip_allowed(
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+            &list
+        ));
     }
 }

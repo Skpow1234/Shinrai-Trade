@@ -239,11 +239,12 @@ impl core::fmt::Debug for GatewayConfig {
                 &self.risk_limits.max_daily_loss_minor,
             )
             .field("rest_url_configured", &self.rest_url.is_some())
+            .field("rest_bearer_configured", &self.rest_bearer.is_some())
             .field(
                 "ops_allowlist_configured",
                 &self.ops_allowlist_raw.is_some(),
             )
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -765,10 +766,7 @@ pub(crate) fn require_ops_auth(
     peer_ip: Option<std::net::IpAddr>,
 ) -> Result<(), Response> {
     if !state.ops_allowlist.is_empty() {
-        let xff = headers
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok());
-        let Some(client) = crate::ops_allowlist::client_ip(xff, peer_ip) else {
+        let Some(client) = crate::ops_allowlist::client_ip_from_headers(headers).or(peer_ip) else {
             return Err((
                 StatusCode::FORBIDDEN,
                 Json(json!({ "type": "error", "code": "ops_ip_forbidden" })),
