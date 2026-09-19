@@ -48,7 +48,7 @@ pub async fn run_publisher(
     interval: Duration,
 ) {
     loop {
-        if let Err(err) = publish_once(&pool, &metrics, sink.as_ref()).await {
+        if let Err(err) = publish_once_with(&pool, &metrics, sink.as_ref()).await {
             metrics.publish_errors.fetch_add(1, Ordering::Relaxed);
             eprintln!("shinrai-order-gateway: outbox publish error: {err}");
         }
