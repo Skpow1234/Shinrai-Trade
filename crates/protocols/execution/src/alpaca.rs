@@ -245,18 +245,13 @@ impl AlpacaPaperVenue {
         let mut parts = s.splitn(2, '.');
         let whole: i64 = parts.next()?.parse().ok()?;
         let frac_str = parts.next().unwrap_or("0");
-        let frac_digits = frac_str.chars().take(2).collect::<String>();
-        let frac: i64 = if frac_digits.is_empty() {
-            0
-        } else {
-            format!("{frac_digits:0<2}").parse().ok()?
-        };
+        let mut frac_digits: String = frac_str.chars().take(2).collect();
+        while frac_digits.len() < 2 {
+            frac_digits.push('0');
+        }
+        let frac: i64 = frac_digits.parse().ok()?;
         let scaled = whole.saturating_mul(100).saturating_add(frac);
-        let scaled = if neg {
-            scaled.saturating_neg()
-        } else {
-            scaled
-        };
+        let scaled = if neg { scaled.saturating_neg() } else { scaled };
         if scaled <= 0 {
             return None;
         }
@@ -280,13 +275,12 @@ impl AlpacaPaperVenue {
             })
             .collect();
         for (order_id, venue_id, order_qty, reported_cum, fallback_px) in open {
-            let resp = match self.transport.request(&HttpRequest {
+            let Ok(resp) = self.transport.request(&HttpRequest {
                 method: HttpMethod::Get,
                 path: format!("/v2/orders/{venue_id}"),
                 body: String::new(),
-            }) {
-                Ok(r) => r,
-                Err(_) => continue,
+            }) else {
+                continue;
             };
             if resp.status >= 400 {
                 continue;
@@ -690,6 +684,7 @@ impl LocalAlpacaHttp {
 }
 
 impl HttpTransport for LocalAlpacaHttp {
+    #[allow(clippy::too_many_lines)]
     fn request(&mut self, req: &HttpRequest) -> Result<HttpResponse, ExecutionError> {
         match (req.method, req.path.as_str()) {
             (HttpMethod::Post, "/v2/orders") => {

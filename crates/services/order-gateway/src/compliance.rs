@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use shinrai_instruments::InstrumentId;
 use shinrai_ledger::AccountId;
@@ -114,13 +115,25 @@ impl KycProvider for KycRegistry {
     }
 }
 
-/// HTTP KYC vendor stub: `GET {base}/{subject}` expecting `{"status":"approved"}`.
+#[derive(Debug, Clone)]
+struct CacheEntry {
+    status: KycStatus,
+    expires_at: Instant,
+}
+
+/// HTTP KYC vendor: `GET {base}/{subject}` expecting `{"status":"approved"}`.
 ///
-/// When unreachable or misconfigured, fails closed to [`KycStatus::Pending`].
+/// Hardening: bearer token, short timeout, positive TTL cache, fail-closed on
+/// transport / parse errors (uses env-map fallback only when the client cannot
+/// be built).
 #[derive(Debug, Clone)]
 pub struct HttpKycVendor {
     base_url: String,
+    bearer: Option<String>,
+    timeout: Duration,
+    cache_ttl: Duration,
     fallback: KycRegistry,
+    cache: Arc<Mutex<HashMap<String, CacheEntry>>>,
 }
 
 impl HttpKycVendor {
@@ -130,23 +143,86 @@ impl HttpKycVendor {
         let base_url = std::env::var("SHINRAI_OG_KYC_VENDOR_URL")
             .ok()
             .filter(|s| !s.is_empty())?;
+        let bearer = std::env::var("SHINRAI_OG_KYC_VENDOR_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let timeout_ms = std::env::var("SHINRAI_OG_KYC_VENDOR_TIMEOUT_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2_000_u64);
+        let cache_ttl_secs = std::env::var("SHINRAI_OG_KYC_VENDOR_CACHE_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(60_u64);
         Some(Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
+            bearer,
+            timeout: Duration::from_millis(timeout_ms.max(100)),
+            cache_ttl: Duration::from_secs(cache_ttl_secs),
             fallback,
+            cache: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    fn cached(&self, subject: &str) -> Option<KycStatus> {
+        let now = Instant::now();
+        let guard = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.get(subject).and_then(|e| {
+            if e.expires_at > now {
+                Some(e.status)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn put_cache(&self, subject: &str, status: KycStatus) {
+        if self.cache_ttl.is_zero() {
+            return;
+        }
+        let mut guard = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.insert(
+            subject.to_owned(),
+            CacheEntry {
+                status,
+                expires_at: Instant::now() + self.cache_ttl,
+            },
+        );
     }
 }
 
 impl KycProvider for HttpKycVendor {
     fn status(&self, subject: &str) -> KycStatus {
-        let url = format!("{}/{}", self.base_url, subject);
+        if let Some(st) = self.cached(subject) {
+            return st;
+        }
+        let encoded: String = subject
+            .bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    (b as char).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect();
+        let url = format!("{}/{}", self.base_url, encoded);
         let Ok(client) = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(2))
+            .timeout(self.timeout)
             .build()
         else {
             return self.fallback.status(subject);
         };
-        let Ok(resp) = client.get(&url).send() else {
+        let mut req = client.get(&url);
+        if let Some(token) = &self.bearer {
+            req = req.bearer_auth(token);
+        }
+        let Ok(resp) = req.send() else {
             return KycStatus::Pending;
         };
         if !resp.status().is_success() {
@@ -155,10 +231,13 @@ impl KycProvider for HttpKycVendor {
         let Ok(body) = resp.json::<serde_json::Value>() else {
             return KycStatus::Pending;
         };
-        body.get("status")
+        let status = body
+            .get("status")
             .and_then(|v| v.as_str())
             .and_then(KycStatus::parse)
-            .unwrap_or(KycStatus::Pending)
+            .unwrap_or(KycStatus::Pending);
+        self.put_cache(subject, status);
+        status
     }
 }
 

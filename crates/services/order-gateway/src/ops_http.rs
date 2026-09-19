@@ -590,6 +590,11 @@ pub async fn get_approvals(
 }
 
 /// `GET /v1/ops/audit/export` — JSON audit export for compliance.
+///
+/// Retention: when `SHINRAI_OG_AUDIT_EXPORT_RETENTION_SECS` is set, only records
+/// with `at >= now - retention` are included. Signing: when
+/// `SHINRAI_OG_AUDIT_EXPORT_HMAC_KEY` is set, response includes
+/// `export_hmac_sha256` over the canonical audit+drop-copy JSON body.
 pub async fn get_audit_export(
     headers: HeaderMap,
     Query(query): Query<OpsAuthQuery>,
@@ -598,10 +603,17 @@ pub async fn get_audit_export(
     if let Err(resp) = require_ops_auth(&state, &headers, query.ops_token.as_deref(), None) {
         return resp;
     }
+    let retention_secs = std::env::var("SHINRAI_OG_AUDIT_EXPORT_RETENTION_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok());
+    let now = unix_logical_now();
+    let min_at = retention_secs.map(|r| now.saturating_sub(r));
+
     let engine = lock_engine(&state);
     let records: Vec<_> = engine
         .audit()
         .records()
+        .filter(|r| min_at.is_none_or(|min| r.at() >= min))
         .map(|r| {
             json!({
                 "seq": r.seq(),
@@ -629,10 +641,41 @@ pub async fn get_audit_export(
             })
         })
         .collect();
-    Json(json!({
-        "chain_ok": engine.audit_chain_ok(),
+    let chain_ok = engine.audit_chain_ok();
+    drop(engine);
+
+    let payload = json!({
+        "chain_ok": chain_ok,
+        "retention_secs": retention_secs,
+        "exported_at": now,
         "audit": records,
         "durable_drop_copy": durable,
-    }))
-    .into_response()
+    });
+    let hmac = sign_audit_export(&payload);
+    let mut body = payload.as_object().cloned().unwrap_or_default();
+    if let Some(sig) = hmac {
+        body.insert("export_hmac_sha256".into(), json!(sig));
+    }
+    Json(Value::Object(body)).into_response()
+}
+
+fn sign_audit_export(payload: &Value) -> Option<String> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let key = std::env::var("SHINRAI_OG_AUDIT_EXPORT_HMAC_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    // Sign the canonical subset (audit + drop-copy + chain_ok) so added metadata
+    // fields do not invalidate historical signatures if we extend the envelope.
+    let signed = json!({
+        "chain_ok": payload.get("chain_ok"),
+        "audit": payload.get("audit"),
+        "durable_drop_copy": payload.get("durable_drop_copy"),
+    });
+    let bytes = serde_json::to_vec(&signed).ok()?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes()).ok()?;
+    mac.update(&bytes);
+    let result = mac.finalize().into_bytes();
+    Some(result.iter().map(|b| format!("{b:02x}")).collect())
 }

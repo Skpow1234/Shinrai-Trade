@@ -442,10 +442,7 @@ impl PaperEngine {
     }
 
     /// Restores durable Trade drop-copy after hydrate (Postgres).
-    pub fn restore_durable_trades(
-        &mut self,
-        trades: Vec<shinrai_execution::VenueTradeSnapshot>,
-    ) {
+    pub fn restore_durable_trades(&mut self, trades: Vec<shinrai_execution::VenueTradeSnapshot>) {
         self.durable_trades = trades;
     }
 

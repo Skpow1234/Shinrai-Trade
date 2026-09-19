@@ -178,6 +178,64 @@ async fn audit_append_and_page() {
 }
 
 #[tokio::test]
+async fn drop_copy_and_venue_cursor_round_trip() {
+    let Some(pool) = pool_or_skip().await else {
+        return;
+    };
+
+    let oid = OrderId::from_u64(910_000 + uuid_like() % 100_000);
+    let order = Order::new_pending(
+        oid,
+        AccountId::from_u64(42),
+        ClientOrderId::new(format!("dc-{}", uuid_like())).expect("clid"),
+        InstrumentId::from_u64(1),
+        Side::Buy,
+        QuantityLots::from_lots(5),
+        PriceTicks::from_scaled(10_000),
+    )
+    .expect("order");
+    let mut snap = OrderSnapshot::from_order(&order);
+    snap.status = StoredStatus::from(OrderStatus::Filled);
+    snap.cum_qty = QuantityLots::from_lots(5);
+    snap.leaves_qty = QuantityLots::from_lots(0);
+
+    let batch = shinrai_store::TradingBatch {
+        order: Some(snap),
+        ledger: Vec::new(),
+        audit: Vec::new(),
+        positions: Vec::new(),
+        drop_copy: vec![shinrai_store::DropCopyFillSnapshot {
+            order_id: oid,
+            exec_id: format!("E-{}", uuid_like()),
+            qty: 5,
+            price: 10_000,
+            session_n: 3,
+            seq: 7,
+        }],
+        venue_cursor: Some(shinrai_store::VenueSessionCursorSnapshot {
+            applied_session_n: Some(3),
+            next_expected_seq: 8,
+        }),
+    };
+    shinrai_store::persist_trading_batch(&pool, &batch)
+        .await
+        .expect("batch");
+
+    let fills = shinrai_store::list_drop_copy_fills(&pool)
+        .await
+        .expect("fills");
+    assert!(
+        fills.iter().any(|f| f.order_id == oid && f.seq == 7),
+        "expected durable fill for {oid:?}"
+    );
+    let cursor = shinrai_store::load_venue_session_cursor(&pool)
+        .await
+        .expect("cursor");
+    assert_eq!(cursor.applied_session_n, Some(3));
+    assert_eq!(cursor.next_expected_seq, 8);
+}
+
+#[tokio::test]
 async fn missing_url_is_explicit_error() {
     // Ensure the error type exists for callers even when URL is unset in subprocesses.
     // This test does not clear the parent env; it only documents the API.

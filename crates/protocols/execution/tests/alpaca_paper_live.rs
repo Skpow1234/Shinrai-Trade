@@ -67,12 +67,14 @@ fn alpaca_paper_async_fill_poll() {
     let mut symbols = HashMap::new();
     symbols.insert(InstrumentId::from_u64(1), "AAPL".into());
     let mut venue = AlpacaPaperVenue::remote(config, symbols).expect("client");
-    let order_id = OrderId::from_u64(
+    let order_id = OrderId::from_u64(u64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("time")
-            .as_millis() as u64,
-    );
+            .as_millis()
+            % u128::from(u64::MAX),
+    )
+    .unwrap_or(1));
     // Limit well above a typical AAPL print so paper fills quickly.
     venue
         .submit(&NewVenueOrder {

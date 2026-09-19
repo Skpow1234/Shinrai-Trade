@@ -259,13 +259,9 @@ impl VenueHandle {
             Self::Licensed(s) => {
                 s.restore_working(order.id(), order.order_qty(), order.price(), cum, venue_id)
             }
-            Self::Alpaca(s) => s.restore_working(
-                order.id(),
-                order.order_qty(),
-                order.price(),
-                cum,
-                venue_id,
-            ),
+            Self::Alpaca(s) => {
+                s.restore_working(order.id(), order.order_qty(), order.price(), cum, venue_id)
+            }
         }
     }
 }
