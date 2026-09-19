@@ -355,6 +355,7 @@ pub async fn post_cancel(
         let correlation = correlation_from_headers(&headers);
         tracing::Span::current().record("correlation_id", correlation.as_str());
         let order_id = OrderId::from_u64(id);
+        let snap = state.snapshot_engine();
         let canceled = {
             let mut engine = lock_engine(&state);
             engine.set_correlation_id(Some(correlation.clone()));
@@ -392,6 +393,7 @@ pub async fn post_cancel(
         state.metrics.record_canceled();
         let persist_span = info_span!("persist.order");
         if let Err(err) = state.must_persist(Some(&canceled)).instrument(persist_span).await {
+            state.rollback_engine(snap);
             tracing::Span::current().record("outcome", "persist_failed");
             return with_correlation(persist_failed(&err), &correlation);
         }
