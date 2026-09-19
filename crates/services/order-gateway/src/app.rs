@@ -12,7 +12,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use shinrai_exchange_simulator::FaultConfig;
-use shinrai_execution::SandboxConfig;
+use shinrai_execution::{LicensedSandboxConfig, SandboxConfig};
 use shinrai_instruments::{phase1_master, InstrumentMaster};
 use shinrai_ledger::AccountId;
 use shinrai_md_fanout::{FanoutError, SubjectId, TokenAuth, TokenTtl};
@@ -127,6 +127,14 @@ pub struct AppState {
     pub(crate) ops_allowlist: Vec<crate::ops_allowlist::AllowEntry>,
     /// Shared MD HTTP client (optional mTLS).
     pub(crate) md_client: Arc<crate::md_client::MdHttpClient>,
+    /// KYC registry (empty = all approved).
+    pub(crate) kyc: Arc<crate::compliance::KycRegistry>,
+    /// Optional admin override bearer for restricted instruments.
+    pub(crate) admin_override_token: Option<String>,
+    /// When false with a store attached, persist errors are logged but not returned.
+    pub(crate) store_fail_hard: bool,
+    /// Last injected broker EOD snapshot (ops).
+    pub(crate) eod_snapshot: Arc<Mutex<Option<shinrai_paper::BrokerEodSnapshot>>>,
 }
 
 /// Process configuration (tokens / secrets are not displayed).
@@ -148,6 +156,12 @@ pub struct GatewayConfig {
     rest_url: Option<String>,
     rest_bearer: Option<String>,
     ops_allowlist_raw: Option<String>,
+    /// Comma-separated restricted symbols at bootstrap.
+    restricted_symbols: Vec<String>,
+    kyc_raw: Option<String>,
+    admin_override_token: Option<String>,
+    /// Fail-hard on store write (default true).
+    store_fail_hard: bool,
 }
 
 impl GatewayConfig {
@@ -176,6 +190,10 @@ impl GatewayConfig {
             rest_url: None,
             rest_bearer: None,
             ops_allowlist_raw: None,
+            restricted_symbols: Vec::new(),
+            kyc_raw: None,
+            admin_override_token: None,
+            store_fail_hard: true,
         }
     }
 
@@ -215,6 +233,23 @@ impl GatewayConfig {
         cfg.ops_allowlist_raw = std::env::var("SHINRAI_OG_OPS_ALLOWLIST")
             .ok()
             .filter(|s| !s.is_empty());
+        cfg.restricted_symbols = parse_csv_list(
+            std::env::var("SHINRAI_OG_RESTRICTED_SYMBOLS")
+                .ok()
+                .as_deref(),
+        );
+        cfg.kyc_raw = std::env::var("SHINRAI_OG_KYC_STATUS")
+            .ok()
+            .filter(|s| !s.is_empty());
+        cfg.admin_override_token = std::env::var("SHINRAI_OG_ADMIN_OVERRIDE_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
+        if let Ok(v) = std::env::var("SHINRAI_OG_STORE_FAIL_HARD") {
+            cfg.store_fail_hard = !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            );
+        }
         cfg
     }
 }
@@ -244,6 +279,13 @@ impl core::fmt::Debug for GatewayConfig {
                 "ops_allowlist_configured",
                 &self.ops_allowlist_raw.is_some(),
             )
+            .field("restricted_symbol_entries", &self.restricted_symbols.len())
+            .field("kyc_configured", &self.kyc_raw.is_some())
+            .field(
+                "admin_override_configured",
+                &self.admin_override_token.is_some(),
+            )
+            .field("store_fail_hard", &self.store_fail_hard)
             .finish_non_exhaustive()
     }
 }
@@ -267,7 +309,14 @@ impl AppState {
             .collect();
 
         let master = phase1_master();
-        let risk = RiskEngine::new(config.risk_limits);
+        let mut risk = RiskEngine::new(config.risk_limits);
+        for sym in &config.restricted_symbols {
+            if let Ok(alias) = shinrai_instruments::ExternalId::ticker(sym) {
+                if let Ok(id) = master.resolve_alias(&alias) {
+                    risk.restrict_instrument(id);
+                }
+            }
+        }
         let mut engine = match config.venue_kind {
             VenueKind::Sim => {
                 PaperEngine::with_risk(master.clone(), FaultConfig::happy_path(), risk.clone())
@@ -288,13 +337,18 @@ impl AppState {
                             eprintln!(
                                 "shinrai-order-gateway: remote REST venue failed ({err}); using local paper REST"
                             );
-                            PaperEngine::with_rest(master.clone(), risk)
+                            PaperEngine::with_rest(master.clone(), risk.clone())
                         }
                     }
                 } else {
-                    PaperEngine::with_rest(master.clone(), risk)
+                    PaperEngine::with_rest(master.clone(), risk.clone())
                 }
             }
+            VenueKind::Licensed => PaperEngine::with_licensed(
+                master.clone(),
+                LicensedSandboxConfig::happy_path(),
+                risk.clone(),
+            ),
         };
 
         for (account_raw, major) in &config.deposits {
@@ -334,6 +388,12 @@ impl AppState {
                 config.ops_allowlist_raw.as_deref(),
             ),
             md_client: Arc::new(crate::md_client::MdHttpClient::from_env()),
+            kyc: Arc::new(crate::compliance::KycRegistry::from_env_str(
+                config.kyc_raw.as_deref(),
+            )),
+            admin_override_token: config.admin_override_token.clone(),
+            store_fail_hard: config.store_fail_hard,
+            eod_snapshot: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -417,7 +477,11 @@ impl AppState {
                     engine.risk_mut().set_global_kill(true);
                 }
                 eprintln!("shinrai-order-gateway: persist failed (kill switch engaged): {err}");
-                Err(err)
+                if self.store_fail_hard {
+                    Err(err)
+                } else {
+                    Ok(())
+                }
             }
         }
     }
@@ -712,6 +776,11 @@ pub fn router(state: AppState) -> Router {
             "/v1/ops/risk",
             get(crate::ops_http::get_risk).post(crate::ops_http::post_risk),
         )
+        .route(
+            "/v1/ops/reconciliation/eod",
+            post(crate::ops_http::post_eod_reconciliation),
+        )
+        .route("/v1/ops/approvals", post(crate::ops_http::post_approvals))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -920,8 +989,20 @@ fn parse_venue_kind(raw: Option<&str>) -> VenueKind {
     match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
         Some("sandbox" | "sbx" | "broker") => VenueKind::Sandbox,
         Some("rest" | "http") => VenueKind::Rest,
+        Some("licensed" | "fix" | "broker_sandbox") => VenueKind::Licensed,
         _ => VenueKind::Sim,
     }
+}
+
+fn parse_csv_list(raw: Option<&str>) -> Vec<String> {
+    let Some(raw) = raw.filter(|s| !s.is_empty()) else {
+        return Vec::new();
+    };
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Updates stored marks from a filled/working order's average or limit price.

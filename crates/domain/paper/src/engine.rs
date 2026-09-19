@@ -526,12 +526,25 @@ impl PaperEngine {
             let current = self.book.reserved(account, currency).minor_units();
             if needed > current {
                 let delta = Money::from_minor(needed - current, currency);
-                let key = format!(
-                    "hydrate:cash-align:{}:{}",
-                    account.get(),
-                    currency.code().as_str()
-                );
-                self.book.reserve_for_order(account, delta, key)?;
+                let available = self.book.available(account, currency).minor_units();
+                if available >= delta.minor_units() {
+                    let key = format!(
+                        "hydrate:cash-align:{}:{}",
+                        account.get(),
+                        currency.code().as_str()
+                    );
+                    self.book.reserve_for_order(account, delta, key)?;
+                } else {
+                    // Ambiguous / underfunded restart: keep maps, fail-closed on risk.
+                    self.risk.set_global_kill(true);
+                    tracing::warn!(
+                        account_id = account.get(),
+                        needed,
+                        current,
+                        available,
+                        "paper.hydrate: cannot align buy cash reserve; kill switch engaged"
+                    );
+                }
             } else if current > needed {
                 let delta = Money::from_minor(current - needed, currency);
                 let key = format!(
@@ -1367,6 +1380,107 @@ mod tests {
         let canceled = restarted.cancel(order.id()).expect("cancel after hydrate");
         assert_eq!(canceled.status(), OrderStatus::Canceled);
         assert!(restarted.book().reserved(acc, Currency::usd()).is_zero());
+    }
+
+    #[test]
+    fn hydrate_reinflates_resting_sell_position_reserves() {
+        let mut engine = PaperEngine::with_sandbox(
+            phase1_master(),
+            SandboxConfig::happy_path(),
+            RiskEngine::new(shinrai_risk::RiskLimits::demo()),
+        );
+        let acc = AccountId::from_u64(1);
+        engine
+            .deposit(
+                acc,
+                Money::from_major(10_000, Currency::usd()).expect("d"),
+                "dep",
+            )
+            .expect("dep");
+        engine
+            .submit(&aapl_order(acc, "buy1", Side::Buy, 10, 10_000))
+            .expect("buy");
+
+        let ledger: Vec<_> = engine
+            .book()
+            .journal()
+            .entries()
+            .map(|(_, e)| e.clone())
+            .collect();
+        let orders: Vec<_> = engine.orders().orders().cloned().collect();
+        let audit = engine.audit().records().cloned().collect::<Vec<_>>();
+        let positions: Vec<_> = engine.book().positions_iter().collect();
+
+        let mut resting = PaperEngine::with_sandbox(
+            phase1_master(),
+            SandboxConfig::ack_only(),
+            RiskEngine::new(shinrai_risk::RiskLimits::demo()),
+        );
+        resting
+            .hydrate(ledger, orders, audit, positions)
+            .expect("hydrate filled");
+        let sell = resting
+            .submit(&aapl_order(acc, "sell-rest", Side::Sell, 4, 10_000))
+            .expect("sell");
+        let sell_order = match sell {
+            SubmitOutcome::Created(o) | SubmitOutcome::Duplicate(o) => o,
+        };
+        assert_eq!(sell_order.status(), OrderStatus::New);
+        assert_eq!(resting.book().reserved_position(acc, aapl().id()), 4);
+
+        let ledger: Vec<_> = resting
+            .book()
+            .journal()
+            .entries()
+            .map(|(_, e)| e.clone())
+            .collect();
+        let orders: Vec<_> = resting.orders().orders().cloned().collect();
+        let audit = resting.audit().records().cloned().collect::<Vec<_>>();
+        // Persist reserved=0 to force reinflation from sell leaves.
+        let positions: Vec<_> = resting
+            .book()
+            .positions_iter()
+            .map(|(a, i, lots, _)| (a, i, lots, 0))
+            .collect();
+
+        let mut restarted = PaperEngine::with_sandbox(
+            phase1_master(),
+            SandboxConfig::ack_only(),
+            RiskEngine::new(shinrai_risk::RiskLimits::demo()),
+        );
+        restarted
+            .hydrate(ledger, orders, audit, positions)
+            .expect("hydrate sell");
+        assert!(restarted
+            .remaining_position_reserve
+            .contains_key(&sell_order.id()));
+        assert_eq!(restarted.book().reserved_position(acc, aapl().id()), 4);
+        assert!(restarted.venue_order(sell_order.id()).is_some());
+        let canceled = restarted.cancel(sell_order.id()).expect("cancel sell");
+        assert_eq!(canceled.status(), OrderStatus::Canceled);
+        assert_eq!(restarted.book().reserved_position(acc, aapl().id()), 0);
+    }
+
+    #[test]
+    fn licensed_venue_fills_like_happy_path() {
+        let mut engine = PaperEngine::with_licensed(
+            phase1_master(),
+            shinrai_execution::LicensedSandboxConfig::happy_path(),
+            RiskEngine::new(shinrai_risk::RiskLimits::demo()),
+        );
+        let acc = AccountId::from_u64(1);
+        engine
+            .deposit(
+                acc,
+                Money::from_major(10_000, Currency::usd()).expect("d"),
+                "dep",
+            )
+            .expect("dep");
+        engine
+            .submit(&aapl_order(acc, "lic1", Side::Buy, 3, 10_000))
+            .expect("submit");
+        assert_eq!(engine.book().position(acc, aapl().id()), 3);
+        assert_eq!(engine.venue_kind(), VenueKind::Licensed);
     }
 
     #[test]

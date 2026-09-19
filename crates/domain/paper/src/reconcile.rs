@@ -2,7 +2,10 @@
 
 use std::collections::HashSet;
 
-use shinrai_orders::{OrderId, OrderStatus};
+use shinrai_instruments::InstrumentId;
+use shinrai_ledger::AccountId;
+use shinrai_money::Currency;
+use shinrai_orders::{ExecId, OrderId, OrderStatus};
 
 use crate::engine::PaperEngine;
 
@@ -25,6 +28,14 @@ pub enum ReconciliationKind {
     OmsExecMissingInLedger,
     /// Ledger `fill:{exec_id}` with no matching OMS `seen_execs`.
     LedgerFillWithoutOmsExec,
+    /// Internal cash (available+reserved) differs from broker EOD cash.
+    CashMismatch,
+    /// Internal position lots differ from broker EOD position.
+    PositionMismatch,
+    /// Broker fill not present in OMS `seen_execs`.
+    BrokerFillMissingInOms,
+    /// OMS fill not present in broker EOD fill set.
+    OmsFillMissingAtBroker,
 }
 
 impl ReconciliationKind {
@@ -40,6 +51,10 @@ impl ReconciliationKind {
             Self::OmsExecMissingAtVenue => "oms_exec_missing_at_venue",
             Self::OmsExecMissingInLedger => "oms_exec_missing_in_ledger",
             Self::LedgerFillWithoutOmsExec => "ledger_fill_without_oms_exec",
+            Self::CashMismatch => "cash_mismatch",
+            Self::PositionMismatch => "position_mismatch",
+            Self::BrokerFillMissingInOms => "broker_fill_missing_in_oms",
+            Self::OmsFillMissingAtBroker => "oms_fill_missing_at_broker",
         }
     }
 }
@@ -212,6 +227,135 @@ impl PaperEngine {
             }
         }
     }
+
+    /// Compares internal cash / positions / fills to an external broker EOD snapshot.
+    #[must_use]
+    pub fn reconcile_eod(&self, snapshot: &BrokerEodSnapshot) -> ReconciliationReport {
+        let mut mismatches = Vec::new();
+        let zero_order = OrderId::from_u64(0);
+
+        for row in &snapshot.cash {
+            let available = self.book().available(row.account_id, row.currency);
+            let reserved = self.book().reserved(row.account_id, row.currency);
+            let internal = available
+                .minor_units()
+                .saturating_add(reserved.minor_units());
+            if internal != row.minor_units {
+                mismatches.push(ReconciliationMismatch {
+                    kind: ReconciliationKind::CashMismatch,
+                    order_id: zero_order,
+                    detail: format!(
+                        "account={} ccy={} internal={} broker={}",
+                        row.account_id.get(),
+                        row.currency.code().as_str(),
+                        internal,
+                        row.minor_units
+                    ),
+                });
+            }
+        }
+
+        for row in &snapshot.positions {
+            let lots = self.book().position(row.account_id, row.instrument_id);
+            if lots != row.lots {
+                mismatches.push(ReconciliationMismatch {
+                    kind: ReconciliationKind::PositionMismatch,
+                    order_id: zero_order,
+                    detail: format!(
+                        "account={} instrument={} internal={} broker={}",
+                        row.account_id.get(),
+                        row.instrument_id.get(),
+                        lots,
+                        row.lots
+                    ),
+                });
+            }
+        }
+
+        let mut oms_execs: HashSet<String> = HashSet::new();
+        let mut exec_to_order = std::collections::HashMap::new();
+        for order in self.orders().orders() {
+            for exec in order.seen_execs() {
+                let key = exec.as_str().to_owned();
+                oms_execs.insert(key.clone());
+                exec_to_order.insert(key, order.id());
+            }
+        }
+
+        let mut broker_execs: HashSet<String> = HashSet::new();
+        for fill in &snapshot.fills {
+            let key = fill.exec_id.as_str().to_owned();
+            broker_execs.insert(key.clone());
+            if !oms_execs.contains(&key) {
+                mismatches.push(ReconciliationMismatch {
+                    kind: ReconciliationKind::BrokerFillMissingInOms,
+                    order_id: fill.order_id,
+                    detail: format!("exec_id={}", fill.exec_id.as_str()),
+                });
+            }
+        }
+
+        for (exec, order_id) in &exec_to_order {
+            if !broker_execs.contains(exec) {
+                mismatches.push(ReconciliationMismatch {
+                    kind: ReconciliationKind::OmsFillMissingAtBroker,
+                    order_id: *order_id,
+                    detail: format!("exec_id={exec}"),
+                });
+            }
+        }
+
+        ReconciliationReport {
+            ok: mismatches.is_empty(),
+            mismatches,
+        }
+    }
+}
+
+/// Broker end-of-day cash row (available + reserved expected total).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokerEodCash {
+    /// Account.
+    pub account_id: AccountId,
+    /// Currency.
+    pub currency: Currency,
+    /// Total cash minor units (available + reserved).
+    pub minor_units: i128,
+}
+
+/// Broker end-of-day position row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokerEodPosition {
+    /// Account.
+    pub account_id: AccountId,
+    /// Instrument.
+    pub instrument_id: InstrumentId,
+    /// Signed lots.
+    pub lots: i64,
+}
+
+/// Broker end-of-day fill row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokerEodFill {
+    /// Internal order id when known.
+    pub order_id: OrderId,
+    /// Venue execution id.
+    pub exec_id: ExecId,
+    /// Fill quantity in lots.
+    pub qty: i64,
+    /// Fill price in ticks.
+    pub price_ticks: i64,
+}
+
+/// External broker statement used for EOD reconciliation.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BrokerEodSnapshot {
+    /// Cash balances by account/currency.
+    pub cash: Vec<BrokerEodCash>,
+    /// Position lots by account/instrument.
+    pub positions: Vec<BrokerEodPosition>,
+    /// Fills expected at the broker.
+    pub fills: Vec<BrokerEodFill>,
 }
 
 #[cfg(test)]
@@ -353,5 +497,73 @@ mod tests {
         assert_eq!(trades.len(), 1);
         assert_eq!(trades[0].order_id, OrderId::from_u64(3));
         assert!(!trades[0].exec_id.as_str().is_empty());
+    }
+
+    #[test]
+    fn eod_cash_and_position_mismatch() {
+        let mut engine = PaperEngine::new(phase1_master(), FaultConfig::happy_path());
+        let acc = AccountId::from_u64(1);
+        engine
+            .deposit(
+                acc,
+                Money::from_major(10_000, Currency::usd()).expect("d"),
+                "dep",
+            )
+            .expect("dep");
+        engine.submit(&buy(acc, "eod1", 5)).expect("s");
+        let total_cash = engine
+            .book()
+            .available(acc, Currency::usd())
+            .minor_units()
+            .saturating_add(engine.book().reserved(acc, Currency::usd()).minor_units());
+        let fills: Vec<_> = engine
+            .orders()
+            .orders()
+            .flat_map(|o| {
+                o.seen_execs().iter().map(|e| BrokerEodFill {
+                    order_id: o.id(),
+                    exec_id: e.clone(),
+                    qty: 5,
+                    price_ticks: 10_000,
+                })
+            })
+            .collect();
+        let ok = engine.reconcile_eod(&BrokerEodSnapshot {
+            cash: vec![BrokerEodCash {
+                account_id: acc,
+                currency: Currency::usd(),
+                minor_units: total_cash,
+            }],
+            positions: vec![BrokerEodPosition {
+                account_id: acc,
+                instrument_id: aapl().id(),
+                lots: 5,
+            }],
+            fills,
+        });
+        assert!(ok.ok, "{ok:?}");
+
+        let bad = engine.reconcile_eod(&BrokerEodSnapshot {
+            cash: vec![BrokerEodCash {
+                account_id: acc,
+                currency: Currency::usd(),
+                minor_units: 1,
+            }],
+            positions: vec![BrokerEodPosition {
+                account_id: acc,
+                instrument_id: aapl().id(),
+                lots: 99,
+            }],
+            fills: Vec::new(),
+        });
+        assert!(!bad.ok);
+        assert!(bad
+            .mismatches
+            .iter()
+            .any(|m| m.kind == ReconciliationKind::CashMismatch));
+        assert!(bad
+            .mismatches
+            .iter()
+            .any(|m| m.kind == ReconciliationKind::PositionMismatch));
     }
 }

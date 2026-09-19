@@ -71,6 +71,8 @@ pub struct RiskEngine {
     global_kill: bool,
     account_kills: HashSet<AccountId>,
     restricted: HashSet<InstrumentId>,
+    /// Admin overrides: (account, instrument) may trade despite restriction.
+    overrides: HashSet<(AccountId, InstrumentId)>,
 }
 
 impl Default for RiskEngine {
@@ -88,6 +90,7 @@ impl RiskEngine {
             global_kill: false,
             account_kills: HashSet::new(),
             restricted: HashSet::new(),
+            overrides: HashSet::new(),
         }
     }
 
@@ -132,6 +135,22 @@ impl RiskEngine {
         self.restricted.remove(&id);
     }
 
+    /// One-shot / session override allowing a restricted instrument for an account.
+    pub fn grant_override(&mut self, account: AccountId, instrument: InstrumentId) {
+        self.overrides.insert((account, instrument));
+    }
+
+    /// Clears a restricted-instrument override.
+    pub fn clear_override(&mut self, account: AccountId, instrument: InstrumentId) {
+        self.overrides.remove(&(account, instrument));
+    }
+
+    /// Whether `instrument` is currently restricted.
+    #[must_use]
+    pub fn is_restricted(&self, id: InstrumentId) -> bool {
+        self.restricted.contains(&id)
+    }
+
     /// Runs pre-trade checks. Does not mutate ledger or OMS state.
     #[must_use]
     #[allow(clippy::too_many_lines)]
@@ -139,7 +158,11 @@ impl RiskEngine {
         if self.global_kill || self.account_kills.contains(&intent.account_id) {
             return RiskDecision::Rejected(RiskRejectReason::KillSwitch);
         }
-        if self.restricted.contains(&intent.instrument_id) {
+        if self.restricted.contains(&intent.instrument_id)
+            && !self
+                .overrides
+                .contains(&(intent.account_id, intent.instrument_id))
+        {
             return RiskDecision::Rejected(RiskRejectReason::RestrictedInstrument);
         }
         if let Some((open, close)) = self.limits.market_session_utc {
@@ -310,6 +333,25 @@ mod tests {
         assert_eq!(
             engine.check(&sell_big, &c).reject_reason(),
             Some(RiskRejectReason::MaxShort)
+        );
+    }
+
+    #[test]
+    fn restricted_override_allows_trade() {
+        let mut engine = RiskEngine::new(RiskLimits::demo());
+        let id = InstrumentId::from_u64(1);
+        let acc = AccountId::from_u64(1);
+        engine.restrict_instrument(id);
+        assert_eq!(
+            engine
+                .check(&buy(1, 100), &ctx(1_000_000, 0, 100))
+                .reject_reason(),
+            Some(RiskRejectReason::RestrictedInstrument)
+        );
+        engine.grant_override(acc, id);
+        assert_eq!(
+            engine.check(&buy(1, 100), &ctx(1_000_000, 0, 100)),
+            RiskDecision::Approved
         );
     }
 }
