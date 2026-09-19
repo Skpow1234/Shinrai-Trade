@@ -70,7 +70,6 @@ impl AlpacaConfig {
 #[derive(Debug, Clone)]
 struct Inflight {
     venue_order_id: VenueOrderId,
-    symbol: String,
     order_qty: i64,
     cum_qty: i64,
     price: PriceTicks,
@@ -162,7 +161,6 @@ impl AlpacaPaperVenue {
         price: PriceTicks,
         cum_qty: i64,
         venue_order_id: Option<VenueOrderId>,
-        symbol: Option<String>,
     ) -> Result<(), ExecutionError> {
         if order_qty.lots() <= 0 || price.scaled() <= 0 {
             return Err(ExecutionError::InvalidQuantity);
@@ -173,12 +171,10 @@ impl AlpacaPaperVenue {
         let venue_order_id = venue_order_id.unwrap_or_else(|| {
             VenueOrderId::new(format!("ALPACA-HYDRATE-{}", order_id.get())).expect("vid")
         });
-        let symbol = symbol.unwrap_or_else(|| "UNKNOWN".into());
         self.inflight.insert(
             order_id,
             Inflight {
                 venue_order_id,
-                symbol,
                 order_qty: order_qty.lots(),
                 cum_qty,
                 price,
@@ -228,15 +224,11 @@ impl AlpacaPaperVenue {
     }
 
     fn ticks_to_limit_price(ticks: PriceTicks) -> String {
-        // phase1 equities use scale-2 ticks (cents of a dollar * 100 display).
+        // phase1 equities use scale-2 ticks (10000 → "100.00").
         let scaled = ticks.scaled();
-        format!("{:.2}", scaled as f64 / 100.0)
-    }
-
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn limit_price_to_ticks(raw: &str) -> PriceTicks {
-        let v: f64 = raw.parse().unwrap_or(0.0);
-        PriceTicks::from_scaled((v * 100.0).round() as i64)
+        let whole = scaled / 100;
+        let frac = scaled.rem_euclid(100);
+        format!("{whole}.{frac:02}")
     }
 }
 
@@ -277,7 +269,8 @@ impl ExecutionVenue for AlpacaPaperVenue {
             let reason = resp.body.clone();
             self.push_report(
                 order.order_id,
-                VenueOrderId::new("ALPACA-REJECT").map_err(|_| ExecutionError::InvalidIdentifier)?,
+                VenueOrderId::new("ALPACA-REJECT")
+                    .map_err(|_| ExecutionError::InvalidIdentifier)?,
                 None,
                 ExecType::Rejected { reason },
                 order.qty,
@@ -287,13 +280,12 @@ impl ExecutionVenue for AlpacaPaperVenue {
         }
         let parsed: AlpacaOrderJson = serde_json::from_str(&resp.body)
             .map_err(|e| ExecutionError::Transport(e.to_string()))?;
-        let venue_order_id = VenueOrderId::new(parsed.id.clone())
-            .map_err(|_| ExecutionError::InvalidIdentifier)?;
+        let venue_order_id =
+            VenueOrderId::new(parsed.id.clone()).map_err(|_| ExecutionError::InvalidIdentifier)?;
         self.inflight.insert(
             order.order_id,
             Inflight {
                 venue_order_id: venue_order_id.clone(),
-                symbol,
                 order_qty: order.qty.lots(),
                 cum_qty: 0,
                 price: order.price,
@@ -554,17 +546,10 @@ impl HttpTransport for LocalAlpacaHttp {
                     .map_err(|e| ExecutionError::Transport(e.to_string()))?;
                 let id = format!("alpaca-local-{}", self.next_id);
                 self.next_id = self.next_id.saturating_add(1);
-                let qty: i64 = v["qty"]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
+                let qty: i64 = v["qty"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
                 let limit_price = v["limit_price"].as_str().unwrap_or("0").to_owned();
                 let filled = if self.auto_fill { qty } else { 0 };
-                let status = if self.auto_fill {
-                    "filled"
-                } else {
-                    "accepted"
-                };
+                let status = if self.auto_fill { "filled" } else { "accepted" };
                 self.orders.insert(
                     id.clone(),
                     LocalOrder {
@@ -608,7 +593,7 @@ impl HttpTransport for LocalAlpacaHttp {
                         o.qty = q;
                     }
                     if let Some(p) = v["limit_price"].as_str() {
-                        o.limit_price = p.to_owned();
+                        p.clone_into(&mut o.limit_price);
                     }
                     Ok(HttpResponse {
                         status: 200,
@@ -741,6 +726,5 @@ mod tests {
             AlpacaPaperVenue::ticks_to_limit_price(PriceTicks::from_scaled(10_000)),
             "100.00"
         );
-        let _ = AlpacaPaperVenue::limit_price_to_ticks("100.00");
     }
 }

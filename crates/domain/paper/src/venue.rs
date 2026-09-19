@@ -265,7 +265,6 @@ impl VenueHandle {
                 order.price(),
                 cum,
                 venue_id,
-                None,
             ),
         }
     }

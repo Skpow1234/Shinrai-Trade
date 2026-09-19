@@ -1092,14 +1092,15 @@ impl PaperEngine {
                     filled,
                 } => {
                     let order = self.orders.get(order_id)?;
-                    self.durable_trades.push(shinrai_execution::VenueTradeSnapshot {
-                        order_id,
-                        exec_id: exec_id.clone(),
-                        qty: qty.lots(),
-                        price: price.scaled(),
-                        session: self.applied_session.unwrap_or(SessionId::new(0)),
-                        seq: self.next_expected_seq,
-                    });
+                    self.durable_trades
+                        .push(shinrai_execution::VenueTradeSnapshot {
+                            order_id,
+                            exec_id: exec_id.clone(),
+                            qty: qty.lots(),
+                            price: price.scaled(),
+                            session: self.applied_session.unwrap_or(SessionId::new(0)),
+                            seq: self.next_expected_seq,
+                        });
                     let instrument = self.master.get(order.instrument_id())?;
                     let fill_notional = notional(instrument, *price, *qty)?;
                     let fee = Money::from_minor(0, fill_notional.currency());

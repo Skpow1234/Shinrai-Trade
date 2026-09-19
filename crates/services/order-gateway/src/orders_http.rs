@@ -449,6 +449,7 @@ pub async fn post_replace(
             return with_correlation(bad_request("invalid_qty_or_price"), &correlation);
         }
         let order_id = OrderId::from_u64(id);
+        let snap = state.snapshot_engine();
         let replaced = {
             let mut engine = lock_engine(&state);
             engine.set_logical_now(now);
@@ -528,6 +529,7 @@ pub async fn post_replace(
             .instrument(persist_span)
             .await
         {
+            state.rollback_engine(snap);
             tracing::Span::current().record("outcome", "persist_failed");
             return with_correlation(persist_failed(&err), &correlation);
         }
