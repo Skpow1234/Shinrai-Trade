@@ -38,6 +38,16 @@ pub enum AuditKind {
         /// Report label (`new`, `trade`, `canceled`, etc.).
         exec_type: String,
     },
+    /// Paper (or gated) customer cash deposit posted.
+    FundsDeposit {
+        /// Idempotency key.
+        key: String,
+    },
+    /// Paper (or gated) customer cash withdrawal posted.
+    FundsWithdraw {
+        /// Idempotency key.
+        key: String,
+    },
 }
 
 impl AuditKind {
@@ -55,6 +65,8 @@ impl AuditKind {
             Self::LedgerReleased => "ledger_released",
             Self::VenueSubmitted => "venue_submitted",
             Self::VenueReport { .. } => "venue_report",
+            Self::FundsDeposit { .. } => "funds_deposit",
+            Self::FundsWithdraw { .. } => "funds_withdraw",
         }
     }
 
@@ -65,6 +77,7 @@ impl AuditKind {
             Self::RiskRejected { code } => Some(code.as_str()),
             Self::OrderEventApplied { status } => Some(status.as_str()),
             Self::VenueReport { exec_type } => Some(exec_type.as_str()),
+            Self::FundsDeposit { key } | Self::FundsWithdraw { key } => Some(key.as_str()),
             _ => None,
         }
     }

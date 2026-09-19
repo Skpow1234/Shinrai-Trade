@@ -135,6 +135,12 @@ pub struct AppState {
     pub(crate) admin_override_token: Option<String>,
     /// When false with a store attached, persist errors are logged but not returned.
     pub(crate) store_fail_hard: bool,
+    /// Paper fund movement APIs enabled.
+    pub(crate) funds_enabled: bool,
+    /// Paper withdrawals enabled (deposits may still be on).
+    pub(crate) withdrawals_enabled: bool,
+    /// When set, paper withdrawals ≥ this minor amount need `X-Admin-Override`.
+    pub(crate) withdraw_approval_threshold_minor: Option<i128>,
     /// Last injected broker EOD snapshot (ops).
     pub(crate) eod_snapshot: Arc<Mutex<Option<shinrai_paper::BrokerEodSnapshot>>>,
 }
@@ -166,6 +172,12 @@ pub struct GatewayConfig {
     store_fail_hard: bool,
     /// Force local Alpaca mock even if env credentials exist (tests).
     alpaca_force_local: bool,
+    /// Enable paper deposit/withdraw HTTP APIs (default true).
+    funds_enabled: bool,
+    /// Enable paper withdrawals (default true).
+    withdrawals_enabled: bool,
+    /// Optional large-withdraw step-up threshold (minor units).
+    withdraw_approval_threshold_minor: Option<i128>,
 }
 
 impl GatewayConfig {
@@ -199,6 +211,9 @@ impl GatewayConfig {
             admin_override_token: None,
             store_fail_hard: true,
             alpaca_force_local: false,
+            funds_enabled: true,
+            withdrawals_enabled: true,
+            withdraw_approval_threshold_minor: None,
         }
     }
 
@@ -255,6 +270,23 @@ impl GatewayConfig {
                 "0" | "false" | "no" | "off"
             );
         }
+        if let Ok(v) = std::env::var("SHINRAI_OG_FUNDS_ENABLED") {
+            cfg.funds_enabled = !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            );
+        }
+        if let Ok(v) = std::env::var("SHINRAI_OG_WITHDRAWALS_ENABLED") {
+            cfg.withdrawals_enabled = !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            );
+        }
+        cfg.withdraw_approval_threshold_minor =
+            std::env::var("SHINRAI_OG_WITHDRAW_APPROVAL_THRESHOLD_MINOR")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|n: &i128| *n > 0);
         cfg
     }
 }
@@ -292,6 +324,12 @@ impl core::fmt::Debug for GatewayConfig {
             )
             .field("store_fail_hard", &self.store_fail_hard)
             .field("alpaca_force_local", &self.alpaca_force_local)
+            .field("funds_enabled", &self.funds_enabled)
+            .field("withdrawals_enabled", &self.withdrawals_enabled)
+            .field(
+                "withdraw_approval_threshold_minor",
+                &self.withdraw_approval_threshold_minor,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -424,6 +462,9 @@ impl AppState {
             approvals: Arc::new(Mutex::new(crate::compliance::ApprovalStore::new())),
             admin_override_token: config.admin_override_token.clone(),
             store_fail_hard: config.store_fail_hard,
+            funds_enabled: config.funds_enabled,
+            withdrawals_enabled: config.withdrawals_enabled,
+            withdraw_approval_threshold_minor: config.withdraw_approval_threshold_minor,
             eod_snapshot: Arc::new(Mutex::new(None)),
         }
     }
@@ -821,6 +862,18 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/portfolio", get(crate::portfolio_http::get_portfolio))
         .route("/v1/audit", get(crate::portfolio_http::get_audit))
+        .route(
+            "/v1/accounts/balances",
+            get(crate::funds_http::get_balances),
+        )
+        .route(
+            "/v1/accounts/deposit",
+            post(crate::funds_http::post_deposit),
+        )
+        .route(
+            "/v1/accounts/withdraw",
+            post(crate::funds_http::post_withdraw),
+        )
         .route(
             "/v1/reconciliation",
             get(crate::portfolio_http::get_reconciliation),

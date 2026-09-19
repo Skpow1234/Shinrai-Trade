@@ -236,6 +236,9 @@ Pre-trade risk runs before the OMS. Insufficient buying power returns **422** wi
 | `SHINRAI_OG_STORE_FAIL_HARD` | Fail-hard on Postgres write-through (default on; `0`/`false` = fail-soft) |
 | `SHINRAI_OG_KYC_STATUS` | `subject:approved|pending|rejected,...`; empty = all approved |
 | `SHINRAI_OG_KYC_VENDOR_URL` / `_TOKEN` / `_TIMEOUT_MS` / `_CACHE_SECS` | Optional HTTP KYC vendor (fail-closed + TTL cache) |
+| `SHINRAI_OG_FUNDS_ENABLED` | Paper deposit/withdraw APIs (default on; `0`/`false` disables) |
+| `SHINRAI_OG_WITHDRAWALS_ENABLED` | Paper withdrawals (default on) |
+| `SHINRAI_OG_WITHDRAW_APPROVAL_THRESHOLD_MINOR` | Large paper withdraw needs `X-Admin-Override` |
 | `SHINRAI_OG_AUDIT_EXPORT_HMAC_KEY` | HMAC-SHA256 key for `GET /v1/ops/audit/export` signature |
 | `SHINRAI_OG_AUDIT_EXPORT_RETENTION_SECS` | Only export audit rows newer than this window |
 | `SHINRAI_OG_RESTRICTED_SYMBOLS` | Comma-separated symbols restricted at bootstrap |
@@ -261,6 +264,15 @@ curl "http://127.0.0.1:8081/v1/orders?token=dev"
 # Portfolio (stored fill marks by default; optional live MD quotes)
 curl "http://127.0.0.1:8081/v1/portfolio?token=dev&use_stored_marks=1"
 curl "http://127.0.0.1:8081/v1/portfolio?token=dev&use_live_marks=1"
+
+# Phase 5 paper funds (ledger only)
+curl "http://127.0.0.1:8081/v1/accounts/balances?token=dev"
+curl -X POST "http://127.0.0.1:8081/v1/accounts/deposit?token=dev" \
+  -H 'content-type: application/json' \
+  -d '{"idempotency_key":"dep-1","amount_minor":50000,"currency":"USD"}'
+curl -X POST "http://127.0.0.1:8081/v1/accounts/withdraw?token=dev" \
+  -H 'content-type: application/json' \
+  -d '{"idempotency_key":"wd-1","amount_minor":10000}'
 
 # Append-only audit trail (paginate with after_seq)
 curl "http://127.0.0.1:8081/v1/audit?token=dev"
@@ -305,7 +317,11 @@ curl -X POST http://127.0.0.1:8081/v1/ops/approvals \
 open http://127.0.0.1:8081/v1/ops   # or browse to that URL
 ```
 
-Phase 4 is complete for the licensed-broker paper path: Alpaca paper REST (`SHINRAI_OG_VENUE=alpaca`) with async fill polling, durable OMS + drop-copy + session cursor, Postgres outbox with `SKIP LOCKED` claim, KYC/approvals/audit export, and Alpaca-sourced EOD position recon. FIX remains optional. Phase 5 (customer money) stays gated.
+Phase 4 is complete for the licensed-broker paper path: Alpaca paper REST (`SHINRAI_OG_VENUE=alpaca`) with async fill polling, durable OMS + drop-copy + session cursor, Postgres outbox with `SKIP LOCKED` claim, KYC/approvals/audit export, and Alpaca-sourced EOD position recon. FIX remains optional.
+
+Phase 5 (paper funds): `GET /v1/accounts/balances`, `POST /v1/accounts/deposit`, `POST /v1/accounts/withdraw` post double-entry paper ledger entries with idempotency keys. Responses are always `mode: "paper"` — this is **not** bank rails or customer-money custody. Real custody stays gated on regulation and licensed partners.
+
+**Venues that need no API key** (in-process): `sim` (default), `sandbox`, `rest` without `SHINRAI_OG_REST_URL`, `licensed`, and `alpaca` without Alpaca credentials (local mock). Live Alpaca paper still needs free keys from Alpaca.
 
 ## Test
 

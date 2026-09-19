@@ -501,7 +501,7 @@ impl PaperEngine {
         self.orders.bump_next_id_past(min_id);
     }
 
-    /// Paper deposit.
+    /// Paper deposit (idempotent on ledger key) with audit.
     ///
     /// # Errors
     ///
@@ -512,7 +512,36 @@ impl PaperEngine {
         amount: Money,
         key: impl Into<String>,
     ) -> Result<(), PaperError> {
-        self.book.deposit(account, amount, key)?;
+        let key = key.into();
+        self.book.deposit(account, amount, key.clone())?;
+        self.audit.record(
+            self.logical_now,
+            Some(account),
+            None,
+            AuditKind::FundsDeposit { key },
+        );
+        Ok(())
+    }
+
+    /// Paper withdrawal from available cash (idempotent on ledger key) with audit.
+    ///
+    /// # Errors
+    ///
+    /// Returns ledger errors (`InsufficientFunds`, etc.).
+    pub fn withdraw(
+        &mut self,
+        account: AccountId,
+        amount: Money,
+        key: impl Into<String>,
+    ) -> Result<(), PaperError> {
+        let key = key.into();
+        self.book.withdraw(account, amount, key.clone())?;
+        self.audit.record(
+            self.logical_now,
+            Some(account),
+            None,
+            AuditKind::FundsWithdraw { key },
+        );
         Ok(())
     }
 

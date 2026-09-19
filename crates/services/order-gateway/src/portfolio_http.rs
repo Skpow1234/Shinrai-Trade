@@ -363,6 +363,9 @@ fn audit_row_json(record: &AuditRecord) -> Value {
     if let AuditKind::VenueReport { exec_type } = record.kind() {
         row["exec_type"] = json!(exec_type);
     }
+    if let AuditKind::FundsDeposit { key } | AuditKind::FundsWithdraw { key } = record.kind() {
+        row["idempotency_key"] = json!(key);
+    }
     row
 }
 

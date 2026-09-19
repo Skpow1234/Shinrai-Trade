@@ -8,6 +8,7 @@
 mod app;
 mod auth_http;
 mod compliance;
+mod funds_http;
 mod hydrate;
 mod md_client;
 mod ops;

@@ -101,6 +101,8 @@ fn encode_kind(kind: &AuditKind) -> (&'static str, Option<String>) {
         AuditKind::LedgerReleased => ("ledger_released", None),
         AuditKind::VenueSubmitted => ("venue_submitted", None),
         AuditKind::VenueReport { exec_type } => ("venue_report", Some(exec_type.clone())),
+        AuditKind::FundsDeposit { key } => ("funds_deposit", Some(key.clone())),
+        AuditKind::FundsWithdraw { key } => ("funds_withdraw", Some(key.clone())),
     }
 }
 
@@ -121,6 +123,12 @@ fn decode_row(row: AuditRow) -> Result<AuditRecord, StoreError> {
         "venue_submitted" => AuditKind::VenueSubmitted,
         "venue_report" => AuditKind::VenueReport {
             exec_type: row.detail.unwrap_or_default(),
+        },
+        "funds_deposit" => AuditKind::FundsDeposit {
+            key: row.detail.unwrap_or_default(),
+        },
+        "funds_withdraw" => AuditKind::FundsWithdraw {
+            key: row.detail.unwrap_or_default(),
         },
         other => {
             return Err(StoreError::InvalidStored {
