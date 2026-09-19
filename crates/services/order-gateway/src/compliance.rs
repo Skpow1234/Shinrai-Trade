@@ -307,7 +307,17 @@ impl ApprovalStore {
         Self::default()
     }
 
-    /// Requests an approval (first control).
+    /// Replaces contents from durable snapshots (startup hydrate).
+    pub fn restore_from(&mut self, rows: impl IntoIterator<Item = ApprovalRequest>) {
+        self.pending.clear();
+        self.next_id = 0;
+        for req in rows {
+            self.next_id = self.next_id.max(req.id);
+            self.pending.insert(req.id, req);
+        }
+    }
+
+    /// Requests an approval (first control). Uses `forced_id` when provided (DB-assigned).
     pub fn request(
         &mut self,
         account_id: AccountId,
@@ -315,9 +325,27 @@ impl ApprovalStore {
         symbol: impl Into<String>,
         requested_by: impl Into<String>,
     ) -> ApprovalRequest {
-        self.next_id = self.next_id.saturating_add(1);
+        self.request_with_id(None, account_id, instrument_id, symbol, requested_by)
+    }
+
+    /// Like [`Self::request`] but pins the id (Postgres `RETURNING id`).
+    pub fn request_with_id(
+        &mut self,
+        forced_id: Option<u64>,
+        account_id: AccountId,
+        instrument_id: InstrumentId,
+        symbol: impl Into<String>,
+        requested_by: impl Into<String>,
+    ) -> ApprovalRequest {
+        let id = if let Some(id) = forced_id {
+            self.next_id = self.next_id.max(id);
+            id
+        } else {
+            self.next_id = self.next_id.saturating_add(1);
+            self.next_id
+        };
         let req = ApprovalRequest {
-            id: self.next_id,
+            id,
             account_id,
             instrument_id,
             symbol: symbol.into(),

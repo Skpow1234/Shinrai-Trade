@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+mod approvals;
 mod audit;
 mod batch;
 mod drop_copy;
@@ -16,7 +17,12 @@ mod outbox;
 mod pool;
 mod positions;
 mod venue_session;
+mod withdraw_audit;
 
+pub use approvals::{
+    approve_approval_request, insert_approval_request, list_approval_requests,
+    load_approval_request, ApprovalRequestSnapshot,
+};
 pub use audit::{insert_audit_record, load_audit_after};
 pub use batch::{persist_trading_batch, TradingBatch};
 pub use drop_copy::{list_drop_copy_fills, DropCopyFillSnapshot};
@@ -34,6 +40,7 @@ pub use outbox::{claim_unpublished, insert_outbox_event, mark_published, OutboxE
 pub use pool::{connect, connect_from_env, migrate, StorePool};
 pub use positions::{list_paper_positions, upsert_paper_position, PaperPositionSnapshot};
 pub use venue_session::{load_venue_session_cursor, VenueSessionCursorSnapshot};
+pub use withdraw_audit::{insert_withdraw_audit, list_withdraw_audit, WithdrawAuditSnapshot};
 
 /// Embedded migrator for `migrations/`.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
