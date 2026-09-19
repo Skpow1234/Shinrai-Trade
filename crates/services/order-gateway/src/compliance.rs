@@ -318,6 +318,7 @@ impl ApprovalStore {
     }
 
     /// Requests an approval (first control). Uses `forced_id` when provided (DB-assigned).
+    #[allow(dead_code)]
     pub fn request(
         &mut self,
         account_id: AccountId,

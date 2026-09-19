@@ -603,6 +603,7 @@ pub struct ApprovalBody {
 ///
 /// Without `approve_id`: creates a pending request (maker).
 /// With `approve_id`: checker approves (must differ from maker), then grants risk override.
+#[allow(clippy::too_many_lines)]
 pub async fn post_approvals(
     headers: HeaderMap,
     Query(query): Query<OpsAuthQuery>,
