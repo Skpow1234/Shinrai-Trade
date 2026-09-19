@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+mod alpaca;
 mod error;
 mod licensed;
 mod report;
@@ -13,6 +14,9 @@ mod sandbox;
 mod session;
 mod venue;
 
+pub use alpaca::{
+    AlpacaConfig, AlpacaPaperVenue, LocalAlpacaHttp, RemoteAlpacaHttp, ALPACA_PAPER_BASE_URL,
+};
 pub use error::ExecutionError;
 pub use licensed::{LicensedSandboxConfig, LicensedSandboxVenue, OutboundMsg, SessionPhase};
 pub use report::{stream_fingerprint, ExecType, ExecutionReport, SessionId};

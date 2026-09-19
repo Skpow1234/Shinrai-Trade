@@ -1,11 +1,14 @@
-//! Paper trading venue handle (sim, sandbox, REST, or licensed sandbox).
+//! Paper trading venue handle (sim, sandbox, REST, licensed, or Alpaca paper).
+
+use std::collections::HashMap;
 
 use shinrai_exchange_simulator::{FaultConfig, SimExchange};
 use shinrai_execution::{
-    ExecutionError, ExecutionReport, ExecutionVenue, LicensedSandboxConfig, LicensedSandboxVenue,
-    NewVenueOrder, RestPaperVenue, SandboxBroker, SandboxConfig, VenueOrderSnapshot,
-    VenueSessionState, VenueTradeSnapshot,
+    AlpacaConfig, AlpacaPaperVenue, ExecutionError, ExecutionReport, ExecutionVenue,
+    LicensedSandboxConfig, LicensedSandboxVenue, NewVenueOrder, RestPaperVenue, SandboxBroker,
+    SandboxConfig, VenueOrderSnapshot, VenueSessionState, VenueTradeSnapshot,
 };
+use shinrai_instruments::InstrumentId;
 use shinrai_orders::OrderId;
 
 /// Which in-process venue backs the paper engine.
@@ -19,6 +22,8 @@ pub enum VenueKind {
     Rest,
     /// Session-shaped licensed sandbox (logon / heartbeats / seq recovery).
     Licensed,
+    /// Alpaca paper Trading API (`/v2/orders`).
+    Alpaca,
 }
 
 /// Owned venue implementing [`ExecutionVenue`].
@@ -28,6 +33,7 @@ pub(crate) enum VenueHandle {
     Sandbox(SandboxBroker),
     Rest(RestPaperVenue),
     Licensed(LicensedSandboxVenue),
+    Alpaca(AlpacaPaperVenue),
 }
 
 impl VenueHandle {
@@ -56,33 +62,45 @@ impl VenueHandle {
         Self::Licensed(v)
     }
 
+    pub(crate) fn alpaca_local(symbols: HashMap<InstrumentId, String>) -> Self {
+        Self::Alpaca(AlpacaPaperVenue::local_mock(symbols))
+    }
+
+    pub(crate) fn alpaca_remote(
+        config: AlpacaConfig,
+        symbols: HashMap<InstrumentId, String>,
+    ) -> Result<Self, ExecutionError> {
+        Ok(Self::Alpaca(AlpacaPaperVenue::remote(config, symbols)?))
+    }
+
     pub(crate) const fn kind(&self) -> VenueKind {
         match self {
             Self::Sim(_) => VenueKind::Sim,
             Self::Sandbox(_) => VenueKind::Sandbox,
             Self::Rest(_) => VenueKind::Rest,
             Self::Licensed(_) => VenueKind::Licensed,
+            Self::Alpaca(_) => VenueKind::Alpaca,
         }
     }
 
     pub(crate) fn as_sim(&self) -> Option<&SimExchange> {
         match self {
             Self::Sim(s) => Some(s),
-            Self::Sandbox(_) | Self::Rest(_) | Self::Licensed(_) => None,
+            Self::Sandbox(_) | Self::Rest(_) | Self::Licensed(_) | Self::Alpaca(_) => None,
         }
     }
 
     pub(crate) fn as_sandbox_mut(&mut self) -> Option<&mut SandboxBroker> {
         match self {
             Self::Sandbox(s) => Some(s),
-            Self::Sim(_) | Self::Rest(_) | Self::Licensed(_) => None,
+            Self::Sim(_) | Self::Rest(_) | Self::Licensed(_) | Self::Alpaca(_) => None,
         }
     }
 
     pub(crate) fn as_licensed_mut(&mut self) -> Option<&mut LicensedSandboxVenue> {
         match self {
             Self::Licensed(s) => Some(s),
-            Self::Sim(_) | Self::Sandbox(_) | Self::Rest(_) => None,
+            Self::Sim(_) | Self::Sandbox(_) | Self::Rest(_) | Self::Alpaca(_) => None,
         }
     }
 
@@ -92,6 +110,7 @@ impl VenueHandle {
             Self::Sandbox(s) => ExecutionVenue::submit(s, order),
             Self::Rest(s) => ExecutionVenue::submit(s, order),
             Self::Licensed(s) => ExecutionVenue::submit(s, order),
+            Self::Alpaca(s) => ExecutionVenue::submit(s, order),
         }
     }
 
@@ -101,6 +120,7 @@ impl VenueHandle {
             Self::Sandbox(s) => ExecutionVenue::cancel(s, order_id),
             Self::Rest(s) => ExecutionVenue::cancel(s, order_id),
             Self::Licensed(s) => ExecutionVenue::cancel(s, order_id),
+            Self::Alpaca(s) => ExecutionVenue::cancel(s, order_id),
         }
     }
 
@@ -115,6 +135,7 @@ impl VenueHandle {
             Self::Sandbox(s) => ExecutionVenue::replace(s, order_id, new_qty, new_price),
             Self::Rest(s) => ExecutionVenue::replace(s, order_id, new_qty, new_price),
             Self::Licensed(s) => ExecutionVenue::replace(s, order_id, new_qty, new_price),
+            Self::Alpaca(s) => ExecutionVenue::replace(s, order_id, new_qty, new_price),
         }
     }
 
@@ -124,6 +145,7 @@ impl VenueHandle {
             Self::Sandbox(s) => ExecutionVenue::poll(s),
             Self::Rest(s) => ExecutionVenue::poll(s),
             Self::Licensed(s) => ExecutionVenue::poll(s),
+            Self::Alpaca(s) => ExecutionVenue::poll(s),
         }
     }
 
@@ -133,6 +155,7 @@ impl VenueHandle {
             Self::Sandbox(s) => ExecutionVenue::tick(s, ticks),
             Self::Rest(s) => ExecutionVenue::tick(s, ticks),
             Self::Licensed(s) => ExecutionVenue::tick(s, ticks),
+            Self::Alpaca(s) => ExecutionVenue::tick(s, ticks),
         }
     }
 
@@ -142,6 +165,7 @@ impl VenueHandle {
             Self::Sandbox(s) => ExecutionVenue::venue_order(s, order_id),
             Self::Rest(s) => ExecutionVenue::venue_order(s, order_id),
             Self::Licensed(s) => ExecutionVenue::venue_order(s, order_id),
+            Self::Alpaca(s) => ExecutionVenue::venue_order(s, order_id),
         }
     }
 
@@ -151,6 +175,7 @@ impl VenueHandle {
             Self::Sandbox(s) => ExecutionVenue::venue_orders(s),
             Self::Rest(s) => ExecutionVenue::venue_orders(s),
             Self::Licensed(s) => ExecutionVenue::venue_orders(s),
+            Self::Alpaca(s) => ExecutionVenue::venue_orders(s),
         }
     }
 
@@ -160,6 +185,7 @@ impl VenueHandle {
             Self::Sandbox(s) => ExecutionVenue::trade_execs(s),
             Self::Rest(s) => ExecutionVenue::trade_execs(s),
             Self::Licensed(s) => ExecutionVenue::trade_execs(s),
+            Self::Alpaca(s) => ExecutionVenue::trade_execs(s),
         }
     }
 
@@ -169,6 +195,7 @@ impl VenueHandle {
             Self::Sandbox(s) => ExecutionVenue::session_state(s),
             Self::Rest(s) => ExecutionVenue::session_state(s),
             Self::Licensed(s) => ExecutionVenue::session_state(s),
+            Self::Alpaca(s) => ExecutionVenue::session_state(s),
         }
     }
 
@@ -178,6 +205,7 @@ impl VenueHandle {
             Self::Sandbox(s) => ExecutionVenue::disconnect(s),
             Self::Rest(s) => ExecutionVenue::disconnect(s),
             Self::Licensed(s) => ExecutionVenue::disconnect(s),
+            Self::Alpaca(s) => ExecutionVenue::disconnect(s),
         }
     }
 
@@ -187,6 +215,7 @@ impl VenueHandle {
             Self::Sandbox(s) => ExecutionVenue::reconnect(s),
             Self::Rest(s) => ExecutionVenue::reconnect(s),
             Self::Licensed(s) => ExecutionVenue::reconnect(s),
+            Self::Alpaca(s) => ExecutionVenue::reconnect(s),
         }
     }
 
@@ -199,6 +228,7 @@ impl VenueHandle {
             Self::Sandbox(s) => ExecutionVenue::poll_recovery(s, from_seq),
             Self::Rest(s) => ExecutionVenue::poll_recovery(s, from_seq),
             Self::Licensed(s) => ExecutionVenue::poll_recovery(s, from_seq),
+            Self::Alpaca(s) => ExecutionVenue::poll_recovery(s, from_seq),
         }
     }
 
@@ -229,6 +259,14 @@ impl VenueHandle {
             Self::Licensed(s) => {
                 s.restore_working(order.id(), order.order_qty(), order.price(), cum, venue_id)
             }
+            Self::Alpaca(s) => s.restore_working(
+                order.id(),
+                order.order_qty(),
+                order.price(),
+                cum,
+                venue_id,
+                None,
+            ),
         }
     }
 }

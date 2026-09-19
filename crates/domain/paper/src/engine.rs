@@ -75,6 +75,8 @@ pub struct PaperEngine {
     applied_session: Option<SessionId>,
     /// Next expected report sequence within [`Self::applied_session`].
     next_expected_seq: u64,
+    /// Durable drop-copy of Trade execs (survives venue reconnect).
+    durable_trades: Vec<shinrai_execution::VenueTradeSnapshot>,
 }
 
 impl PaperEngine {
@@ -102,6 +104,7 @@ impl PaperEngine {
             realized_at_day_open: HashMap::new(),
             applied_session: None,
             next_expected_seq: 1,
+            durable_trades: Vec::new(),
         }
     }
 
@@ -123,6 +126,7 @@ impl PaperEngine {
             realized_at_day_open: HashMap::new(),
             applied_session: None,
             next_expected_seq: 1,
+            durable_trades: Vec::new(),
         }
     }
 
@@ -144,6 +148,7 @@ impl PaperEngine {
             realized_at_day_open: HashMap::new(),
             applied_session: None,
             next_expected_seq: 1,
+            durable_trades: Vec::new(),
         }
     }
 
@@ -173,6 +178,7 @@ impl PaperEngine {
             realized_at_day_open: HashMap::new(),
             applied_session: None,
             next_expected_seq: 1,
+            durable_trades: Vec::new(),
         })
     }
 
@@ -198,7 +204,75 @@ impl PaperEngine {
             realized_at_day_open: HashMap::new(),
             applied_session: None,
             next_expected_seq: 1,
+            durable_trades: Vec::new(),
         }
+    }
+
+    /// Creates a session backed by local Alpaca paper mock.
+    #[must_use]
+    pub fn with_alpaca(
+        master: InstrumentMaster,
+        risk: RiskEngine,
+        symbols: HashMap<InstrumentId, String>,
+    ) -> Self {
+        Self {
+            master,
+            book: PaperBook::new(),
+            orders: OrderStore::new(),
+            venue: VenueHandle::alpaca_local(symbols),
+            remaining_cash_reserve: HashMap::new(),
+            remaining_position_reserve: HashMap::new(),
+            risk,
+            audit: AuditLog::new(),
+            logical_now: 0,
+            marks: HashMap::new(),
+            risk_day_id: None,
+            realized_at_day_open: HashMap::new(),
+            applied_session: None,
+            next_expected_seq: 1,
+            durable_trades: Vec::new(),
+        }
+    }
+
+    /// Creates a session backed by remote Alpaca paper API.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport errors when the HTTP client cannot be built.
+    pub fn with_alpaca_remote(
+        master: InstrumentMaster,
+        risk: RiskEngine,
+        config: shinrai_execution::AlpacaConfig,
+        symbols: HashMap<InstrumentId, String>,
+    ) -> Result<Self, PaperError> {
+        Ok(Self {
+            master,
+            book: PaperBook::new(),
+            orders: OrderStore::new(),
+            venue: VenueHandle::alpaca_remote(config, symbols)?,
+            remaining_cash_reserve: HashMap::new(),
+            remaining_position_reserve: HashMap::new(),
+            risk,
+            audit: AuditLog::new(),
+            logical_now: 0,
+            marks: HashMap::new(),
+            risk_day_id: None,
+            realized_at_day_open: HashMap::new(),
+            applied_session: None,
+            next_expected_seq: 1,
+            durable_trades: Vec::new(),
+        })
+    }
+
+    /// Replaces this engine's state from a prior snapshot (persist-failure rollback).
+    pub fn restore_from(&mut self, snapshot: Self) {
+        *self = snapshot;
+    }
+
+    /// Durable Trade drop-copy (survives venue reconnect).
+    #[must_use]
+    pub fn durable_trade_execs(&self) -> &[shinrai_execution::VenueTradeSnapshot] {
+        &self.durable_trades
     }
 
     /// Which venue backs this engine.
@@ -454,6 +528,20 @@ impl PaperEngine {
         seed_marks_from_orders(&self.orders, &mut self.marks);
         self.risk_day_id = None;
         self.realized_at_day_open.clear();
+        self.durable_trades.clear();
+        for order in self.orders.orders() {
+            for exec in order.seen_execs() {
+                self.durable_trades
+                    .push(shinrai_execution::VenueTradeSnapshot {
+                        order_id: order.id(),
+                        exec_id: exec.clone(),
+                        qty: order.cum_qty().lots(),
+                        price: order.avg_px().unwrap_or_else(|| order.price()).scaled(),
+                        session: SessionId::new(0),
+                        seq: 0,
+                    });
+            }
+        }
         self.reinflate_working_state()?;
         Ok(())
     }
@@ -1004,6 +1092,14 @@ impl PaperEngine {
                     filled,
                 } => {
                     let order = self.orders.get(order_id)?;
+                    self.durable_trades.push(shinrai_execution::VenueTradeSnapshot {
+                        order_id,
+                        exec_id: exec_id.clone(),
+                        qty: qty.lots(),
+                        price: price.scaled(),
+                        session: self.applied_session.unwrap_or(SessionId::new(0)),
+                        seq: self.next_expected_seq,
+                    });
                     let instrument = self.master.get(order.instrument_id())?;
                     let fill_notional = notional(instrument, *price, *qty)?;
                     let fee = Money::from_minor(0, fill_notional.currency());
