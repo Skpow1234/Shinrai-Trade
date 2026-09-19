@@ -1,12 +1,13 @@
 //! Execution venue contract shared by the paper simulator and broker adapters.
 //!
 //! Reports map onto [`shinrai_orders::OrderEvent`]. Phase 4 live path is Alpaca
-//! paper REST (`AlpacaPaperVenue`); FIX remains optional for a later track.
+//! paper REST (`AlpacaPaperVenue`); local FIX 4.2 subset is [`FixPaperVenue`].
 
 #![forbid(unsafe_code)]
 
 mod alpaca;
 mod error;
+mod fix;
 mod licensed;
 mod report;
 mod rest;
@@ -19,6 +20,7 @@ pub use alpaca::{
     AlpacaPositionSnap, LocalAlpacaHttp, RemoteAlpacaHttp, ALPACA_PAPER_BASE_URL,
 };
 pub use error::ExecutionError;
+pub use fix::{decode_fix, encode_fix, FixConfig, FixPaperVenue};
 pub use licensed::{LicensedSandboxConfig, LicensedSandboxVenue, OutboundMsg, SessionPhase};
 pub use report::{stream_fingerprint, ExecType, ExecutionReport, SessionId};
 pub use rest::{
