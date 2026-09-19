@@ -441,6 +441,20 @@ impl PaperEngine {
         (self.applied_session, self.next_expected_seq)
     }
 
+    /// Restores durable Trade drop-copy after hydrate (Postgres).
+    pub fn restore_durable_trades(
+        &mut self,
+        trades: Vec<shinrai_execution::VenueTradeSnapshot>,
+    ) {
+        self.durable_trades = trades;
+    }
+
+    /// Restores consumer venue session cursor after hydrate (Postgres).
+    pub fn restore_applied_cursor(&mut self, session_n: Option<u32>, next_expected_seq: u64) {
+        self.applied_session = session_n.map(SessionId::new);
+        self.next_expected_seq = next_expected_seq.max(1);
+    }
+
     /// Disconnects the backing venue (tests / fault injection).
     pub fn disconnect_venue(&mut self) {
         self.venue.disconnect();

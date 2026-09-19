@@ -547,6 +547,9 @@ impl ExecutionVenue for AlpacaPaperVenue {
     }
 
     fn poll(&mut self) -> Vec<ExecutionReport> {
+        if !self.outbox.is_empty() {
+            return self.outbox.drain(..).collect();
+        }
         if self.connected {
             self.refresh_open_fills();
         }
@@ -668,6 +671,18 @@ impl LocalAlpacaHttp {
     pub fn happy_path() -> Self {
         Self {
             auto_fill: true,
+            fills_on_get: false,
+            next_id: 1,
+            orders: HashMap::new(),
+        }
+    }
+
+    /// Ack-only submit; fills arrive on subsequent GET (async paper path).
+    #[must_use]
+    pub fn async_fill() -> Self {
+        Self {
+            auto_fill: false,
+            fills_on_get: true,
             next_id: 1,
             orders: HashMap::new(),
         }
@@ -705,6 +720,39 @@ impl HttpTransport for LocalAlpacaHttp {
                 })
                 .to_string();
                 Ok(HttpResponse { status: 200, body })
+            }
+            (HttpMethod::Get, path) if path.starts_with("/v2/orders/") => {
+                let id = path.trim_start_matches("/v2/orders/");
+                if let Some(o) = self.orders.get_mut(id) {
+                    if self.fills_on_get && !o.canceled && o.filled < o.qty {
+                        o.filled = o.qty;
+                    }
+                    let status = if o.canceled {
+                        "canceled"
+                    } else if o.filled >= o.qty && o.qty > 0 {
+                        "filled"
+                    } else if o.filled > 0 {
+                        "partially_filled"
+                    } else {
+                        "accepted"
+                    };
+                    Ok(HttpResponse {
+                        status: 200,
+                        body: json!({
+                            "id": o.id,
+                            "status": status,
+                            "filled_qty": o.filled.to_string(),
+                            "filled_avg_price": o.limit_price,
+                            "limit_price": o.limit_price,
+                        })
+                        .to_string(),
+                    })
+                } else {
+                    Ok(HttpResponse {
+                        status: 404,
+                        body: json!({"message":"not found"}).to_string(),
+                    })
+                }
             }
             (HttpMethod::Delete, path) if path.starts_with("/v2/orders/") => {
                 let id = path.trim_start_matches("/v2/orders/");
@@ -846,6 +894,7 @@ mod tests {
         v.config.auto_fill = false;
         v.transport = AlpacaTransport::Local(LocalAlpacaHttp {
             auto_fill: false,
+            fills_on_get: false,
             next_id: 1,
             orders: HashMap::new(),
         });
@@ -857,10 +906,32 @@ mod tests {
     }
 
     #[test]
+    fn local_mock_async_fill_on_poll() {
+        let mut v = AlpacaPaperVenue::local_mock(symbols());
+        v.config.auto_fill = false;
+        v.transport = AlpacaTransport::Local(LocalAlpacaHttp::async_fill());
+        v.submit(&order(5)).expect("submit");
+        let first = v.poll();
+        assert_eq!(first.len(), 1);
+        assert!(matches!(first[0].exec_type(), ExecType::New));
+        // Second poll GETs the order and emits the async Trade.
+        let second = v.poll();
+        assert_eq!(second.len(), 1);
+        assert!(matches!(second[0].exec_type(), ExecType::Trade));
+        assert_eq!(v.venue_order(OrderId::from_u64(5)).unwrap().cum_qty, 2);
+    }
+
+    #[test]
     fn ticks_to_limit_price_format() {
         assert_eq!(
             AlpacaPaperVenue::ticks_to_limit_price(PriceTicks::from_scaled(10_000)),
             "100.00"
+        );
+        assert_eq!(
+            AlpacaPaperVenue::parse_price_to_ticks("100.00")
+                .unwrap()
+                .scaled(),
+            10_000
         );
     }
 }

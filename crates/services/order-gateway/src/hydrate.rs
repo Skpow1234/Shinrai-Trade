@@ -1,12 +1,15 @@
 //! Load durable state from `shinrai-store` into `PaperEngine`.
 
 use shinrai_audit::AuditRecord;
+use shinrai_execution::{SessionId, VenueTradeSnapshot};
 use shinrai_instruments::InstrumentId;
 use shinrai_ledger::{AccountId, BalancedEntry};
-use shinrai_orders::{Order, Side};
+use shinrai_orders::{ExecId, Order, Side};
 use shinrai_paper::PaperEngine;
 use shinrai_store::{
-    list_ledger_entries, list_orders, list_paper_positions, load_audit_after, StoreError, StorePool,
+    list_drop_copy_fills, list_ledger_entries, list_orders, list_paper_positions, load_audit_after,
+    load_venue_session_cursor, DropCopyFillSnapshot, StoreError, StorePool,
+    VenueSessionCursorSnapshot,
 };
 
 /// Loaded snapshots ready to apply under the engine lock.
@@ -15,6 +18,8 @@ pub(crate) struct HydratePayload {
     orders: Vec<Order>,
     audit: Vec<AuditRecord>,
     positions: Vec<(AccountId, InstrumentId, i64, i64)>,
+    drop_copy: Vec<DropCopyFillSnapshot>,
+    venue_cursor: VenueSessionCursorSnapshot,
     pub(crate) max_audit_seq: u64,
 }
 
@@ -61,11 +66,16 @@ pub(crate) async fn load_hydrate_payload(pool: &StorePool) -> Result<HydratePayl
     }
     let max_audit_seq = audit.iter().map(AuditRecord::seq).max().unwrap_or(0);
 
+    let drop_copy = list_drop_copy_fills(pool).await?;
+    let venue_cursor = load_venue_session_cursor(pool).await?;
+
     Ok(HydratePayload {
         ledger,
         orders,
         audit,
         positions,
+        drop_copy,
+        venue_cursor,
         max_audit_seq,
     })
 }
@@ -91,6 +101,32 @@ pub(crate) fn apply_hydrate(
             field: "hydrate",
             value: e.to_string(),
         })?;
+
+    if !payload.drop_copy.is_empty() {
+        let mut trades = Vec::with_capacity(payload.drop_copy.len());
+        for snap in payload.drop_copy {
+            let exec_id =
+                ExecId::new(snap.exec_id.clone()).map_err(|e| StoreError::InvalidStored {
+                    field: "drop_copy.exec_id",
+                    value: e.to_string(),
+                })?;
+            trades.push(VenueTradeSnapshot {
+                order_id: snap.order_id,
+                exec_id,
+                qty: snap.qty,
+                price: snap.price,
+                session: SessionId::new(snap.session_n),
+                seq: snap.seq,
+            });
+        }
+        engine.restore_durable_trades(trades);
+    }
+
+    engine.restore_applied_cursor(
+        payload.venue_cursor.applied_session_n,
+        payload.venue_cursor.next_expected_seq,
+    );
+
     Ok(max)
 }
 

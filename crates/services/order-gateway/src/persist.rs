@@ -4,8 +4,8 @@ use shinrai_audit::AuditRecord;
 use shinrai_orders::Order;
 use shinrai_paper::PaperEngine;
 use shinrai_store::{
-    persist_trading_batch, LedgerEntrySnapshot, OrderSnapshot, PaperPositionSnapshot, StoreError,
-    StorePool, TradingBatch,
+    persist_trading_batch, DropCopyFillSnapshot, LedgerEntrySnapshot, OrderSnapshot,
+    PaperPositionSnapshot, StoreError, StorePool, TradingBatch, VenueSessionCursorSnapshot,
 };
 
 /// Snapshot collected under the engine lock for async persistence.
@@ -15,9 +15,11 @@ pub(crate) struct PersistBatch {
     pub(crate) ledger: Vec<LedgerEntrySnapshot>,
     pub(crate) audit: Vec<AuditRecord>,
     pub(crate) positions: Vec<PaperPositionSnapshot>,
+    pub(crate) drop_copy: Vec<DropCopyFillSnapshot>,
+    pub(crate) venue_cursor: Option<VenueSessionCursorSnapshot>,
 }
 
-/// Collects order + full ledger journal + audit rows after `after_seq` + positions.
+/// Collects order + full ledger journal + audit rows after `after_seq` + positions + drop-copy.
 pub(crate) fn collect_batch(
     engine: &PaperEngine,
     order: Option<&Order>,
@@ -47,11 +49,30 @@ pub(crate) fn collect_batch(
             },
         )
         .collect();
+    let drop_copy = engine
+        .durable_trade_execs()
+        .iter()
+        .map(|t| DropCopyFillSnapshot {
+            order_id: t.order_id,
+            exec_id: t.exec_id.as_str().to_owned(),
+            qty: t.qty,
+            price: t.price,
+            session_n: t.session.n,
+            seq: t.seq,
+        })
+        .collect();
+    let (session, next_seq) = engine.applied_venue_cursor();
+    let venue_cursor = Some(VenueSessionCursorSnapshot {
+        applied_session_n: session.map(|s| s.n),
+        next_expected_seq: next_seq,
+    });
     PersistBatch {
         order: order.map(OrderSnapshot::from_order),
         ledger,
         audit,
         positions,
+        drop_copy,
+        venue_cursor,
     }
 }
 
@@ -66,6 +87,8 @@ pub(crate) async fn write_batch(pool: &StorePool, batch: &PersistBatch) -> Resul
         ledger: batch.ledger.clone(),
         audit: batch.audit.clone(),
         positions: batch.positions.clone(),
+        drop_copy: batch.drop_copy.clone(),
+        venue_cursor: batch.venue_cursor,
     };
     persist_trading_batch(pool, &trading).await
 }
