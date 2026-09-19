@@ -391,13 +391,9 @@ pub async fn post_eod_reconciliation(
     let mut snapshot = shinrai_paper::BrokerEodSnapshot::default();
 
     if source == "alpaca" {
-        let account_id = body.account_id.or_else(|| {
-            state
-                .accounts
-                .values()
-                .next()
-                .map(|a| a.get())
-        });
+        let account_id = body
+            .account_id
+            .or_else(|| state.accounts.values().next().map(|a| a.get()));
         let account_id = account_id.unwrap_or(1);
         let include_cash = body.include_cash.unwrap_or(false);
         let include_fills = body.include_fills.unwrap_or(false);
