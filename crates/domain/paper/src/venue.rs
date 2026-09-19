@@ -137,17 +137,6 @@ impl VenueHandle {
         }
     }
 
-    pub(crate) fn as_fix_mut(&mut self) -> Option<&mut FixPaperVenue> {
-        match self {
-            Self::Fix(s) => Some(s),
-            Self::Sim(_)
-            | Self::Sandbox(_)
-            | Self::Rest(_)
-            | Self::Licensed(_)
-            | Self::Alpaca(_) => None,
-        }
-    }
-
     pub(crate) fn submit(&mut self, order: &NewVenueOrder) -> Result<(), ExecutionError> {
         match self {
             Self::Sim(s) => ExecutionVenue::submit(s, order),
