@@ -677,5 +677,10 @@ fn sign_audit_export(payload: &Value) -> Option<String> {
     let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes()).ok()?;
     mac.update(&bytes);
     let result = mac.finalize().into_bytes();
-    Some(result.iter().map(|b| format!("{b:02x}")).collect())
+    let mut hex = String::with_capacity(result.len() * 2);
+    for b in result {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{b:02x}");
+    }
+    Some(hex)
 }
