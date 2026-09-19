@@ -227,7 +227,8 @@ Pre-trade risk runs before the OMS. Insufficient buying power returns **422** wi
 | `SHINRAI_OG_MD_URL` | MD gateway base URL for `use_live_marks=1` on portfolio |
 | `SHINRAI_OG_MD_TOKEN` | Access token when calling the MD gateway |
 | `SHINRAI_OG_STUCK_AGE_SECS` | Pending OMS age before “stuck” (default `5`) |
-| `SHINRAI_OG_VENUE` | `sim` (default), `sandbox`, `rest` / `http`, or `licensed` (logon/heartbeat session) |
+| `SHINRAI_OG_VENUE` | `sim` (default), `sandbox`, `rest` / `http`, `licensed`, or `alpaca` |
+| `SHINRAI_OG_ALPACA_KEY` / `_SECRET` / `_BASE_URL` | Alpaca paper credentials when `VENUE=alpaca` |
 | `SHINRAI_OG_OPS_TOKEN` | When set, `/v1/ops*` and `/v1/metrics` require this bearer (or `?ops_token=`) |
 | `SHINRAI_OG_OPS_ALLOWLIST` | Comma-separated IPs/CIDRs (or `*`) for ops/metrics; empty = open |
 | `SHINRAI_OG_REST_URL` | When `SHINRAI_OG_VENUE=rest`, remote paper/broker base URL (local JSON venue if unset) |
