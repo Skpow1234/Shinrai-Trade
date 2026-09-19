@@ -394,8 +394,7 @@ impl AlpacaPaperVenue {
                     .price
                     .as_deref()
                     .and_then(Self::parse_price_to_ticks)
-                    .map(|p| p.scaled())
-                    .unwrap_or(0);
+                    .map_or(0, PriceTicks::scaled);
                 Some(AlpacaFillSnap {
                     exec_id: r.id,
                     client_order_id: r.client_order_id,
