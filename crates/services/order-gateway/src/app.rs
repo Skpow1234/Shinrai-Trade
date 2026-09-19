@@ -479,6 +479,24 @@ impl AppState {
                 engine.bump_order_ids_past(max_id);
             }
         }
+        if let Ok(rows) = shinrai_store::list_approval_requests(&pool).await {
+            let restored: Vec<_> = rows
+                .into_iter()
+                .map(|r| crate::compliance::ApprovalRequest {
+                    id: r.id,
+                    account_id: r.account_id,
+                    instrument_id: r.instrument_id,
+                    symbol: r.symbol,
+                    requested_by: r.requested_by,
+                    approved_by: r.approved_by,
+                })
+                .collect();
+            let mut store = self
+                .approvals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            store.restore_from(restored);
+        }
         self.store = Some(pool);
     }
 
@@ -496,6 +514,35 @@ impl AppState {
             let mut engine = lock_engine(self);
             crate::hydrate::apply_hydrate(&mut engine, payload)?
         };
+        if let Ok(rows) = shinrai_store::list_approval_requests(&pool).await {
+            let restored: Vec<_> = rows
+                .into_iter()
+                .map(|r| crate::compliance::ApprovalRequest {
+                    id: r.id,
+                    account_id: r.account_id,
+                    instrument_id: r.instrument_id,
+                    symbol: r.symbol,
+                    requested_by: r.requested_by,
+                    approved_by: r.approved_by,
+                })
+                .collect();
+            // Re-grant risk overrides for already-approved rows.
+            {
+                let mut engine = lock_engine(self);
+                for req in &restored {
+                    if req.approved_by.is_some() {
+                        engine
+                            .risk_mut()
+                            .grant_override(req.account_id, req.instrument_id);
+                    }
+                }
+            }
+            let mut store = self
+                .approvals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            store.restore_from(restored);
+        }
         self.store = Some(pool);
         self.audit_persisted_seq.store(max_seq, Ordering::Release);
         Ok(())
@@ -896,6 +943,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/ops/approvals",
             get(crate::ops_http::get_approvals).post(crate::ops_http::post_approvals),
+        )
+        .route(
+            "/v1/ops/withdraw-audit",
+            get(crate::ops_http::get_withdraw_audit),
         )
         .route(
             "/v1/ops/audit/export",

@@ -195,6 +195,7 @@ pub async fn post_withdraw(
     let key = format!("withdraw:{key}");
 
     // Optional step-up for large paper withdrawals (admin override bearer).
+    let mut override_used = false;
     if let Some(threshold) = state.withdraw_approval_threshold_minor {
         if amount.minor_units() >= threshold {
             let override_ok = state
@@ -219,6 +220,7 @@ pub async fn post_withdraw(
                 )
                     .into_response();
             }
+            override_used = true;
         }
     }
 
@@ -244,6 +246,22 @@ pub async fn post_withdraw(
             .into_response();
     }
 
+    if let Some(pool) = state.store.as_ref() {
+        let amount_minor = i64::try_from(amount.minor_units()).unwrap_or(i64::MAX);
+        let snap = shinrai_store::WithdrawAuditSnapshot {
+            id: 0,
+            account_id: account,
+            amount_minor,
+            currency: amount.currency().code().as_str().to_owned(),
+            idempotency_key: key.clone(),
+            actor_subject: Some(claims.subject().as_str().to_owned()),
+            override_used,
+        };
+        if let Err(err) = shinrai_store::insert_withdraw_audit(pool, &snap).await {
+            eprintln!("shinrai-order-gateway: withdraw audit persist failed: {err}");
+        }
+    }
+
     let engine = lock_engine(&state);
     let available = engine.book().available(account, amount.currency());
     Json(json!({
@@ -255,6 +273,8 @@ pub async fn post_withdraw(
         "amount_minor": amount.minor_units(),
         "idempotency_key": body.idempotency_key.trim(),
         "available_minor": available.minor_units(),
+        "override_used": override_used,
+        "durable_audit": state.store.is_some(),
         "note": "Paper ledger only — not a bank payout.",
     }))
     .into_response()

@@ -640,6 +640,29 @@ pub async fn post_approvals(
                 }
             }
         };
+        if let Some(pool) = state.store.as_ref() {
+            match shinrai_store::approve_approval_request(pool, id, &actor).await {
+                Ok(_) => {}
+                Err(shinrai_store::StoreError::InvalidStored { value, .. }) => {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(json!({ "type": "error", "code": value })),
+                    )
+                        .into_response();
+                }
+                Err(err) => {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(json!({
+                            "type": "error",
+                            "code": "persist_failed",
+                            "message": err.to_string(),
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        }
         {
             let mut engine = lock_engine(&state);
             engine
@@ -654,6 +677,7 @@ pub async fn post_approvals(
             "symbol": approved.symbol,
             "requested_by": approved.requested_by,
             "approved_by": approved.approved_by,
+            "durable": state.store.is_some(),
         }))
         .into_response();
     }
@@ -673,12 +697,46 @@ pub async fn post_approvals(
             .into_response();
     };
     let account = AccountId::from_u64(body.account_id);
+
+    let durable_id = if let Some(pool) = state.store.as_ref() {
+        let snap = shinrai_store::ApprovalRequestSnapshot {
+            id: 0,
+            account_id: account,
+            instrument_id,
+            symbol: body.symbol.trim().to_owned(),
+            requested_by: actor.clone(),
+            approved_by: None,
+        };
+        match shinrai_store::insert_approval_request(pool, &snap).await {
+            Ok(id) => Some(id),
+            Err(err) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({
+                        "type": "error",
+                        "code": "persist_failed",
+                        "message": err.to_string(),
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        None
+    };
+
     let req = {
         let mut store = state
             .approvals
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        store.request(account, instrument_id, body.symbol.trim(), actor)
+        store.request_with_id(
+            durable_id,
+            account,
+            instrument_id,
+            body.symbol.trim(),
+            actor,
+        )
     };
     Json(json!({
         "ok": true,
@@ -687,6 +745,7 @@ pub async fn post_approvals(
         "account_id": req.account_id.get(),
         "symbol": req.symbol,
         "requested_by": req.requested_by,
+        "durable": durable_id.is_some(),
     }))
     .into_response()
 }
@@ -713,8 +772,52 @@ pub async fn get_approvals(
             "instrument_id": r.instrument_id.get(),
             "requested_by": r.requested_by,
         })).collect::<Vec<_>>(),
+        "durable": state.store.is_some(),
     }))
     .into_response()
+}
+
+/// `GET /v1/ops/withdraw-audit` — recent paper withdraw audit rows (Postgres when configured).
+pub async fn get_withdraw_audit(
+    headers: HeaderMap,
+    Query(query): Query<OpsAuthQuery>,
+    State(state): State<AppState>,
+) -> Response {
+    if let Err(resp) = require_ops_auth(&state, &headers, query.ops_token.as_deref(), None) {
+        return resp;
+    }
+    let Some(pool) = state.store.as_ref() else {
+        return Json(json!({
+            "durable": false,
+            "rows": [],
+            "hint": "Attach SHINRAI_DATABASE_URL for durable withdraw audit.",
+        }))
+        .into_response();
+    };
+    match shinrai_store::list_withdraw_audit(pool, 100).await {
+        Ok(rows) => Json(json!({
+            "durable": true,
+            "rows": rows.iter().map(|r| json!({
+                "id": r.id,
+                "account_id": r.account_id.get(),
+                "amount_minor": r.amount_minor,
+                "currency": r.currency,
+                "idempotency_key": r.idempotency_key,
+                "actor_subject": r.actor_subject,
+                "override_used": r.override_used,
+            })).collect::<Vec<_>>(),
+        }))
+        .into_response(),
+        Err(err) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "type": "error",
+                "code": "store_unavailable",
+                "message": err.to_string(),
+            })),
+        )
+            .into_response(),
+    }
 }
 
 /// `GET /v1/ops/audit/export` — JSON audit export for compliance.

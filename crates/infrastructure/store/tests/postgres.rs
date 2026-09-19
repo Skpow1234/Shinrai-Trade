@@ -236,6 +236,59 @@ async fn drop_copy_and_venue_cursor_round_trip() {
 }
 
 #[tokio::test]
+async fn approvals_and_withdraw_audit_round_trip() {
+    let Some(pool) = pool_or_skip().await else {
+        return;
+    };
+
+    let snap = shinrai_store::ApprovalRequestSnapshot {
+        id: 0,
+        account_id: AccountId::from_u64(42),
+        instrument_id: InstrumentId::from_u64(1),
+        symbol: "AAPL".into(),
+        requested_by: "ops-a".into(),
+        approved_by: None,
+    };
+    let id = shinrai_store::insert_approval_request(&pool, &snap)
+        .await
+        .expect("insert approval");
+    assert!(id > 0);
+    let approved = shinrai_store::approve_approval_request(&pool, id, "ops-b")
+        .await
+        .expect("approve");
+    assert_eq!(approved.approved_by.as_deref(), Some("ops-b"));
+    let listed = shinrai_store::list_approval_requests(&pool)
+        .await
+        .expect("list");
+    assert!(listed.iter().any(|r| r.id == id && r.approved_by.is_some()));
+
+    let key = format!("withdraw:test-{}", uuid_like());
+    let w = shinrai_store::WithdrawAuditSnapshot {
+        id: 0,
+        account_id: AccountId::from_u64(42),
+        amount_minor: 12_345,
+        currency: "USD".into(),
+        idempotency_key: key.clone(),
+        actor_subject: Some("trader".into()),
+        override_used: true,
+    };
+    let wid = shinrai_store::insert_withdraw_audit(&pool, &w)
+        .await
+        .expect("withdraw audit");
+    assert!(wid > 0);
+    let again = shinrai_store::insert_withdraw_audit(&pool, &w)
+        .await
+        .expect("idempotent");
+    assert_eq!(again, wid);
+    let rows = shinrai_store::list_withdraw_audit(&pool, 10)
+        .await
+        .expect("list withdraw");
+    assert!(rows
+        .iter()
+        .any(|r| r.idempotency_key == key && r.override_used));
+}
+
+#[tokio::test]
 async fn missing_url_is_explicit_error() {
     // Ensure the error type exists for callers even when URL is unset in subprocesses.
     // This test does not clear the parent env; it only documents the API.
