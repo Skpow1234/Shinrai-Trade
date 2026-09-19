@@ -1847,9 +1847,11 @@ name = "shinrai-order-gateway"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "hmac",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "shinrai-audit",
  "shinrai-exchange-simulator",
  "shinrai-execution",

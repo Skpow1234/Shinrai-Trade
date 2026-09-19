@@ -235,6 +235,9 @@ Pre-trade risk runs before the OMS. Insufficient buying power returns **422** wi
 | `SHINRAI_OG_REST_TOKEN` | Optional bearer for remote REST venue |
 | `SHINRAI_OG_STORE_FAIL_HARD` | Fail-hard on Postgres write-through (default on; `0`/`false` = fail-soft) |
 | `SHINRAI_OG_KYC_STATUS` | `subject:approved|pending|rejected,...`; empty = all approved |
+| `SHINRAI_OG_KYC_VENDOR_URL` / `_TOKEN` / `_TIMEOUT_MS` / `_CACHE_SECS` | Optional HTTP KYC vendor (fail-closed + TTL cache) |
+| `SHINRAI_OG_AUDIT_EXPORT_HMAC_KEY` | HMAC-SHA256 key for `GET /v1/ops/audit/export` signature |
+| `SHINRAI_OG_AUDIT_EXPORT_RETENTION_SECS` | Only export audit rows newer than this window |
 | `SHINRAI_OG_RESTRICTED_SYMBOLS` | Comma-separated symbols restricted at bootstrap |
 | `SHINRAI_OG_ADMIN_OVERRIDE_TOKEN` | Bearer for `X-Admin-Override` on restricted instruments |
 | `SHINRAI_OG_MD_CLIENT_CERT` / `_KEY` / `_CA` | Optional mTLS PEM paths for OG → MD quote client |

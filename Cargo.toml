@@ -86,6 +86,7 @@ opentelemetry-otlp = { version = "0.30", default-features = false, features = [
     "reqwest-client",
 ] }
 sha2 = "0.10"
+hmac = "0.12"
 uuid = { version = "1", features = ["v4"] }
 tracing-opentelemetry = "0.31"
 
