@@ -510,6 +510,19 @@ impl AppState {
         }
     }
 
+    /// Restores engine memory from a pre-mutate snapshot, then engages kill.
+    pub fn rollback_engine(&self, snapshot: PaperEngine) {
+        let mut engine = lock_engine(self);
+        engine.restore_from(snapshot);
+        engine.risk_mut().set_global_kill(true);
+    }
+
+    /// Clones the current engine (for persist-failure rollback).
+    #[must_use]
+    pub fn snapshot_engine(&self) -> PaperEngine {
+        lock_engine(self).clone()
+    }
+
     /// Shared outbox metrics handle (for background publisher).
     #[must_use]
     pub fn outbox_metrics(&self) -> Arc<crate::outbox_publisher::OutboxMetrics> {

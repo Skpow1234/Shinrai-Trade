@@ -184,13 +184,16 @@ pub async fn post_order(
         };
 
         let outcome = {
+            let snap = state.snapshot_engine();
             crate::app::sync_marks_to_engine(&state);
             let mut engine = lock_engine(&state);
             engine.set_logical_now(now);
             engine.set_correlation_id(Some(correlation.clone()));
             let _guard = info_span!("oms_venue.submit").entered();
-            engine.submit(&req)
+            let result = engine.submit(&req);
+            (snap, result)
         };
+        let (snap, outcome) = outcome;
 
         match outcome {
             Ok(SubmitOutcome::Created(order)) => {
@@ -201,6 +204,7 @@ pub async fn post_order(
                 record_fill_mark(&state, &order);
                 let persist_span = info_span!("persist.order");
                 if let Err(err) = state.must_persist(Some(&order)).instrument(persist_span).await {
+                    state.rollback_engine(snap);
                     span.record("outcome", "persist_failed");
                     return with_correlation(persist_failed(&err), &correlation);
                 }
@@ -217,6 +221,7 @@ pub async fn post_order(
                 record_fill_mark(&state, &order);
                 let persist_span = info_span!("persist.order");
                 if let Err(err) = state.must_persist(Some(&order)).instrument(persist_span).await {
+                    state.rollback_engine(snap);
                     span.record("outcome", "persist_failed");
                     return with_correlation(persist_failed(&err), &correlation);
                 }
@@ -230,6 +235,7 @@ pub async fn post_order(
                 state.metrics.record_risk_rejected_code(reason.code());
                 let persist_span = info_span!("persist.audit");
                 if let Err(err) = state.must_persist(None).instrument(persist_span).await {
+                    state.rollback_engine(snap);
                     tracing::Span::current().record("outcome", "persist_failed");
                     return with_correlation(persist_failed(&err), &correlation);
                 }
