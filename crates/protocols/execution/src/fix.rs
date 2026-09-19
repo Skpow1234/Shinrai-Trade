@@ -1,7 +1,7 @@
-//! FIX 4.2 subset venue (`ExecutionVenue`) over an in-process loopback.
+//! FIX 4.2 subset venue ([`ExecutionVenue`]) over an in-process loopback.
 //!
-//! Encodes real SOH-delimited FIX for Logon / Heartbeat / NewOrderSingle /
-//! Cancel / Replace and parses ExecutionReport (`35=8`) replies from a local
+//! Encodes real SOH-delimited FIX for Logon / Heartbeat / `NewOrderSingle` /
+//! Cancel / Replace and parses [`ExecutionReport`] (`35=8`) replies from a local
 //! acceptor backed by the same auto-fill paper model as the sandbox. Not a
 //! full FIX engine — trains the OMS on wire-shaped session traffic before a
 //! vendor TCP adapter is wired.
@@ -59,7 +59,7 @@ impl FixConfig {
         }
     }
 
-    /// Loads CompIDs / heartbeat from env (local loopback; no TCP yet).
+    /// Loads `CompID`s / heartbeat from the environment (local loopback; no TCP yet).
     #[must_use]
     pub fn from_env() -> Self {
         let mut cfg = Self::local_mock();
@@ -105,9 +105,9 @@ pub struct FixPaperVenue {
     config: FixConfig,
     connected: bool,
     session: SessionId,
-    /// Initiator outbound MsgSeqNum (tag 34).
+    /// Initiator outbound msg seq (tag 34).
     next_wire_out: u64,
-    /// Acceptor outbound MsgSeqNum (tag 34 on wire).
+    /// Acceptor outbound msg seq (tag 34 on wire).
     next_wire_in: u64,
     /// OMS execution-report sequence (independent of session admin msgs).
     next_report_seq: u64,
@@ -179,7 +179,7 @@ impl FixPaperVenue {
         &self.inbound_wire
     }
 
-    /// Session logon (`35=A`); returns initiator MsgSeqNum.
+    /// Session logon (`35=A`); returns initiator msg seq.
     ///
     /// # Errors
     ///
@@ -189,9 +189,9 @@ impl FixPaperVenue {
             return Err(ExecutionError::InvalidState("already logged on"));
         }
         self.connected = true;
-        let seq = self.emit_initiator("A", &[("98", "0"), ("108", "30")])?;
+        let seq = self.emit_initiator("A", &[("98", "0"), ("108", "30")]);
         // Acceptor Logon ack (not an ExecutionReport).
-        let _ = self.emit_acceptor("A", &[("98", "0"), ("108", "30")])?;
+        let _ = self.emit_acceptor("A", &[("98", "0"), ("108", "30")]);
         self.last_hb_tick = self.clock;
         Ok(seq)
     }
@@ -261,11 +261,7 @@ impl FixPaperVenue {
         Ok(())
     }
 
-    fn emit_initiator(
-        &mut self,
-        msg_type: &str,
-        body: &[(&str, &str)],
-    ) -> Result<u64, ExecutionError> {
+    fn emit_initiator(&mut self, msg_type: &str, body: &[(&str, &str)]) -> u64 {
         let seq = self.next_wire_out;
         self.next_wire_out = self.next_wire_out.saturating_add(1);
         let wire = encode_fix(
@@ -276,14 +272,10 @@ impl FixPaperVenue {
             body,
         );
         self.outbound_wire.push(wire);
-        Ok(seq)
+        seq
     }
 
-    fn emit_acceptor(
-        &mut self,
-        msg_type: &str,
-        body: &[(&str, &str)],
-    ) -> Result<u64, ExecutionError> {
+    fn emit_acceptor(&mut self, msg_type: &str, body: &[(&str, &str)]) -> u64 {
         let seq = self.next_wire_in;
         self.next_wire_in = self.next_wire_in.saturating_add(1);
         // Acceptor swaps CompIDs relative to initiator.
@@ -295,9 +287,10 @@ impl FixPaperVenue {
             body,
         );
         self.inbound_wire.push(wire);
-        Ok(seq)
+        seq
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn push_report_from_er(
         &mut self,
         order_id: OrderId,
@@ -321,8 +314,7 @@ impl FixPaperVenue {
             }
             ExecType::Canceled => ("4", "4"),
             ExecType::Replaced => ("5", "1"),
-            ExecType::Rejected { .. } => ("8", "8"),
-            ExecType::CancelReject { .. } => ("8", "8"),
+            ExecType::Rejected { .. } | ExecType::CancelReject { .. } => ("8", "8"),
             ExecType::Expired => ("C", "C"),
         };
         let cl_ord = order_id.get().to_string();
@@ -354,7 +346,7 @@ impl FixPaperVenue {
             fields.push(("17", exec));
         }
         let body: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        let _wire_seq = self.emit_acceptor("8", &body)?;
+        let _wire_seq = self.emit_acceptor("8", &body);
 
         // Round-trip decode for wire fidelity; report uses OMS report seq.
         let wire = self
@@ -428,7 +420,7 @@ impl ExecutionVenue for FixPaperVenue {
                 ("44", &px_s),
                 ("59", tif_s),
             ],
-        )?;
+        );
 
         if order.tif == TimeInForce::Fok && !self.config.auto_fill {
             self.push_report_from_er(
@@ -508,7 +500,7 @@ impl ExecutionVenue for FixPaperVenue {
                 ("41", &cl_ord),
                 ("37", &venue),
             ],
-        )?;
+        );
 
         if row.canceled {
             return Err(ExecutionError::InvalidState("already canceled"));
@@ -583,7 +575,7 @@ impl ExecutionVenue for FixPaperVenue {
                 ("44", &px_s),
                 ("40", "2"),
             ],
-        )?;
+        );
         if let Some(r) = self.inflight.get_mut(&order_id) {
             r.order_qty = new_qty.lots();
             r.price = new_price;
@@ -706,6 +698,7 @@ impl ExecutionVenue for FixPaperVenue {
 
 /// Encodes a FIX 4.2 message with body length and checksum.
 #[must_use]
+#[allow(clippy::format_push_string)]
 pub fn encode_fix(
     sender: &str,
     target: &str,
@@ -740,8 +733,7 @@ pub fn decode_fix(raw: &str) -> Result<BTreeMap<String, String>, &'static str> {
     }
     let without_checksum = raw
         .rsplit_once(&format!("{SOH}10="))
-        .map(|(head, _)| format!("{head}{SOH}"))
-        .unwrap_or_else(|| raw.to_string());
+        .map_or_else(|| raw.to_string(), |(head, _)| format!("{head}{SOH}"));
     if let Some((_, trail)) = raw.rsplit_once(&format!("{SOH}10=")) {
         let got = trail.trim_end_matches(SOH);
         let expect = format!("{:03}", fix_checksum(&without_checksum));
@@ -766,7 +758,7 @@ pub fn decode_fix(raw: &str) -> Result<BTreeMap<String, String>, &'static str> {
 }
 
 fn fix_checksum(prefix: &str) -> u8 {
-    prefix.bytes().fold(0_u8, |acc, b| acc.wrapping_add(b))
+    prefix.bytes().fold(0_u8, u8::wrapping_add)
 }
 
 #[cfg(test)]
