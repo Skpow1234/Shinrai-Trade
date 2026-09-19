@@ -72,6 +72,8 @@ struct Inflight {
     venue_order_id: VenueOrderId,
     order_qty: i64,
     cum_qty: i64,
+    /// Last fill qty already reported as Trade (async GET polling).
+    reported_cum: i64,
     price: PriceTicks,
     canceled: bool,
 }
@@ -177,6 +179,7 @@ impl AlpacaPaperVenue {
                 venue_order_id,
                 order_qty: order_qty.lots(),
                 cum_qty,
+                reported_cum: cum_qty,
                 price,
                 canceled: false,
             },
@@ -229,6 +232,130 @@ impl AlpacaPaperVenue {
         let whole = scaled / 100;
         let frac = scaled.rem_euclid(100);
         format!("{whole}.{frac:02}")
+    }
+
+    fn parse_price_to_ticks(raw: &str) -> Option<PriceTicks> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        let (neg, s) = raw
+            .strip_prefix('-')
+            .map_or((false, raw), |rest| (true, rest));
+        let mut parts = s.splitn(2, '.');
+        let whole: i64 = parts.next()?.parse().ok()?;
+        let frac_str = parts.next().unwrap_or("0");
+        let frac_digits = frac_str.chars().take(2).collect::<String>();
+        let frac: i64 = if frac_digits.is_empty() {
+            0
+        } else {
+            format!("{frac_digits:0<2}").parse().ok()?
+        };
+        let scaled = whole.saturating_mul(100).saturating_add(frac);
+        let scaled = if neg {
+            scaled.saturating_neg()
+        } else {
+            scaled
+        };
+        if scaled <= 0 {
+            return None;
+        }
+        Some(PriceTicks::from_scaled(scaled))
+    }
+
+    /// GETs open orders and emits Trade reports for fill deltas (async paper fills).
+    fn refresh_open_fills(&mut self) {
+        let open: Vec<(OrderId, String, i64, i64, PriceTicks)> = self
+            .inflight
+            .iter()
+            .filter(|(_, row)| !row.canceled && row.reported_cum < row.order_qty)
+            .map(|(id, row)| {
+                (
+                    *id,
+                    row.venue_order_id.as_str().to_owned(),
+                    row.order_qty,
+                    row.reported_cum,
+                    row.price,
+                )
+            })
+            .collect();
+        for (order_id, venue_id, order_qty, reported_cum, fallback_px) in open {
+            let resp = match self.transport.request(&HttpRequest {
+                method: HttpMethod::Get,
+                path: format!("/v2/orders/{venue_id}"),
+                body: String::new(),
+            }) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            if resp.status >= 400 {
+                continue;
+            }
+            let Ok(parsed) = serde_json::from_str::<AlpacaOrderJson>(&resp.body) else {
+                continue;
+            };
+            let filled: i64 = parsed
+                .filled_qty
+                .as_deref()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0)
+                .clamp(0, order_qty);
+            let status = parsed.status.to_ascii_lowercase();
+            let done = matches!(
+                status.as_str(),
+                "filled" | "partially_filled" | "canceled" | "expired" | "rejected"
+            ) || filled > reported_cum;
+            if !done && filled <= reported_cum {
+                continue;
+            }
+            let fill_px = parsed
+                .filled_avg_price
+                .as_deref()
+                .and_then(Self::parse_price_to_ticks)
+                .unwrap_or(fallback_px);
+            if filled > reported_cum {
+                let delta = filled - reported_cum;
+                let Ok(exec_id) = self.alloc_exec() else {
+                    continue;
+                };
+                let venue_order_id = VenueOrderId::new(venue_id.clone()).ok();
+                let Some(venue_order_id) = venue_order_id else {
+                    continue;
+                };
+                if let Some(row) = self.inflight.get_mut(&order_id) {
+                    row.cum_qty = filled;
+                    row.reported_cum = filled;
+                    if status == "canceled" || status == "expired" {
+                        row.canceled = true;
+                    }
+                }
+                self.push_report(
+                    order_id,
+                    venue_order_id,
+                    Some(exec_id),
+                    ExecType::Trade,
+                    QuantityLots::from_lots(delta),
+                    fill_px,
+                );
+            } else if matches!(status.as_str(), "canceled" | "expired") {
+                if let Some(row) = self.inflight.get_mut(&order_id) {
+                    if !row.canceled {
+                        row.canceled = true;
+                        let leaves = QuantityLots::from_lots(row.order_qty - row.cum_qty);
+                        let price = row.price;
+                        let venue_order_id = row.venue_order_id.clone();
+                        self.push_report(
+                            order_id,
+                            venue_order_id,
+                            None,
+                            ExecType::Canceled,
+                            leaves,
+                            price,
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -288,6 +415,7 @@ impl ExecutionVenue for AlpacaPaperVenue {
                 venue_order_id: venue_order_id.clone(),
                 order_qty: order.qty.lots(),
                 cum_qty: 0,
+                reported_cum: 0,
                 price: order.price,
                 canceled: false,
             },
@@ -309,6 +437,7 @@ impl ExecutionVenue for AlpacaPaperVenue {
             if filled > 0 {
                 if let Some(row) = self.inflight.get_mut(&order.order_id) {
                     row.cum_qty = filled.min(row.order_qty);
+                    row.reported_cum = row.cum_qty;
                 }
                 let exec_id = self.alloc_exec()?;
                 self.push_report(
@@ -418,6 +547,9 @@ impl ExecutionVenue for AlpacaPaperVenue {
     }
 
     fn poll(&mut self) -> Vec<ExecutionReport> {
+        if self.connected {
+            self.refresh_open_fills();
+        }
         self.outbox.drain(..).collect()
     }
 
@@ -504,6 +636,8 @@ struct AlpacaOrderJson {
     status: String,
     #[serde(default)]
     filled_qty: Option<String>,
+    #[serde(default)]
+    filled_avg_price: Option<String>,
     #[allow(dead_code)]
     #[serde(default)]
     limit_price: Option<String>,
@@ -513,6 +647,8 @@ struct AlpacaOrderJson {
 #[derive(Debug, Clone)]
 pub struct LocalAlpacaHttp {
     auto_fill: bool,
+    /// When true and not yet filled, GET `/v2/orders/{id}` completes the fill.
+    fills_on_get: bool,
     next_id: u64,
     orders: HashMap<String, LocalOrder>,
 }
