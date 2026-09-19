@@ -30,4 +30,5 @@ async fn ui_serves_html() {
     let html = String::from_utf8_lossy(&body);
     assert!(html.contains("paper trader"));
     assert!(html.contains("/v1/orders"));
+    assert!(html.contains("Quick start"));
 }
