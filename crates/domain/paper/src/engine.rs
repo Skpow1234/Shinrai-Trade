@@ -264,6 +264,32 @@ impl PaperEngine {
         })
     }
 
+    /// Creates a session backed by the local FIX 4.2 subset venue (auto-logon).
+    #[must_use]
+    pub fn with_fix(
+        master: InstrumentMaster,
+        config: shinrai_execution::FixConfig,
+        risk: RiskEngine,
+    ) -> Self {
+        Self {
+            master,
+            book: PaperBook::new(),
+            orders: OrderStore::new(),
+            venue: VenueHandle::fix(config),
+            remaining_cash_reserve: HashMap::new(),
+            remaining_position_reserve: HashMap::new(),
+            risk,
+            audit: AuditLog::new(),
+            logical_now: 0,
+            marks: HashMap::new(),
+            risk_day_id: None,
+            realized_at_day_open: HashMap::new(),
+            applied_session: None,
+            next_expected_seq: 1,
+            durable_trades: Vec::new(),
+        }
+    }
+
     /// Replaces this engine's state from a prior snapshot (persist-failure rollback).
     pub fn restore_from(&mut self, snapshot: Self) {
         *self = snapshot;

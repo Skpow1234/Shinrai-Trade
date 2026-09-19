@@ -187,6 +187,7 @@ pub async fn get_metrics(
                 shinrai_paper::VenueKind::Rest => "rest",
                 shinrai_paper::VenueKind::Licensed => "licensed",
                 shinrai_paper::VenueKind::Alpaca => "alpaca",
+                shinrai_paper::VenueKind::Fix => "fix",
             }),
         );
         obj.insert(

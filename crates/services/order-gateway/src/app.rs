@@ -420,6 +420,11 @@ impl AppState {
                     PaperEngine::with_alpaca(master.clone(), risk.clone(), symbols)
                 }
             }
+            VenueKind::Fix => PaperEngine::with_fix(
+                master.clone(),
+                shinrai_execution::FixConfig::from_env(),
+                risk.clone(),
+            ),
         };
 
         for (account_raw, major) in &config.deposits {
@@ -698,6 +703,20 @@ impl AppState {
         );
         cfg.venue_kind = VenueKind::Alpaca;
         cfg.alpaca_force_local = true;
+        Self::from_config(&cfg)
+    }
+
+    /// Test helper with local FIX 4.2 subset venue (no TCP / no keys).
+    #[must_use]
+    pub fn for_test_fix(token: &str, subject: &str, account: u64, deposit_major: i64) -> Self {
+        let mut cfg = GatewayConfig::new(
+            vec![(token.to_owned(), subject.to_owned())],
+            Vec::new(),
+            vec![(subject.to_owned(), account)],
+            vec![(account, deposit_major)],
+            TokenTtl::default(),
+        );
+        cfg.venue_kind = VenueKind::Fix;
         Self::from_config(&cfg)
     }
 
@@ -1160,7 +1179,8 @@ fn parse_venue_kind(raw: Option<&str>) -> VenueKind {
     match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
         Some("sandbox" | "sbx" | "broker") => VenueKind::Sandbox,
         Some("rest" | "http") => VenueKind::Rest,
-        Some("licensed" | "fix" | "broker_sandbox") => VenueKind::Licensed,
+        Some("licensed" | "broker_sandbox") => VenueKind::Licensed,
+        Some("fix" | "fix42") => VenueKind::Fix,
         Some("alpaca" | "alpaca_paper") => VenueKind::Alpaca,
         _ => VenueKind::Sim,
     }
