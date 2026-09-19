@@ -596,6 +596,11 @@ impl PaperEngine {
                     });
             }
         }
+        // Venue journals are process-local; reinflate restores working rows on a
+        // fresh outbound stream. Do not keep a prior consumer cursor or new
+        // reports (cancel/fill) are filtered as "already applied".
+        self.applied_session = None;
+        self.next_expected_seq = 1;
         self.reinflate_working_state()?;
         Ok(())
     }

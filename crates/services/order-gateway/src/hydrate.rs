@@ -8,8 +8,7 @@ use shinrai_orders::{ExecId, Order, Side};
 use shinrai_paper::PaperEngine;
 use shinrai_store::{
     list_drop_copy_fills, list_ledger_entries, list_orders, list_paper_positions, load_audit_after,
-    load_venue_session_cursor, DropCopyFillSnapshot, StoreError, StorePool,
-    VenueSessionCursorSnapshot,
+    DropCopyFillSnapshot, StoreError, StorePool,
 };
 
 /// Loaded snapshots ready to apply under the engine lock.
@@ -19,7 +18,6 @@ pub(crate) struct HydratePayload {
     audit: Vec<AuditRecord>,
     positions: Vec<(AccountId, InstrumentId, i64, i64)>,
     drop_copy: Vec<DropCopyFillSnapshot>,
-    venue_cursor: VenueSessionCursorSnapshot,
     pub(crate) max_audit_seq: u64,
 }
 
@@ -67,7 +65,9 @@ pub(crate) async fn load_hydrate_payload(pool: &StorePool) -> Result<HydratePayl
     let max_audit_seq = audit.iter().map(AuditRecord::seq).max().unwrap_or(0);
 
     let drop_copy = list_drop_copy_fills(pool).await?;
-    let venue_cursor = load_venue_session_cursor(pool).await?;
+    // Venue session cursor is persisted for ops forensics but not reapplied on
+    // hydrate: in-process venues restart a fresh outbound journal after process
+    // restart, and restoring the old consumer cursor drops cancel/fill acks.
 
     Ok(HydratePayload {
         ledger,
@@ -75,7 +75,6 @@ pub(crate) async fn load_hydrate_payload(pool: &StorePool) -> Result<HydratePayl
         audit,
         positions,
         drop_copy,
-        venue_cursor,
         max_audit_seq,
     })
 }
@@ -121,11 +120,6 @@ pub(crate) fn apply_hydrate(
         }
         engine.restore_durable_trades(trades);
     }
-
-    engine.restore_applied_cursor(
-        payload.venue_cursor.applied_session_n,
-        payload.venue_cursor.next_expected_seq,
-    );
 
     Ok(max)
 }
