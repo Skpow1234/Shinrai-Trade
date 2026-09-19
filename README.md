@@ -69,12 +69,17 @@ Shinrai-Trade/
 
 Dev Postgres for `shinrai-store` (orders, ledger, audit, transactional outbox). Domain crates stay free of Docker. With `SHINRAI_DATABASE_URL` set, the order gateway **write-through** persists to Postgres before ack and **hydrates** `PaperEngine` (including working orders) on restart. Without the URL, OG stays in-memory only.
 
+Optional NATS (`SHINRAI_NATS_URL`) turns the outbox publisher into a real event bus: rows are published to `{prefix}.{topic}` then marked published (at-least-once). Without NATS the publisher uses the log sink only.
+
 ```bash
 # Start (healthcheck: pg_isready)
 docker compose up -d postgres
+# Optional event bus
+docker compose up -d nats
 
-# Connection string (same as `.env.example`)
+# Connection strings (same as `.env.example`)
 # postgres://shinrai:shinrai@127.0.0.1:5432/shinrai
+# nats://127.0.0.1:4222
 
 docker compose ps
 docker compose down       # stop

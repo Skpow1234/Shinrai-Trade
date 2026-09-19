@@ -1,12 +1,14 @@
-# Dev backing services for Phase 3.5+ (Postgres).
-# Domain / gateway unit tests do not need this — only future durable store work.
+# Dev backing services for Phase 3.5+ (Postgres + optional NATS).
+# Domain / gateway unit tests do not need this — only durable store / bus work.
 #
 #   docker compose up -d postgres
+#   docker compose up -d postgres nats   # outbox → NATS
 #   docker compose down          # stop
 #   docker compose down -v       # stop and wipe data volume
 #
 # Connection URL (matches .env.example):
 #   postgres://shinrai:shinrai@127.0.0.1:5432/shinrai
+#   nats://127.0.0.1:4222
 
 services:
   postgres:
@@ -26,6 +28,21 @@ services:
       timeout: 5s
       retries: 15
       start_period: 5s
+    restart: unless-stopped
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: shinrai-nats
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8222/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 3s
     restart: unless-stopped
 
 volumes:
