@@ -288,8 +288,39 @@ impl GatewayConfig {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .filter(|n: &i128| *n > 0);
+        if env_truthy("SHINRAI_OG_DEV") {
+            cfg.apply_paper_dev_defaults();
+        }
         cfg
     }
+
+    /// Local paper defaults for UI smoke (`dev` / `trader` / $10k / AAPL mark).
+    ///
+    /// Only fills fields that are still empty so explicit env wins.
+    pub fn apply_paper_dev_defaults(&mut self) {
+        if self.static_tokens.is_empty() {
+            self.static_tokens = vec![("dev".into(), "trader".into())];
+        }
+        if self.clients.is_empty() {
+            self.clients = vec![("dev".into(), "s3cret".into(), "trader".into())];
+        }
+        if self.accounts.is_empty() {
+            self.accounts = vec![("trader".into(), 1)];
+        }
+        if self.deposits.is_empty() {
+            self.deposits = vec![(1, 10_000)];
+        }
+        if self.bootstrap_marks.is_empty() {
+            self.bootstrap_marks = vec![("AAPL".into(), 10_000)];
+        }
+    }
+}
+
+fn env_truthy(key: &str) -> bool {
+    matches!(
+        std::env::var(key).ok().as_deref().map(str::trim),
+        Some("1" | "true" | "TRUE" | "yes" | "YES")
+    )
 }
 
 impl core::fmt::Debug for GatewayConfig {

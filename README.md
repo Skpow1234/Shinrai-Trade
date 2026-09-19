@@ -213,14 +213,20 @@ When `SHINRAI_DATABASE_URL` is set, Postgres is **required write-through**: subm
 | `SHINRAI_OG_ACCESS_TTL` / `SHINRAI_OG_REFRESH_TTL` | Token lifetimes (same semantics as MD gateway) |
 
 ```bash
+# Easiest: paper-dev defaults + UI banner
+cargo run -p shinrai-order-gateway -- --dev
+# → open http://127.0.0.1:8081/ui  (token: dev)
+
+# Or one-liner scripts (also try to open the browser)
+./scripts/dev-ui.sh          # macOS / Linux / Git Bash
+.\scripts\dev-ui.ps1         # PowerShell
+scripts\dev-ui.cmd           # cmd.exe
+
+# Manual env (same defaults as --dev)
 SHINRAI_OG_TOKENS=dev:trader \
 SHINRAI_OG_ACCOUNTS=trader:1 \
 SHINRAI_OG_DEPOSITS=1:10000 \
 cargo run -p shinrai-order-gateway
-
-# Paper trader UI (browser)
-# open http://127.0.0.1:8081/ui
-# Sign in with static token `dev`, or configure SHINRAI_OG_CLIENTS and use client credentials.
 
 curl -s -X POST "http://127.0.0.1:8081/v1/orders?token=dev" \
   -H 'content-type: application/json' \
@@ -233,23 +239,15 @@ curl -s -X POST "http://127.0.0.1:8081/v1/orders?token=dev" \
 
 Same-origin HTML at **`http://127.0.0.1:8081/ui`** (no separate frontend build).
 
-1. Start OG with the env block above (`cargo run -p shinrai-order-gateway`).
-2. Open `/ui` in a browser.
-3. Sign in:
-   - **Static token** — paste `dev` (from `SHINRAI_OG_TOKENS=dev:trader`), or
-   - **Client credentials** — set `SHINRAI_OG_CLIENTS=dev:s3cret:trader` then use client_id `dev` / secret `s3cret` (calls `POST /v1/auth/token`).
-4. Place a limit order (qty in lots, price in scaled ticks — e.g. `10000` = $100.00), then refresh balances / orders / portfolio.
+**Quick path**
 
-The UI stores the access token in **`sessionStorage`** and sends `Authorization: Bearer …` (not `?token=`). Ops remains at `/v1/ops` (separate ops token when `SHINRAI_OG_OPS_TOKEN` is set).
+1. `cargo run -p shinrai-order-gateway -- --dev` (or `./scripts/dev-ui.sh` / `.\scripts\dev-ui.ps1`).
+2. Open `/ui` — on localhost the page auto-signs in with token `dev`.
+3. Place a limit order (qty in lots, price in scaled ticks — e.g. `10000` = $100.00).
 
-```bash
-# Optional: client credentials for the UI token form
-SHINRAI_OG_TOKENS=dev:trader \
-SHINRAI_OG_CLIENTS=dev:s3cret:trader \
-SHINRAI_OG_ACCOUNTS=trader:1 \
-SHINRAI_OG_DEPOSITS=1:10000 \
-cargo run -p shinrai-order-gateway
-```
+`--dev` / `SHINRAI_OG_DEV=1` fills empty auth/account/deposit/mark settings only; any `SHINRAI_OG_*` you set still wins. Defaults: token `dev` → subject `trader` → account `1` with $10,000 paper cash, AAPL mark at `10000`, and client `dev`/`s3cret` for the credentials form.
+
+The UI stores the access token in **`sessionStorage`** and sends `Authorization: Bearer …`. Ops remains at `/v1/ops` (separate ops token when `SHINRAI_OG_OPS_TOKEN` is set).
 
 Pre-trade risk runs before the OMS. Insufficient buying power returns **422** with `"code":"insufficient_buying_power"`. Duplicate `client_order_id` for the same account is idempotent (returns the existing order). Day P&L uses UTC-midnight anchors of average-cost realized plus mark-to-market unrealized; asset-class exposure is absolute notional of open positions in the same class (risk engine adds the new order’s notional).
 

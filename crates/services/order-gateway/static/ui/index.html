@@ -69,10 +69,12 @@
       <h2>Session</h2>
       <div class="row">
         <label>Static token
-          <input id="static-token" placeholder="dev" autocomplete="off"/>
+          <input id="static-token" value="dev" autocomplete="off"/>
         </label>
         <button type="button" class="primary" id="btn-token">Use token</button>
+        <button type="button" class="primary" id="btn-quick">Quick start</button>
       </div>
+      <p class="hint">Dev default token is <code>dev</code>. Quick start signs in and loads balances.</p>
       <p class="hint">Or client credentials (<code>SHINRAI_OG_CLIENTS</code>):</p>
       <div class="row">
         <label>client_id <input id="client-id" placeholder="dev" autocomplete="off"/></label>
@@ -223,6 +225,18 @@
     setToast("token stored", true);
   };
 
+  document.getElementById("btn-quick").onclick = async () => {
+    const t = document.getElementById("static-token").value.trim() || "dev";
+    document.getElementById("static-token").value = t;
+    setToken(t);
+    try {
+      await refreshAll();
+      setToast("signed in as " + t, true);
+    } catch (e) {
+      setToast(String(e));
+    }
+  };
+
   document.getElementById("btn-creds").onclick = async () => {
     try {
       const body = {
@@ -287,6 +301,12 @@
   };
 
   syncUi();
+
+  // Localhost convenience: if no session yet, try the prefilled demo token once.
+  if (!token() && (location.hostname === "127.0.0.1" || location.hostname === "localhost")) {
+    const t = document.getElementById("static-token").value.trim() || "dev";
+    setToken(t);
+  }
 })();
 </script>
 </body>

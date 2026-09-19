@@ -15,10 +15,24 @@ use shinrai_store::{connect_from_env, migrate, StoreError};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let args: Vec<String> = env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_help();
+        return Ok(());
+    }
+    let dev = args.iter().any(|a| a == "--dev") || env_truthy("SHINRAI_OG_DEV");
+    if dev {
+        // So GatewayConfig::from_env also sees it (and scripts can rely on either).
+        env::set_var("SHINRAI_OG_DEV", "1");
+    }
+
     let _telemetry = shinrai_telemetry::init("shinrai-order-gateway")?;
 
     let bind = env::var("SHINRAI_OG_BIND").unwrap_or_else(|_| "127.0.0.1:8081".into());
-    let config = GatewayConfig::from_env();
+    let mut config = GatewayConfig::from_env();
+    if dev {
+        config.apply_paper_dev_defaults();
+    }
     let mut state = AppState::from_config(&config);
 
     match connect_from_env().await {
@@ -65,12 +79,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let app = router(state).layer(from_fn(inject_real_ip));
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     eprintln!("shinrai-order-gateway listening on {bind}");
+    if dev {
+        print_dev_banner(&bind);
+    }
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await?;
     Ok(())
+}
+
+fn print_help() {
+    eprintln!(
+        "\
+shinrai-order-gateway — paper order HTTP gateway
+
+Usage:
+  cargo run -p shinrai-order-gateway -- [--dev] [--help]
+
+Options:
+  --dev    Paper-dev defaults (token=dev, trader@account 1, $10k, AAPL mark)
+           Same as SHINRAI_OG_DEV=1. Explicit SHINRAI_OG_* env still wins.
+  --help   Show this message
+
+Quick start (UI):
+  cargo run -p shinrai-order-gateway -- --dev
+  open http://127.0.0.1:8081/ui   # token: dev
+
+Or:  ./scripts/dev-ui.sh   /   .\\scripts\\dev-ui.ps1
+"
+    );
+}
+
+fn print_dev_banner(bind: &str) {
+    let host = if bind.starts_with("0.0.0.0:") {
+        format!("127.0.0.1:{}", bind.trim_start_matches("0.0.0.0:"))
+    } else {
+        bind.to_string()
+    };
+    eprintln!(
+        "\
+┌─────────────────────────────────────────────────────────┐
+│  Paper trader UI  http://{host}/ui
+│  Token            dev
+│  Or credentials   client_id=dev  secret=s3cret
+│  Ops dashboard    http://{host}/v1/ops
+└─────────────────────────────────────────────────────────┘"
+    );
 }
 
 async fn build_event_sink()
