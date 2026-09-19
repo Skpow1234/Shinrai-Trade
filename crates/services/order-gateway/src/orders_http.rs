@@ -167,6 +167,7 @@ pub async fn post_order(
         };
 
         let outcome = {
+            crate::app::sync_marks_to_engine(&state);
             let mut engine = lock_engine(&state);
             engine.set_logical_now(now);
             engine.set_correlation_id(Some(correlation.clone()));

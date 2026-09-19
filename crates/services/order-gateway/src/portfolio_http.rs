@@ -320,11 +320,23 @@ async fn resolve_marks(
         };
         let token = state.md_token.as_deref();
         for symbol in position_symbols {
-            if let Some(px) =
-                crate::md_client::fetch_quote(base, token, &state.master, symbol).await
+            if let Some(px) = crate::md_client::fetch_quote(
+                state.md_client.as_ref(),
+                base,
+                token,
+                &state.master,
+                symbol,
+            )
+            .await
             {
                 if let Some(id) = crate::md_client::instrument_for_symbol(&state.master, symbol) {
                     marks.insert(id, px);
+                    state
+                        .marks
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .set(id, px);
+                    lock_engine(state).set_mark(id, px);
                 }
             }
         }
