@@ -127,8 +127,10 @@ pub struct AppState {
     pub(crate) ops_allowlist: Vec<crate::ops_allowlist::AllowEntry>,
     /// Shared MD HTTP client (optional mTLS).
     pub(crate) md_client: Arc<crate::md_client::MdHttpClient>,
-    /// KYC registry (empty = all approved).
-    pub(crate) kyc: Arc<crate::compliance::KycRegistry>,
+    /// KYC gate (env map and/or HTTP vendor).
+    pub(crate) kyc: crate::compliance::KycGate,
+    /// Dual-control restricted-instrument approvals.
+    pub(crate) approvals: crate::compliance::SharedApprovals,
     /// Optional admin override bearer for restricted instruments.
     pub(crate) admin_override_token: Option<String>,
     /// When false with a store attached, persist errors are logged but not returned.
@@ -412,9 +414,8 @@ impl AppState {
                 config.ops_allowlist_raw.as_deref(),
             ),
             md_client: Arc::new(crate::md_client::MdHttpClient::from_env()),
-            kyc: Arc::new(crate::compliance::KycRegistry::from_env_str(
-                config.kyc_raw.as_deref(),
-            )),
+            kyc: crate::compliance::KycGate::from_env(config.kyc_raw.as_deref()),
+            approvals: Arc::new(Mutex::new(crate::compliance::ApprovalStore::new())),
             admin_override_token: config.admin_override_token.clone(),
             store_fail_hard: config.store_fail_hard,
             eod_snapshot: Arc::new(Mutex::new(None)),
@@ -817,7 +818,14 @@ pub fn router(state: AppState) -> Router {
             "/v1/ops/reconciliation/eod",
             post(crate::ops_http::post_eod_reconciliation),
         )
-        .route("/v1/ops/approvals", post(crate::ops_http::post_approvals))
+        .route(
+            "/v1/ops/approvals",
+            get(crate::ops_http::get_approvals).post(crate::ops_http::post_approvals),
+        )
+        .route(
+            "/v1/ops/audit/export",
+            get(crate::ops_http::get_audit_export),
+        )
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

@@ -463,9 +463,18 @@ pub async fn post_eod_reconciliation(
 pub struct ApprovalBody {
     account_id: u64,
     symbol: String,
+    /// Ops actor identity for maker/checker (header `X-Ops-Actor` also accepted).
+    #[serde(default)]
+    actor: Option<String>,
+    /// When set, completes second control for this request id.
+    #[serde(default)]
+    approve_id: Option<u64>,
 }
 
-/// `POST /v1/ops/approvals` — grant a restricted-instrument override for an account.
+/// `POST /v1/ops/approvals` — dual-control restricted-instrument override.
+///
+/// Without `approve_id`: creates a pending request (maker).
+/// With `approve_id`: checker approves (must differ from maker), then grants risk override.
 pub async fn post_approvals(
     headers: HeaderMap,
     Query(query): Query<OpsAuthQuery>,
@@ -475,6 +484,52 @@ pub async fn post_approvals(
     if let Err(resp) = require_ops_auth(&state, &headers, query.ops_token.as_deref(), None) {
         return resp;
     }
+    let actor = body
+        .actor
+        .clone()
+        .or_else(|| {
+            headers
+                .get("x-ops-actor")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "ops".into());
+
+    if let Some(id) = body.approve_id {
+        let approved = {
+            let mut store = state
+                .approvals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match store.approve(id, &actor) {
+                Ok(r) => r,
+                Err(code) => {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(json!({ "type": "error", "code": code })),
+                    )
+                        .into_response();
+                }
+            }
+        };
+        {
+            let mut engine = lock_engine(&state);
+            engine
+                .risk_mut()
+                .grant_override(approved.account_id, approved.instrument_id);
+        }
+        return Json(json!({
+            "ok": true,
+            "status": "approved",
+            "id": approved.id,
+            "account_id": approved.account_id.get(),
+            "symbol": approved.symbol,
+            "requested_by": approved.requested_by,
+            "approved_by": approved.approved_by,
+        }))
+        .into_response();
+    }
+
     let Ok(alias) = ExternalId::ticker(body.symbol.trim()) else {
         return (
             StatusCode::BAD_REQUEST,
@@ -490,15 +545,94 @@ pub async fn post_approvals(
             .into_response();
     };
     let account = AccountId::from_u64(body.account_id);
-    {
-        let mut engine = lock_engine(&state);
-        engine.risk_mut().grant_override(account, instrument_id);
-    }
+    let req = {
+        let mut store = state
+            .approvals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        store.request(account, instrument_id, body.symbol.trim(), actor)
+    };
     Json(json!({
         "ok": true,
-        "account_id": body.account_id,
-        "symbol": body.symbol.trim(),
-        "instrument_id": instrument_id.get(),
+        "status": "pending",
+        "id": req.id,
+        "account_id": req.account_id.get(),
+        "symbol": req.symbol,
+        "requested_by": req.requested_by,
+    }))
+    .into_response()
+}
+
+/// `GET /v1/ops/approvals` — list pending dual-control requests.
+pub async fn get_approvals(
+    headers: HeaderMap,
+    Query(query): Query<OpsAuthQuery>,
+    State(state): State<AppState>,
+) -> Response {
+    if let Err(resp) = require_ops_auth(&state, &headers, query.ops_token.as_deref(), None) {
+        return resp;
+    }
+    let pending = state
+        .approvals
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .pending();
+    Json(json!({
+        "pending": pending.iter().map(|r| json!({
+            "id": r.id,
+            "account_id": r.account_id.get(),
+            "symbol": r.symbol,
+            "instrument_id": r.instrument_id.get(),
+            "requested_by": r.requested_by,
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response()
+}
+
+/// `GET /v1/ops/audit/export` — JSON audit export for compliance.
+pub async fn get_audit_export(
+    headers: HeaderMap,
+    Query(query): Query<OpsAuthQuery>,
+    State(state): State<AppState>,
+) -> Response {
+    if let Err(resp) = require_ops_auth(&state, &headers, query.ops_token.as_deref(), None) {
+        return resp;
+    }
+    let engine = lock_engine(&state);
+    let records: Vec<_> = engine
+        .audit()
+        .records()
+        .map(|r| {
+            json!({
+                "seq": r.seq(),
+                "at": r.at(),
+                "kind": format!("{:?}", r.kind()),
+                "account_id": r.account_id().map(AccountId::get),
+                "order_id": r.order_id().map(|o| o.get()),
+                "correlation_id": r.correlation_id(),
+                "content_hash": r.content_hash(),
+                "previous_hash": r.prev_hash(),
+            })
+        })
+        .collect();
+    let durable: Vec<_> = engine
+        .durable_trade_execs()
+        .iter()
+        .map(|t| {
+            json!({
+                "order_id": t.order_id.get(),
+                "exec_id": t.exec_id.as_str(),
+                "qty": t.qty,
+                "price": t.price,
+                "session": t.session.n,
+                "seq": t.seq,
+            })
+        })
+        .collect();
+    Json(json!({
+        "chain_ok": engine.audit_chain_ok(),
+        "audit": records,
+        "durable_drop_copy": durable,
     }))
     .into_response()
 }

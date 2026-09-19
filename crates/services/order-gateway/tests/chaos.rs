@@ -97,6 +97,29 @@ async fn persist_failure_returns_503_and_engages_kill() {
         .expect("bytes");
     let rjson: serde_json::Value = serde_json::from_slice(&rbody).expect("json");
     assert_eq!(rjson["global_kill"], true);
+
+    // Memory rolled back: order must not appear.
+    let list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/orders?token=chaos-tok")
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("list");
+    let lbody = axum::body::to_bytes(list.into_body(), usize::MAX)
+        .await
+        .expect("bytes");
+    let ljson: serde_json::Value = serde_json::from_slice(&lbody).expect("json");
+    let orders = ljson["orders"].as_array().cloned().unwrap_or_default();
+    assert!(
+        orders
+            .iter()
+            .all(|o| o["client_order_id"] != "chaos-persist-1"),
+        "expected rollback of failed persist order: {ljson}"
+    );
 }
 
 #[tokio::test]
