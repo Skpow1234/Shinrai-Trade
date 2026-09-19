@@ -764,16 +764,18 @@ pub(crate) fn require_ops_auth(
     ops_token_query: Option<&str>,
     peer_ip: Option<std::net::IpAddr>,
 ) -> Result<(), Response> {
-    let xff = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok());
-    let client = crate::ops_allowlist::client_ip(xff, peer_ip);
-    if !crate::ops_allowlist::ip_allowed(
-        client.unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
-        &state.ops_allowlist,
-    ) {
-        // Empty allowlist → open; non-empty without a resolvable client IP fails closed.
-        if !state.ops_allowlist.is_empty() {
+    if !state.ops_allowlist.is_empty() {
+        let xff = headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok());
+        let Some(client) = crate::ops_allowlist::client_ip(xff, peer_ip) else {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(json!({ "type": "error", "code": "ops_ip_forbidden" })),
+            )
+                .into_response());
+        };
+        if !crate::ops_allowlist::ip_allowed(client, &state.ops_allowlist) {
             return Err((
                 StatusCode::FORBIDDEN,
                 Json(json!({ "type": "error", "code": "ops_ip_forbidden" })),
