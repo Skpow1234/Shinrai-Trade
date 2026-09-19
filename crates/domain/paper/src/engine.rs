@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use shinrai_audit::{AuditKind, AuditLog};
 use shinrai_exchange_simulator::FaultConfig;
 use shinrai_execution::{NewVenueOrder, SandboxConfig, SessionId, VenueSessionState};
-use shinrai_instruments::{InstrumentMaster, QuantityLots};
+use shinrai_instruments::{InstrumentId, InstrumentMaster, PriceTicks, QuantityLots};
 use shinrai_ledger::{AccountId, BalancedEntry, LedgerError, PaperBook};
 use shinrai_money::Money;
 use shinrai_orders::{
@@ -16,6 +16,9 @@ use shinrai_risk::{RiskContext, RiskDecision, RiskEngine, RiskOrderIntent};
 
 use crate::error::PaperError;
 use crate::notional::notional;
+use crate::risk_ctx::{
+    realized_pnl_all_time, seed_marks_from_orders, unrealized_pnl_minor, utc_day_id,
+};
 use crate::venue::{VenueHandle, VenueKind};
 
 /// Client request to submit a paper order.
@@ -62,6 +65,12 @@ pub struct PaperEngine {
     risk: RiskEngine,
     audit: AuditLog,
     logical_now: u64,
+    /// Last fill / mark prices for collar + MTM risk inputs.
+    marks: HashMap<InstrumentId, PriceTicks>,
+    /// UTC day id (`logical_now / 86400`) for day-P&L anchoring.
+    risk_day_id: Option<u64>,
+    /// All-time realized at the open of [`Self::risk_day_id`] per account.
+    realized_at_day_open: HashMap<AccountId, i128>,
     /// Last applied venue session (None until first report).
     applied_session: Option<SessionId>,
     /// Next expected report sequence within [`Self::applied_session`].
@@ -88,6 +97,9 @@ impl PaperEngine {
             risk,
             audit: AuditLog::new(),
             logical_now: 0,
+            marks: HashMap::new(),
+            risk_day_id: None,
+            realized_at_day_open: HashMap::new(),
             applied_session: None,
             next_expected_seq: 1,
         }
@@ -106,6 +118,9 @@ impl PaperEngine {
             risk,
             audit: AuditLog::new(),
             logical_now: 0,
+            marks: HashMap::new(),
+            risk_day_id: None,
+            realized_at_day_open: HashMap::new(),
             applied_session: None,
             next_expected_seq: 1,
         }
@@ -124,6 +139,9 @@ impl PaperEngine {
             risk,
             audit: AuditLog::new(),
             logical_now: 0,
+            marks: HashMap::new(),
+            risk_day_id: None,
+            realized_at_day_open: HashMap::new(),
             applied_session: None,
             next_expected_seq: 1,
         }
@@ -161,6 +179,66 @@ impl PaperEngine {
     #[must_use]
     pub fn audit_chain_ok(&self) -> bool {
         self.audit.verify_chain()
+    }
+
+    /// Fill / mark prices used for risk MTM and exposure.
+    #[must_use]
+    pub const fn marks(&self) -> &HashMap<InstrumentId, PriceTicks> {
+        &self.marks
+    }
+
+    /// Builds pre-trade risk context (day P&L + asset-class exposure).
+    fn build_risk_context(
+        &mut self,
+        account_id: AccountId,
+        instrument_id: InstrumentId,
+        order_notional: Money,
+        limit_price: PriceTicks,
+    ) -> Result<RiskContext, PaperError> {
+        let instrument = self.master.get(instrument_id)?;
+        let asset_class = instrument.asset_class();
+        let quote = instrument.quote_currency();
+        let day = utc_day_id(self.logical_now);
+        if self.risk_day_id != Some(day) {
+            self.risk_day_id = Some(day);
+            self.realized_at_day_open.clear();
+        }
+        let all_time = realized_pnl_all_time(account_id, &self.orders, &self.master)?;
+        let baseline = *self
+            .realized_at_day_open
+            .entry(account_id)
+            .or_insert(all_time);
+        let day_realized = all_time.saturating_sub(baseline);
+        let unrealized = unrealized_pnl_minor(
+            account_id,
+            &self.book,
+            &self.orders,
+            &self.master,
+            &self.marks,
+        )?;
+        let day_pnl_minor = day_realized.saturating_add(unrealized);
+        let exposure = crate::risk_ctx::asset_class_exposure_minor(
+            account_id,
+            &self.book,
+            &self.orders,
+            &self.master,
+            &self.marks,
+            asset_class,
+        )?;
+        let ref_price = self
+            .marks
+            .get(&instrument_id)
+            .copied()
+            .or(Some(limit_price));
+        Ok(RiskContext {
+            available_cash: self.book.available(account_id, quote),
+            position_lots: self.book.available_position(account_id, instrument_id),
+            notional: order_notional,
+            ref_price,
+            now_unix: self.logical_now,
+            day_pnl_minor,
+            asset_class_exposure_minor: exposure,
+        })
     }
 
     /// Paper book (cash / positions).
@@ -299,6 +377,10 @@ impl PaperEngine {
             self.orders.restore_order(order);
         }
         self.audit.restore(audit);
+        self.marks.clear();
+        seed_marks_from_orders(&self.orders, &mut self.marks);
+        self.risk_day_id = None;
+        self.realized_at_day_open.clear();
         self.reinflate_working_state()?;
         Ok(())
     }
@@ -416,19 +498,8 @@ impl PaperEngine {
             return Ok(SubmitOutcome::Duplicate(existing.clone()));
         }
 
-        let risk_ctx = RiskContext {
-            available_cash: self
-                .book
-                .available(req.account_id, instrument.quote_currency()),
-            position_lots: self
-                .book
-                .available_position(req.account_id, req.instrument_id),
-            notional: order_notional,
-            ref_price: Some(req.price),
-            now_unix: self.logical_now,
-            day_pnl_minor: 0,
-            asset_class_exposure_minor: 0,
-        };
+        let risk_ctx =
+            self.build_risk_context(req.account_id, req.instrument_id, order_notional, req.price)?;
         let intent = RiskOrderIntent {
             account_id: req.account_id,
             instrument_id: req.instrument_id,
@@ -887,6 +958,10 @@ impl PaperEngine {
                     }
                     if *filled {
                         self.release_remaining(order_id)?;
+                    }
+                    let inst_id = self.orders.get(order_id)?.instrument_id();
+                    if price.scaled() > 0 {
+                        self.marks.insert(inst_id, *price);
                     }
                 }
                 DomainEffect::Rejected { .. } | DomainEffect::Canceled | DomainEffect::Expired => {

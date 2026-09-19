@@ -219,7 +219,7 @@ curl -s -X POST "http://127.0.0.1:8081/v1/orders?token=dev" \
 # -d '{"client_order_id":"o2","symbol":"AAPL","side":"Buy","qty":10,"price":10000,"order_type":"Limit","tif":"IOC"}'
 ```
 
-Pre-trade risk runs before the OMS. Insufficient buying power returns **422** with `"code":"insufficient_buying_power"`. Duplicate `client_order_id` for the same account is idempotent (returns the existing order).
+Pre-trade risk runs before the OMS. Insufficient buying power returns **422** with `"code":"insufficient_buying_power"`. Duplicate `client_order_id` for the same account is idempotent (returns the existing order). Day P&L uses UTC-midnight anchors of average-cost realized plus mark-to-market unrealized; asset-class exposure is absolute notional of open positions in the same class (risk engine adds the new order’s notional).
 
 | Env | Meaning |
 |---|---|
