@@ -88,6 +88,19 @@ pub async fn post_order(
         Err(err) => return unauthorized(err),
     };
 
+    let kyc = state.kyc.status(claims.subject().as_str());
+    if !kyc.allows_trading() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "type": "error",
+                "code": "kyc_required",
+                "kyc_status": kyc.code(),
+            })),
+        )
+            .into_response();
+    }
+
     let span = info_span!(
         "order.submit",
         account_id = account.get(),
@@ -111,49 +124,53 @@ pub async fn post_order(
             )
                 .into_response();
         }
-        let correlation = headers
-            .get("x-request-id")
-            .and_then(|v| v.to_str().ok())
-            .filter(|s| !s.is_empty())
-            .map_or_else(|| format!("og-{}", uuid::Uuid::new_v4()), str::to_owned);
+        let correlation = correlation_from_headers(&headers);
         tracing::Span::current().record("correlation_id", correlation.as_str());
 
         let Ok(client_order_id) = ClientOrderId::new(body.client_order_id.trim()) else {
             tracing::Span::current().record("outcome", "invalid_client_order_id");
-            return bad_request("invalid_client_order_id");
+            return with_correlation(bad_request("invalid_client_order_id"), &correlation);
         };
         let side = match parse_side(&body.side) {
             Ok(s) => s,
             Err(code) => {
                 tracing::Span::current().record("outcome", code);
-                return bad_request(code);
+                return with_correlation(bad_request(code), &correlation);
             }
         };
         let order_type = match parse_order_type(body.order_type.as_deref()) {
             Ok(t) => t,
             Err(code) => {
                 tracing::Span::current().record("outcome", code);
-                return bad_request(code);
+                return with_correlation(bad_request(code), &correlation);
             }
         };
         let time_in_force = match parse_tif(body.tif.as_deref()) {
             Ok(t) => t,
             Err(code) => {
                 tracing::Span::current().record("outcome", code);
-                return bad_request(code);
+                return with_correlation(bad_request(code), &correlation);
             }
         };
         if body.qty <= 0 || body.price <= 0 {
             tracing::Span::current().record("outcome", "invalid_qty_or_price");
-            return bad_request("invalid_qty_or_price");
+            return with_correlation(bad_request("invalid_qty_or_price"), &correlation);
         }
         let instrument_id = match resolve_symbol(&state.master, body.symbol.trim()) {
             Ok(id) => id,
             Err(code) => {
                 tracing::Span::current().record("outcome", code);
-                return bad_request(code);
+                return with_correlation(bad_request(code), &correlation);
             }
         };
+
+        if admin_override_present(&state, &headers) {
+            let mut engine = lock_engine(&state);
+            if engine.risk().is_restricted(instrument_id) {
+                engine.risk_mut().grant_override(account, instrument_id);
+                tracing::Span::current().record("outcome", "admin_override_granted");
+            }
+        }
 
         let req = SubmitRequest {
             account_id: account,
@@ -171,6 +188,7 @@ pub async fn post_order(
             let mut engine = lock_engine(&state);
             engine.set_logical_now(now);
             engine.set_correlation_id(Some(correlation.clone()));
+            let _guard = info_span!("oms_venue.submit").entered();
             engine.submit(&req)
         };
 
@@ -181,11 +199,15 @@ pub async fn post_order(
                 span.record("outcome", "created");
                 state.metrics.record_accepted();
                 record_fill_mark(&state, &order);
-                if let Err(err) = state.must_persist(Some(&order)).await {
+                let persist_span = info_span!("persist.order");
+                if let Err(err) = state.must_persist(Some(&order)).instrument(persist_span).await {
                     span.record("outcome", "persist_failed");
-                    return persist_failed(&err);
+                    return with_correlation(persist_failed(&err), &correlation);
                 }
-                (StatusCode::OK, Json(order_json(&state, &order))).into_response()
+                with_correlation(
+                    (StatusCode::OK, Json(order_json(&state, &order))).into_response(),
+                    &correlation,
+                )
             }
             Ok(SubmitOutcome::Duplicate(order)) => {
                 let span = tracing::Span::current();
@@ -193,42 +215,53 @@ pub async fn post_order(
                 span.record("outcome", "duplicate");
                 state.metrics.record_accepted();
                 record_fill_mark(&state, &order);
-                if let Err(err) = state.must_persist(Some(&order)).await {
+                let persist_span = info_span!("persist.order");
+                if let Err(err) = state.must_persist(Some(&order)).instrument(persist_span).await {
                     span.record("outcome", "persist_failed");
-                    return persist_failed(&err);
+                    return with_correlation(persist_failed(&err), &correlation);
                 }
-                (StatusCode::OK, Json(order_json(&state, &order))).into_response()
+                with_correlation(
+                    (StatusCode::OK, Json(order_json(&state, &order))).into_response(),
+                    &correlation,
+                )
             }
             Err(PaperError::Risk(reason)) => {
                 tracing::Span::current().record("outcome", reason.code());
                 state.metrics.record_risk_rejected_code(reason.code());
-                if let Err(err) = state.must_persist(None).await {
+                let persist_span = info_span!("persist.audit");
+                if let Err(err) = state.must_persist(None).instrument(persist_span).await {
                     tracing::Span::current().record("outcome", "persist_failed");
-                    return persist_failed(&err);
+                    return with_correlation(persist_failed(&err), &correlation);
                 }
-                risk_rejected(reason.code())
+                with_correlation(risk_rejected(reason.code()), &correlation)
             }
             Err(PaperError::Instrument(_) | PaperError::Order(_)) => {
                 tracing::Span::current().record("outcome", "invalid_order");
-                bad_request("invalid_order")
+                with_correlation(bad_request("invalid_order"), &correlation)
             }
             Err(PaperError::Ledger(_)) => {
                 tracing::Span::current().record("outcome", "ledger_error");
-                (
-                    StatusCode::CONFLICT,
-                    Json(json!({ "type": "error", "code": "ledger_error" })),
+                with_correlation(
+                    (
+                        StatusCode::CONFLICT,
+                        Json(json!({ "type": "error", "code": "ledger_error" })),
+                    )
+                        .into_response(),
+                    &correlation,
                 )
-                    .into_response()
             }
             Err(other) => {
                 tracing::Span::current().record("outcome", "internal");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(
-                        json!({ "type": "error", "code": "internal", "detail": other.to_string() }),
-                    ),
+                with_correlation(
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(
+                            json!({ "type": "error", "code": "internal", "detail": other.to_string() }),
+                        ),
+                    )
+                        .into_response(),
+                    &correlation,
                 )
-                    .into_response()
             }
         }
     }
@@ -308,22 +341,29 @@ pub async fn post_cancel(
         "order.cancel",
         account_id = account.get(),
         order_id = id,
+        correlation_id = tracing::field::Empty,
         outcome = tracing::field::Empty,
     );
 
     async move {
+        let correlation = correlation_from_headers(&headers);
+        tracing::Span::current().record("correlation_id", correlation.as_str());
         let order_id = OrderId::from_u64(id);
         let canceled = {
             let mut engine = lock_engine(&state);
+            engine.set_correlation_id(Some(correlation.clone()));
             let existing = match engine.orders().get(order_id) {
                 Ok(o) if o.account_id() == account => o.clone(),
                 Ok(_) | Err(_) => {
                     tracing::Span::current().record("outcome", "not_found");
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(json!({ "type": "error", "code": "not_found" })),
-                    )
-                        .into_response();
+                    return with_correlation(
+                        (
+                            StatusCode::NOT_FOUND,
+                            Json(json!({ "type": "error", "code": "not_found" })),
+                        )
+                            .into_response(),
+                        &correlation,
+                    );
                 }
             };
             match engine.cancel(order_id) {
@@ -331,27 +371,35 @@ pub async fn post_cancel(
                 Err(PaperError::Order(_)) => existing,
                 Err(other) => {
                     tracing::Span::current().record("outcome", "cancel_failed");
-                    return (
-                        StatusCode::CONFLICT,
-                        Json(json!({ "type": "error", "code": "cancel_failed", "detail": other.to_string() })),
-                    )
-                        .into_response();
+                    return with_correlation(
+                        (
+                            StatusCode::CONFLICT,
+                            Json(json!({ "type": "error", "code": "cancel_failed", "detail": other.to_string() })),
+                        )
+                            .into_response(),
+                        &correlation,
+                    );
                 }
             }
         };
         tracing::Span::current().record("outcome", "canceled");
         state.metrics.record_canceled();
-        if let Err(err) = state.must_persist(Some(&canceled)).await {
+        let persist_span = info_span!("persist.order");
+        if let Err(err) = state.must_persist(Some(&canceled)).instrument(persist_span).await {
             tracing::Span::current().record("outcome", "persist_failed");
-            return persist_failed(&err);
+            return with_correlation(persist_failed(&err), &correlation);
         }
-        (StatusCode::OK, Json(order_json(&state, &canceled))).into_response()
+        with_correlation(
+            (StatusCode::OK, Json(order_json(&state, &canceled))).into_response(),
+            &correlation,
+        )
     }
     .instrument(span)
     .await
 }
 
 /// `POST /v1/orders/:id/replace` — replace qty/price on a working limit order.
+#[allow(clippy::too_many_lines)]
 pub async fn post_replace(
     Path(id): Path<u64>,
     headers: HeaderMap,
@@ -381,27 +429,34 @@ pub async fn post_replace(
         order_id = id,
         qty = body.qty,
         price = body.price,
+        correlation_id = tracing::field::Empty,
         outcome = tracing::field::Empty,
     );
 
     async move {
+        let correlation = correlation_from_headers(&headers);
+        tracing::Span::current().record("correlation_id", correlation.as_str());
         if body.qty <= 0 || body.price <= 0 {
             tracing::Span::current().record("outcome", "invalid_qty_or_price");
-            return bad_request("invalid_qty_or_price");
+            return with_correlation(bad_request("invalid_qty_or_price"), &correlation);
         }
         let order_id = OrderId::from_u64(id);
         let replaced = {
             let mut engine = lock_engine(&state);
             engine.set_logical_now(now);
+            engine.set_correlation_id(Some(correlation.clone()));
             let existing = match engine.orders().get(order_id) {
                 Ok(o) if o.account_id() == account => o.clone(),
                 Ok(_) | Err(_) => {
                     tracing::Span::current().record("outcome", "not_found");
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(json!({ "type": "error", "code": "not_found" })),
-                    )
-                        .into_response();
+                    return with_correlation(
+                        (
+                            StatusCode::NOT_FOUND,
+                            Json(json!({ "type": "error", "code": "not_found" })),
+                        )
+                            .into_response(),
+                        &correlation,
+                    );
                 }
             };
             match engine.replace(&ReplaceRequest {
@@ -412,49 +467,66 @@ pub async fn post_replace(
                 Ok(o) => o,
                 Err(PaperError::Order(_)) => {
                     tracing::Span::current().record("outcome", "replace_rejected");
-                    return (
-                        StatusCode::CONFLICT,
-                        Json(json!({
-                            "type": "error",
-                            "code": "replace_rejected",
-                            "detail": format!("status={}", existing.status())
-                        })),
-                    )
-                        .into_response();
+                    return with_correlation(
+                        (
+                            StatusCode::CONFLICT,
+                            Json(json!({
+                                "type": "error",
+                                "code": "replace_rejected",
+                                "detail": format!("status={}", existing.status())
+                            })),
+                        )
+                            .into_response(),
+                        &correlation,
+                    );
                 }
                 Err(PaperError::Ledger(_)) => {
                     tracing::Span::current().record("outcome", "ledger_error");
-                    return (
-                        StatusCode::CONFLICT,
-                        Json(json!({ "type": "error", "code": "ledger_error" })),
-                    )
-                        .into_response();
+                    return with_correlation(
+                        (
+                            StatusCode::CONFLICT,
+                            Json(json!({ "type": "error", "code": "ledger_error" })),
+                        )
+                            .into_response(),
+                        &correlation,
+                    );
                 }
                 Err(PaperError::Instrument(_)) => {
                     tracing::Span::current().record("outcome", "invalid_order");
-                    return bad_request("invalid_order");
+                    return with_correlation(bad_request("invalid_order"), &correlation);
                 }
                 Err(other) => {
                     tracing::Span::current().record("outcome", "replace_failed");
-                    return (
-                        StatusCode::CONFLICT,
-                        Json(json!({
-                            "type": "error",
-                            "code": "replace_failed",
-                            "detail": other.to_string()
-                        })),
-                    )
-                        .into_response();
+                    return with_correlation(
+                        (
+                            StatusCode::CONFLICT,
+                            Json(json!({
+                                "type": "error",
+                                "code": "replace_failed",
+                                "detail": other.to_string()
+                            })),
+                        )
+                            .into_response(),
+                        &correlation,
+                    );
                 }
             }
         };
         tracing::Span::current().record("outcome", "replaced");
         record_fill_mark(&state, &replaced);
-        if let Err(err) = state.must_persist(Some(&replaced)).await {
+        let persist_span = info_span!("persist.order");
+        if let Err(err) = state
+            .must_persist(Some(&replaced))
+            .instrument(persist_span)
+            .await
+        {
             tracing::Span::current().record("outcome", "persist_failed");
-            return persist_failed(&err);
+            return with_correlation(persist_failed(&err), &correlation);
         }
-        (StatusCode::OK, Json(order_json(&state, &replaced))).into_response()
+        with_correlation(
+            (StatusCode::OK, Json(order_json(&state, &replaced))).into_response(),
+            &correlation,
+        )
     }
     .instrument(span)
     .await
@@ -553,6 +625,31 @@ fn persist_failed(err: &shinrai_store::StoreError) -> Response {
         })),
     )
         .into_response()
+}
+
+fn correlation_from_headers(headers: &HeaderMap) -> String {
+    headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map_or_else(|| format!("og-{}", uuid::Uuid::new_v4()), str::to_owned)
+}
+
+fn with_correlation(mut resp: Response, correlation: &str) -> Response {
+    if let Ok(val) = axum::http::HeaderValue::from_str(correlation) {
+        resp.headers_mut().insert("x-request-id", val);
+    }
+    resp
+}
+
+fn admin_override_present(state: &AppState, headers: &HeaderMap) -> bool {
+    let Some(expected) = state.admin_override_token.as_deref() else {
+        return false;
+    };
+    headers
+        .get("x-admin-override")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|got| got == expected)
 }
 
 #[cfg(test)]

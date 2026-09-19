@@ -327,3 +327,178 @@ setInterval(refresh, 2000);
     )
         .into_response()
 }
+
+#[derive(Debug, Deserialize)]
+pub struct EodCashRow {
+    account_id: u64,
+    currency: String,
+    minor_units: i128,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EodPositionRow {
+    account_id: u64,
+    symbol: String,
+    lots: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EodFillRow {
+    order_id: u64,
+    exec_id: String,
+    qty: i64,
+    price_ticks: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EodBody {
+    cash: Option<Vec<EodCashRow>>,
+    positions: Option<Vec<EodPositionRow>>,
+    fills: Option<Vec<EodFillRow>>,
+}
+
+/// `POST /v1/ops/reconciliation/eod` — compare internal state to a broker EOD snapshot.
+pub async fn post_eod_reconciliation(
+    headers: HeaderMap,
+    Query(query): Query<OpsAuthQuery>,
+    State(state): State<AppState>,
+    Json(body): Json<EodBody>,
+) -> Response {
+    if let Err(resp) = require_ops_auth(&state, &headers, query.ops_token.as_deref(), None) {
+        return resp;
+    }
+
+    let mut snapshot = shinrai_paper::BrokerEodSnapshot::default();
+    for row in body.cash.unwrap_or_default() {
+        let currency = match row.currency.trim().to_ascii_uppercase().as_str() {
+            "USD" => shinrai_money::Currency::usd(),
+            "EUR" => shinrai_money::Currency::eur(),
+            "JPY" => shinrai_money::Currency::jpy(),
+            "GBP" => shinrai_money::Currency::gbp(),
+            other => {
+                let Ok(code) = shinrai_money::CurrencyCode::new(other) else {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "type": "error", "code": "invalid_currency" })),
+                    )
+                        .into_response();
+                };
+                match shinrai_money::Currency::from_code(code, 2) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({ "type": "error", "code": "invalid_currency" })),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+        };
+        snapshot.cash.push(shinrai_paper::BrokerEodCash {
+            account_id: AccountId::from_u64(row.account_id),
+            currency,
+            minor_units: row.minor_units,
+        });
+    }
+    for row in body.positions.unwrap_or_default() {
+        let Ok(alias) = ExternalId::ticker(row.symbol.trim()) else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "type": "error", "code": "invalid_symbol" })),
+            )
+                .into_response();
+        };
+        let Ok(instrument_id) = state.master.resolve_alias(&alias) else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "type": "error", "code": "unknown_symbol" })),
+            )
+                .into_response();
+        };
+        snapshot.positions.push(shinrai_paper::BrokerEodPosition {
+            account_id: AccountId::from_u64(row.account_id),
+            instrument_id,
+            lots: row.lots,
+        });
+    }
+    for row in body.fills.unwrap_or_default() {
+        let Ok(exec_id) = shinrai_orders::ExecId::new(row.exec_id.trim()) else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "type": "error", "code": "invalid_exec_id" })),
+            )
+                .into_response();
+        };
+        snapshot.fills.push(shinrai_paper::BrokerEodFill {
+            order_id: shinrai_orders::OrderId::from_u64(row.order_id),
+            exec_id,
+            qty: row.qty,
+            price_ticks: row.price_ticks,
+        });
+    }
+
+    {
+        let mut guard = state
+            .eod_snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = Some(snapshot.clone());
+    }
+
+    let engine = lock_engine(&state);
+    let report = engine.reconcile_eod(&snapshot);
+    Json(json!({
+        "ok": report.ok,
+        "mismatches": report.mismatches.iter().map(|m| json!({
+            "kind": m.kind.code(),
+            "order_id": m.order_id.get(),
+            "detail": m.detail,
+        })).collect::<Vec<_>>(),
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApprovalBody {
+    account_id: u64,
+    symbol: String,
+}
+
+/// `POST /v1/ops/approvals` — grant a restricted-instrument override for an account.
+pub async fn post_approvals(
+    headers: HeaderMap,
+    Query(query): Query<OpsAuthQuery>,
+    State(state): State<AppState>,
+    Json(body): Json<ApprovalBody>,
+) -> Response {
+    if let Err(resp) = require_ops_auth(&state, &headers, query.ops_token.as_deref(), None) {
+        return resp;
+    }
+    let Ok(alias) = ExternalId::ticker(body.symbol.trim()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "type": "error", "code": "invalid_symbol" })),
+        )
+            .into_response();
+    };
+    let Ok(instrument_id) = state.master.resolve_alias(&alias) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "type": "error", "code": "unknown_symbol" })),
+        )
+            .into_response();
+    };
+    let account = AccountId::from_u64(body.account_id);
+    {
+        let mut engine = lock_engine(&state);
+        engine.risk_mut().grant_override(account, instrument_id);
+    }
+    Json(json!({
+        "ok": true,
+        "account_id": body.account_id,
+        "symbol": body.symbol.trim(),
+        "instrument_id": instrument_id.get(),
+    }))
+    .into_response()
+}

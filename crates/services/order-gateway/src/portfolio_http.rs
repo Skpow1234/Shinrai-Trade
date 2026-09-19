@@ -185,6 +185,7 @@ pub async fn get_metrics(
                 shinrai_paper::VenueKind::Sim => "sim",
                 shinrai_paper::VenueKind::Sandbox => "sandbox",
                 shinrai_paper::VenueKind::Rest => "rest",
+                shinrai_paper::VenueKind::Licensed => "licensed",
             }),
         );
         obj.insert(
