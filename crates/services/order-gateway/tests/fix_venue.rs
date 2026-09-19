@@ -32,10 +32,11 @@ async fn fix_local_submit_fills() {
         )
         .await
         .expect("resp");
-    assert_eq!(resp.status(), StatusCode::OK);
+    let status = resp.status();
     let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .expect("bytes");
+    assert_eq!(status, StatusCode::OK);
     let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
     assert_eq!(json["status"], "Filled");
     assert_eq!(json["cum_qty"], 2);

@@ -106,9 +106,11 @@ pub struct FixPaperVenue {
     connected: bool,
     session: SessionId,
     /// Initiator outbound MsgSeqNum (tag 34).
-    next_out_seq: u64,
-    /// Acceptor outbound MsgSeqNum (tag 34 on ERs / heartbeats).
-    next_in_seq: u64,
+    next_wire_out: u64,
+    /// Acceptor outbound MsgSeqNum (tag 34 on wire).
+    next_wire_in: u64,
+    /// OMS execution-report sequence (independent of session admin msgs).
+    next_report_seq: u64,
     next_venue: u64,
     next_exec: u64,
     clock: u64,
@@ -144,8 +146,9 @@ impl FixPaperVenue {
             config,
             connected: false,
             session: SessionId::new(1),
-            next_out_seq: 1,
-            next_in_seq: 1,
+            next_wire_out: 1,
+            next_wire_in: 1,
+            next_report_seq: 1,
             next_venue: 1,
             next_exec: 1,
             clock: 0,
@@ -263,8 +266,8 @@ impl FixPaperVenue {
         msg_type: &str,
         body: &[(&str, &str)],
     ) -> Result<u64, ExecutionError> {
-        let seq = self.next_out_seq;
-        self.next_out_seq = self.next_out_seq.saturating_add(1);
+        let seq = self.next_wire_out;
+        self.next_wire_out = self.next_wire_out.saturating_add(1);
         let wire = encode_fix(
             &self.config.sender_comp_id,
             &self.config.target_comp_id,
@@ -281,8 +284,8 @@ impl FixPaperVenue {
         msg_type: &str,
         body: &[(&str, &str)],
     ) -> Result<u64, ExecutionError> {
-        let seq = self.next_in_seq;
-        self.next_in_seq = self.next_in_seq.saturating_add(1);
+        let seq = self.next_wire_in;
+        self.next_wire_in = self.next_wire_in.saturating_add(1);
         // Acceptor swaps CompIDs relative to initiator.
         let wire = encode_fix(
             &self.config.target_comp_id,
@@ -351,15 +354,17 @@ impl FixPaperVenue {
             fields.push(("17", exec));
         }
         let body: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        let acceptor_seq = self.emit_acceptor("8", &body)?;
+        let _wire_seq = self.emit_acceptor("8", &body)?;
 
-        // Round-trip decode for wire fidelity; report uses typed exec_type.
+        // Round-trip decode for wire fidelity; report uses OMS report seq.
         let wire = self
             .inbound_wire
             .last()
             .cloned()
             .ok_or(ExecutionError::InvalidState("missing ER wire"))?;
         let _parsed = decode_fix(&wire).map_err(ExecutionError::InvalidState)?;
+        let report_seq = self.next_report_seq;
+        self.next_report_seq = self.next_report_seq.saturating_add(1);
         let report = ExecutionReport::new(
             order_id,
             venue_order_id,
@@ -368,7 +373,7 @@ impl FixPaperVenue {
             qty,
             price,
             self.session,
-            acceptor_seq,
+            report_seq,
         );
         self.history.push(report.clone());
         self.outbox.push_back(report);
@@ -661,9 +666,9 @@ impl ExecutionVenue for FixPaperVenue {
 
     fn session_state(&self) -> VenueSessionState {
         if self.connected {
-            VenueSessionState::connected(self.session, self.next_in_seq)
+            VenueSessionState::connected(self.session, self.next_report_seq)
         } else {
-            VenueSessionState::disconnected(self.session, self.next_in_seq)
+            VenueSessionState::disconnected(self.session, self.next_report_seq)
         }
     }
 
@@ -674,8 +679,9 @@ impl ExecutionVenue for FixPaperVenue {
     fn reconnect(&mut self) {
         self.connected = true;
         self.session = SessionId::new(self.session.n.saturating_add(1));
-        self.next_out_seq = 1;
-        self.next_in_seq = 1;
+        self.next_wire_out = 1;
+        self.next_wire_in = 1;
+        self.next_report_seq = 1;
         self.history.clear();
         self.outbox.clear();
         self.outbound_wire.clear();
@@ -850,7 +856,7 @@ mod tests {
         assert!(v.venue_order(OrderId::from_u64(1)).is_some());
         v.reconnect();
         assert_eq!(v.session_state().session.n, 2);
-        assert_eq!(v.session_state().next_seq, 2); // after logon ack
+        assert_eq!(v.session_state().next_seq, 1);
         assert!(v.venue_order(OrderId::from_u64(1)).is_some());
         let recovered = v.poll_recovery(1).expect("recovery");
         assert!(recovered.is_empty()); // history cleared on reconnect
