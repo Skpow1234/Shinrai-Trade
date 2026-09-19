@@ -229,6 +229,10 @@ Pre-trade risk runs before the OMS. Insufficient buying power returns **422** wi
 | `SHINRAI_OG_STUCK_AGE_SECS` | Pending OMS age before “stuck” (default `5`) |
 | `SHINRAI_OG_VENUE` | `sim` (default), `sandbox` (in-process broker), or `rest` / `http` (JSON REST paper venue) |
 | `SHINRAI_OG_OPS_TOKEN` | When set, `/v1/ops*` and `/v1/metrics` require this bearer (or `?ops_token=`) |
+| `SHINRAI_OG_OPS_ALLOWLIST` | Comma-separated IPs/CIDRs (or `*`) for ops/metrics; empty = open |
+| `SHINRAI_OG_REST_URL` | When `SHINRAI_OG_VENUE=rest`, remote paper/broker base URL (local JSON venue if unset) |
+| `SHINRAI_OG_REST_TOKEN` | Optional bearer for remote REST venue |
+| `SHINRAI_OG_MD_CLIENT_CERT` / `_KEY` / `_CA` | Optional mTLS PEM paths for OG → MD quote client |
 | `SHINRAI_RISK_COLLAR_BPS` | Price collar vs fill/mark (0 = off) |
 | `SHINRAI_RISK_MAX_DAILY_LOSS_MINOR` | Day loss limit in quote minor units (0 = off) |
 | `SHINRAI_RISK_MAX_ASSET_CLASS_NOTIONAL_MINOR` | Cap on same-asset-class exposure + new order (0 = off) |
