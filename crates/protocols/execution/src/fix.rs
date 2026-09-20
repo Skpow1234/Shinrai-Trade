@@ -493,14 +493,7 @@ impl ExecutionVenue for FixPaperVenue {
         let cl_ord = order_id.get().to_string();
         let cxl_id = format!("cxl-{cl_ord}");
         let venue = row.venue_order_id.as_str().to_string();
-        let _ = self.emit_initiator(
-            "F",
-            &[
-                ("11", &cxl_id),
-                ("41", &cl_ord),
-                ("37", &venue),
-            ],
-        );
+        let _ = self.emit_initiator("F", &[("11", &cxl_id), ("41", &cl_ord), ("37", &venue)]);
 
         if row.canceled {
             return Err(ExecutionError::InvalidState("already canceled"));
@@ -606,11 +599,7 @@ impl ExecutionVenue for FixPaperVenue {
         if !self.connected || self.config.heartbeat_interval_ticks == 0 {
             return;
         }
-        if self
-            .clock
-            .saturating_sub(self.last_hb_tick)
-            >= self.config.heartbeat_interval_ticks
-        {
+        if self.clock.saturating_sub(self.last_hb_tick) >= self.config.heartbeat_interval_ticks {
             let _ = self.emit_initiator("0", &[]);
             let _ = self.emit_acceptor("0", &[]);
             self.last_hb_tick = self.clock;
@@ -781,10 +770,7 @@ mod tests {
     #[test]
     fn submit_emits_fix_new_and_fill() {
         let mut v = FixPaperVenue::local_mock();
-        assert!(v
-            .outbound_wire()
-            .iter()
-            .any(|m| m.contains("35=A")));
+        assert!(v.outbound_wire().iter().any(|m| m.contains("35=A")));
         v.submit(&NewVenueOrder {
             order_id: OrderId::from_u64(7),
             instrument_id: InstrumentId::from_u64(1),
@@ -824,11 +810,10 @@ mod tests {
         let _ = v.poll();
         v.cancel(OrderId::from_u64(3)).expect("cxl");
         let reports = v.poll();
-        assert!(reports.iter().any(|r| matches!(r.exec_type(), ExecType::Canceled)));
-        assert!(v
-            .outbound_wire()
+        assert!(reports
             .iter()
-            .any(|m| m.contains("35=F")));
+            .any(|r| matches!(r.exec_type(), ExecType::Canceled)));
+        assert!(v.outbound_wire().iter().any(|m| m.contains("35=F")));
     }
 
     #[test]

@@ -129,16 +129,16 @@ fn print_dev_banner(bind: &str) {
     );
 }
 
-async fn build_event_sink()
--> Result<Arc<dyn EventSink>, Box<dyn std::error::Error + Send + Sync>> {
+async fn build_event_sink() -> Result<Arc<dyn EventSink>, Box<dyn std::error::Error + Send + Sync>>
+{
     let url = env::var("SHINRAI_NATS_URL")
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     match url {
         Some(url) => {
-            let prefix = env::var("SHINRAI_NATS_SUBJECT_PREFIX")
-                .unwrap_or_else(|_| "shinrai".into());
+            let prefix =
+                env::var("SHINRAI_NATS_SUBJECT_PREFIX").unwrap_or_else(|_| "shinrai".into());
             let sink = connect_nats(&url, prefix).await?;
             Ok(Arc::new(sink) as Arc<dyn EventSink>)
         }

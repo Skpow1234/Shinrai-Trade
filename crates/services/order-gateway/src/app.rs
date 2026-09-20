@@ -1273,7 +1273,13 @@ mod tests {
 
     #[test]
     fn paper_dev_defaults_fill_empty_only() {
-        let mut cfg = GatewayConfig::new(Vec::new(), Vec::new(), Vec::new(), Vec::new(), TokenTtl::default());
+        let mut cfg = GatewayConfig::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            TokenTtl::default(),
+        );
         cfg.apply_paper_dev_defaults();
         assert_eq!(cfg.static_tokens, vec![("dev".into(), "trader".into())]);
         assert_eq!(cfg.accounts, vec![("trader".into(), 1)]);

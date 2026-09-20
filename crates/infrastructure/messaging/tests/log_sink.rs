@@ -1,7 +1,7 @@
 //! Log sink unit smoke.
 
-use shinrai_messaging::{EventEnvelope, EventSink, LogSink, SinkKind};
 use serde_json::json;
+use shinrai_messaging::{EventEnvelope, EventSink, LogSink, SinkKind};
 
 #[tokio::test]
 async fn log_sink_publishes_ok() {

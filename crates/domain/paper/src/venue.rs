@@ -107,33 +107,27 @@ impl VenueHandle {
     pub(crate) fn as_sandbox_mut(&mut self) -> Option<&mut SandboxBroker> {
         match self {
             Self::Sandbox(s) => Some(s),
-            Self::Sim(_)
-            | Self::Rest(_)
-            | Self::Licensed(_)
-            | Self::Alpaca(_)
-            | Self::Fix(_) => None,
+            Self::Sim(_) | Self::Rest(_) | Self::Licensed(_) | Self::Alpaca(_) | Self::Fix(_) => {
+                None
+            }
         }
     }
 
     pub(crate) fn as_alpaca_mut(&mut self) -> Option<&mut AlpacaPaperVenue> {
         match self {
             Self::Alpaca(s) => Some(s),
-            Self::Sim(_)
-            | Self::Sandbox(_)
-            | Self::Rest(_)
-            | Self::Licensed(_)
-            | Self::Fix(_) => None,
+            Self::Sim(_) | Self::Sandbox(_) | Self::Rest(_) | Self::Licensed(_) | Self::Fix(_) => {
+                None
+            }
         }
     }
 
     pub(crate) fn as_licensed_mut(&mut self) -> Option<&mut LicensedSandboxVenue> {
         match self {
             Self::Licensed(s) => Some(s),
-            Self::Sim(_)
-            | Self::Sandbox(_)
-            | Self::Rest(_)
-            | Self::Alpaca(_)
-            | Self::Fix(_) => None,
+            Self::Sim(_) | Self::Sandbox(_) | Self::Rest(_) | Self::Alpaca(_) | Self::Fix(_) => {
+                None
+            }
         }
     }
 
