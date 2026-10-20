@@ -434,7 +434,7 @@ Total: **800** milestones.
 - **M-0344**: IPv6 CIDR support in ops allowlist
 - **M-0345**: Fail-closed allowlist when token set
 - **M-0346**: KYC empty map fail-closed in production
-- **M-0347**: Non-blocking KYC HTTP (no reqwest::blocking)
+- **M-0347**: ~~Non-blocking KYC HTTP (no reqwest::blocking)~~ **done** (async `reqwest` + `block_on_http`)
 - **M-0348**: Dual-control log for admin overrides
 - **M-0349**: Discourage static SHINRAI_OG_TOKENS in prod mode
 - **M-0350**: Refuse --dev on non-loopback (done)
