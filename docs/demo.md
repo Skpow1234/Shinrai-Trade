@@ -17,6 +17,30 @@ SHINRAI_OG_DEPOSITS=1:10000 \
 cargo run -p shinrai-order-gateway
 ```
 
+## Equity / futures market data
+
+Multi-product **synth** (no API keys):
+
+```bash
+SHINRAI_MD_SYNTH=1 \
+SHINRAI_MD_PRODUCTS=AAPL,ESZ5,BTC-USD \
+SHINRAI_MD_TOKENS=dev:alice \
+cargo run -p shinrai-md-gateway
+```
+
+Subscribe on the WebSocket to `AAPL` / `ESZ5` / `BTC-USD` (see below).
+
+**Alpaca** licensed stock stream (equities). Futures in `PRODUCTS` get a synth sidecar:
+
+```bash
+SHINRAI_MD_ALPACA=1 \
+SHINRAI_MD_ALPACA_KEY=… \
+SHINRAI_MD_ALPACA_SECRET=… \
+SHINRAI_MD_PRODUCTS=AAPL,ESZ5 \
+SHINRAI_MD_TOKENS=dev:alice \
+cargo run -p shinrai-md-gateway
+```
+
 ## FIX over TCP (paper)
 
 Default `SHINRAI_OG_VENUE=fix` stays **in-process**. To exercise a real TCP session against the bundled paper acceptor:
@@ -124,7 +148,7 @@ SHINRAI_MD_TOKENS=dev:alice SHINRAI_MD_SYNTH=1 cargo run -p shinrai-md-gateway -
 | Fail-closed | Unset both `SHINRAI_MD_TOKENS` and `SHINRAI_MD_CLIENTS`. Connect / token issue returns **401**. |
 | Auth rotation | `cargo test -p shinrai-md-gateway --test auth`. |
 | Automated WS path | `cargo test -p shinrai-md-gateway --test health` (health, 401, subscribe `BTC-USD`). |
-| Other symbols | Fixtures resolve `BTC-USD` / `BTCUSD`, `AAPL`, `ESZ5`. Synth only **publishes** BTC-USD. Subscribing to `AAPL` succeeds but you will not see synth ticks. |
+| Other symbols | Fixtures resolve `BTC-USD` / `BTCUSD`, `AAPL`, `ESZ5`. Synth publishes all of `SHINRAI_MD_PRODUCTS` (default includes AAPL/ESZ5/BTC-USD). Alpaca live covers equities only. |
 | Invalid token | Connect with `?token=nope` → 401 `invalid_token`. |
 | Queue / TTL | Defaults in fanout: queue **64** (drop oldest market-data), max **16** subs, heartbeat every **15** unix seconds, idle TTL **45** seconds. Access token TTL default **60**s (`SHINRAI_MD_ACCESS_TTL`). |
 | Historical REST | `cargo test -p shinrai-md-gateway --test historical`. Domain pagination: `cargo test -p shinrai-market-data --lib historical`. |

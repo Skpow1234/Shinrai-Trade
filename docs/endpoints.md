@@ -24,7 +24,7 @@ Ops routes (`/v1/ops*`, `/v1/metrics`): require `SHINRAI_OG_OPS_TOKEN` (header o
 
 ```bash
 curl http://127.0.0.1:8080/health
-# {"status":"ok","service":"market-data-gateway","feed":"none|synth|coinbase"}
+# {"status":"ok","service":"market-data-gateway","feed":"none|synth|alpaca|coinbase"}
 ```
 
 ### Auth

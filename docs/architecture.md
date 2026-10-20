@@ -45,7 +45,7 @@ Shinrai-Trade/
 | `shinrai-risk` | Pre-trade checks: buying power, limits, kill switches |
 | `shinrai-audit` | Append-only audit trail for the trading path |
 | `shinrai-portfolio` | Cash, positions, mark-to-market P&L snapshots |
-| `shinrai-md-protocol` | Coinbase Exchange decode, raw journal, feed supervisor |
+| `shinrai-md-protocol` | Coinbase + Alpaca decode, raw journal, feed supervisor |
 | `shinrai-md-fanout` | Sessions, authn, bounded queues, heartbeats |
 | `shinrai-md-gateway` | Health, bars/trades/quotes, WebSocket |
 | `shinrai-order-gateway` | Orders, portfolio, audit, funds, reconciliation, ops, UI |

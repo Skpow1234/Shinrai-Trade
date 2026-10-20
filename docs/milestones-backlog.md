@@ -22,6 +22,7 @@ Total: **800** milestones.
 - **M-deploy-compose-secrets**: File secrets for Postgres password + ops token (`deploy/secrets/`, init scripts)
 - **M-deploy-caddy-tls**: Caddy TLS termination (`deploy/Caddyfile`, `compose.tls.yaml`, profile `tls`)
 - **M-fix-tcp**: FIX TCP initiator + loopback paper acceptor / external `TCP_CONNECT`
+- **M-md-alpaca-equity**: Alpaca stock MD vendor + gateway feed; multi-product synth for AAPL/ESZ5/BTC-USD
 
 ## Backlog
 

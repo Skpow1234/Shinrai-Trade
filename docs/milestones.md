@@ -54,7 +54,7 @@ Complete for the licensed-broker **paper** path:
 ### Known gaps (Phase 4+)
 
 - FIX TCP is a subset (Logon/HB/D/F/G/ER); no ResendRequest / sequence reset / full session recovery yet
-- Live market data: Coinbase public BTC-USD only; equities/futures on the master are not live-streamed from a licensed feed
+- Futures live MD: `ESZ5` uses synth (no CME feed yet); equities live via Alpaca when keys are set
 - Single-process OMS; no documented multi-instance leader election beyond outbox claim
 
 ## Phase 5 — Paper funds
@@ -74,14 +74,15 @@ Real custody / bank rails stay gated on regulation and licensed partners. This p
 - **Compose file secrets** for Postgres password + ops token (`deploy/secrets/`, `init-secrets`)
 - **Caddy TLS overlay** (`deploy/Caddyfile`, `compose.tls.yaml`, profile `tls`)
 - **FIX TCP**: initiator + loopback paper acceptor (`SHINRAI_OG_FIX_TCP`) or external connect (`SHINRAI_OG_FIX_TCP_CONNECT`)
+- **Equity/futures MD**: Alpaca stock stream (`SHINRAI_MD_ALPACA`) + multi-product synth (`AAPL`/`ESZ5`/`BTC-USD`)
 
 ## Suggested next (priority)
 
-1. Licensed equity/futures market-data feeds
-2. Async Alpaca / non-blocking venue HTTP on the Tokio runtime
-3. Multi-instance OMS / HA story if running more than one order-gateway process
-4. Persist risk kills/limits across hydrate; collar fail-closed without marks
-5. FIX ResendRequest / gap-fill / sequence reset completeness
+1. Async Alpaca / non-blocking venue HTTP on the Tokio runtime
+2. Multi-instance OMS / HA story if running more than one order-gateway process
+3. Persist risk kills/limits across hydrate; collar fail-closed without marks
+4. FIX ResendRequest / gap-fill / sequence reset completeness
+5. CME / licensed futures market-data vendor (replace ESZ5 synth)
 
 ## Full backlog (500+)
 

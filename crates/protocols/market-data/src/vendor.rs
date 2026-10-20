@@ -12,6 +12,8 @@ pub struct VendorId(&'static str);
 impl VendorId {
     /// Coinbase Exchange public market data.
     pub const COINBASE_EXCHANGE: Self = Self("coinbase-exchange");
+    /// Alpaca Markets stock data (IEX / SIP feed; API keys required).
+    pub const ALPACA_MARKETS: Self = Self("alpaca-markets");
 
     /// Raw id string.
     #[must_use]
@@ -30,19 +32,41 @@ impl core::fmt::Display for VendorId {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotSpec {
     url: String,
+    headers: Vec<(String, String)>,
 }
 
 impl SnapshotSpec {
-    /// Builds a GET snapshot spec.
+    /// Builds a GET snapshot spec (no auth headers).
     #[must_use]
     pub fn get(url: impl Into<String>) -> Self {
-        Self { url: url.into() }
+        Self {
+            url: url.into(),
+            headers: Vec::new(),
+        }
+    }
+
+    /// Builds a GET snapshot spec with HTTP headers (e.g. Alpaca API keys).
+    #[must_use]
+    pub fn get_with_headers(
+        url: impl Into<String>,
+        headers: Vec<(String, String)>,
+    ) -> Self {
+        Self {
+            url: url.into(),
+            headers,
+        }
     }
 
     /// Snapshot URL.
     #[must_use]
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// Optional request headers.
+    #[must_use]
+    pub fn headers(&self) -> &[(String, String)] {
+        &self.headers
     }
 }
 

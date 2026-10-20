@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+mod alpaca_feed;
 mod app;
 mod auth_http;
 mod coinbase_feed;

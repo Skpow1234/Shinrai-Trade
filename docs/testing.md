@@ -52,5 +52,7 @@ Optional ignored live smokes (require network / vendor keys as applicable):
 
 ```bash
 cargo test -p shinrai-md-gateway --test coinbase_live -- --ignored
-# Alpaca / remote REST / licensed live tests exist under protocols/execution and order-gateway
+SHINRAI_MD_ALPACA_KEY=… SHINRAI_MD_ALPACA_SECRET=… \
+  cargo test -p shinrai-md-gateway --test alpaca_md_live -- --ignored --nocapture
+# Alpaca order venue / remote REST live tests: protocols/execution, order-gateway
 ```

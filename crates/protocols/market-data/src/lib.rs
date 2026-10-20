@@ -1,8 +1,11 @@
 //! Vendor market-data protocol: decode, raw recording, connection supervision.
 //!
-//! Phase 2.1 sandbox vendor is **Coinbase Exchange** public WebSocket/REST
-//! (`wss://ws-feed.exchange.coinbase.com`). Equities/futures remain on the
-//! instrument master but are not streamed until a later licensed feed.
+//! Sandbox vendors:
+//! - **Coinbase Exchange** public WS/REST — crypto (`BTC-USD`)
+//! - **Alpaca Markets** authenticated stock stream — equities (`AAPL`, …)
+//!
+//! Futures (e.g. `ESZ5`) stay on the instrument master; use the gateway synth
+//! publisher until a CME/licensed futures feed is wired.
 //!
 //! Domain types stay vendor-agnostic. This crate maps vendor JSON onto
 //! [`shinrai_market_data::MdRecord`], keeps the raw frame for replay, and
@@ -10,12 +13,14 @@
 
 #![forbid(unsafe_code)]
 
+mod alpaca;
 mod coinbase;
 mod error;
 mod journal;
 mod supervisor;
 mod vendor;
 
+pub use alpaca::AlpacaMarkets;
 pub use coinbase::CoinbaseExchange;
 pub use error::ProviderError;
 pub use journal::{RawFrame, RecordingJournal};

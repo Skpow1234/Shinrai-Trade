@@ -175,7 +175,11 @@ async fn execute_commands(
             FeedCommand::RequestSnapshot {
                 product_id, spec, ..
             } => {
-                let body = http.get(spec.url()).send().await?.bytes().await?;
+                let mut req = http.get(spec.url());
+                for (k, v) in spec.headers() {
+                    req = req.header(k.as_str(), v.as_str());
+                }
+                let body = req.send().await?.bytes().await?;
                 let now = unix_logical_now();
                 match supervisor.ingest_snapshot(vendor, master, now, &product_id, &body) {
                     Ok(outcome) => {
