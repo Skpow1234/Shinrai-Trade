@@ -1,7 +1,8 @@
 //! Alpaca paper Trading API adapter (`ExecutionVenue`).
 //!
 //! Speaks Alpaca `/v2/orders` over [`HttpTransport`]-shaped clients. Local mock
-//! needs no network; remote uses `APCA-API-KEY-ID` / `APCA-API-SECRET-KEY`.
+//! needs no network; remote uses async `reqwest` (`APCA-API-KEY-ID` /
+//! `APCA-API-SECRET-KEY`) bridged via [`crate::runtime::block_on_venue`].
 
 use std::collections::{HashMap, VecDeque};
 
@@ -1236,13 +1237,13 @@ impl HttpTransport for LocalAlpacaHttp {
     }
 }
 
-/// Blocking HTTP client for Alpaca paper/live Trading API.
+/// Async HTTP client for Alpaca paper/live Trading API (bridged via [`crate::runtime::block_on_venue`]).
 #[derive(Debug, Clone)]
 pub struct RemoteAlpacaHttp {
     base_url: String,
     api_key: String,
     api_secret: String,
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
 }
 
 impl RemoteAlpacaHttp {
@@ -1252,7 +1253,7 @@ impl RemoteAlpacaHttp {
     ///
     /// Returns transport errors when the client cannot be built.
     pub fn new(config: &AlpacaConfig) -> Result<Self, ExecutionError> {
-        let client = reqwest::blocking::Client::builder()
+        let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
             .build()
             .map_err(|e| ExecutionError::Transport(e.to_string()))?;
@@ -1263,10 +1264,8 @@ impl RemoteAlpacaHttp {
             client,
         })
     }
-}
 
-impl HttpTransport for RemoteAlpacaHttp {
-    fn request(&mut self, req: &HttpRequest) -> Result<HttpResponse, ExecutionError> {
+    async fn request_async(&self, req: &HttpRequest) -> Result<HttpResponse, ExecutionError> {
         let url = format!("{}{}", self.base_url, req.path);
         let builder = match req.method {
             HttpMethod::Get => self.client.get(&url),
@@ -1279,12 +1278,22 @@ impl HttpTransport for RemoteAlpacaHttp {
             .header("APCA-API-SECRET-KEY", &self.api_secret)
             .header("content-type", "application/json")
             .send()
+            .await
             .map_err(|e| ExecutionError::Transport(e.to_string()))?;
         let status = resp.status().as_u16();
         let body = resp
             .text()
+            .await
             .map_err(|e| ExecutionError::Transport(e.to_string()))?;
         Ok(HttpResponse { status, body })
+    }
+}
+
+impl HttpTransport for RemoteAlpacaHttp {
+    fn request(&mut self, req: &HttpRequest) -> Result<HttpResponse, ExecutionError> {
+        let this = self.clone();
+        let req = req.clone();
+        crate::runtime::block_on_venue(async move { this.request_async(&req).await })
     }
 }
 

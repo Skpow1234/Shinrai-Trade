@@ -158,7 +158,7 @@ Total: **800** milestones.
 - **M-0107**: FIX ResendRequest / gap fill / seq reset
 - **M-0108**: FIX checksum / body-length hardening
 - **M-0109**: Alpaca: replace eprintln with metrics
-- **M-0110**: Alpaca: async HTTP (no blocking reqwest)
+- **M-0110**: ~~Alpaca: async HTTP (no blocking reqwest)~~ **done** (`RemoteAlpacaHttp` + `block_on_venue`)
 - **M-0111**: Alpaca: cancel/replace race edge cases
 - **M-0112**: Alpaca: secrets redaction audit
 - **M-0113**: REST remote: TLS pinning / mTLS
@@ -166,7 +166,7 @@ Total: **800** milestones.
 - **M-0115**: Licensed sandbox: real broker session codes
 - **M-0116**: Sandbox: latency/jitter policies
 - **M-0117**: Unify inflight hydrate APIs across venues
-- **M-0118**: ExecutionVenue async trait / non-blocking poll
+- **M-0118**: ExecutionVenue async trait / non-blocking poll (HTTP path done via `block_on_venue`; full async trait still open)
 - **M-0119**: Nightly CI for ignored live venue tests
 - **M-0120**: Remove allow(dead_code) in alpaca
 - **M-0121**: EOD fetch failure fail-closed for recon
@@ -392,7 +392,7 @@ Total: **800** milestones.
 - **M-0308**: Incremental persist (not full ledger each time)
 - **M-0309**: Bound rate limiter HashMap growth
 - **M-0310**: Tune demo rate limit for abuse protection
-- **M-0311**: Avoid blocking venue HTTP on async runtime
+- **M-0311**: ~~Avoid blocking venue HTTP on async runtime~~ **done** (async reqwest + `block_in_place` / dedicated thread)
 - **M-0312**: Reduce engine clones on read paths
 - **M-0313**: Hydrate risk kills/limits/KYC fully
 - **M-0314**: Durable venue cursor design after hydrate

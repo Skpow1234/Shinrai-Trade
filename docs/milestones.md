@@ -75,14 +75,15 @@ Real custody / bank rails stay gated on regulation and licensed partners. This p
 - **Caddy TLS overlay** (`deploy/Caddyfile`, `compose.tls.yaml`, profile `tls`)
 - **FIX TCP**: initiator + loopback paper acceptor (`SHINRAI_OG_FIX_TCP`) or external connect (`SHINRAI_OG_FIX_TCP_CONNECT`)
 - **Equity/futures MD**: Alpaca stock stream (`SHINRAI_MD_ALPACA`) + multi-product synth (`AAPL`/`ESZ5`/`BTC-USD`)
+- **Async venue HTTP**: Alpaca + remote REST use async `reqwest` with `block_in_place` on the multi-thread Tokio runtime (no `reqwest::blocking`)
 
 ## Suggested next (priority)
 
-1. Async Alpaca / non-blocking venue HTTP on the Tokio runtime
-2. Multi-instance OMS / HA story if running more than one order-gateway process
-3. Persist risk kills/limits across hydrate; collar fail-closed without marks
-4. FIX ResendRequest / gap-fill / sequence reset completeness
-5. CME / licensed futures market-data vendor (replace ESZ5 synth)
+1. Multi-instance OMS / HA story if running more than one order-gateway process
+2. Persist risk kills/limits across hydrate; collar fail-closed without marks
+3. FIX ResendRequest / gap-fill / sequence reset completeness
+4. CME / licensed futures market-data vendor (replace ESZ5 synth)
+5. Non-blocking KYC HTTP (replace remaining `reqwest::blocking` in compliance)
 
 ## Full backlog (500+)
 

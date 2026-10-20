@@ -1,7 +1,8 @@
 //! REST paper venue: JSON over [`HttpTransport`] → [`ExecutionVenue`].
 //!
 //! Offline-safe by default via [`LocalPaperHttp`] (in-process broker that still
-//! round-trips JSON). A live HTTP client can implement [`HttpTransport`] later.
+//! round-trips JSON). Remote brokers use async `reqwest` bridged through
+//! [`crate::runtime::block_on_venue`].
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -75,12 +76,14 @@ impl HttpTransport for RestTransport {
     }
 }
 
-/// Blocking HTTP client for a remote paper REST venue (`SHINRAI_OG_REST_URL`).
+/// Async HTTP client for a remote paper REST venue (`SHINRAI_OG_REST_URL`).
+///
+/// Sync [`HttpTransport::request`] bridges via [`crate::runtime::block_on_venue`].
 #[derive(Debug, Clone)]
 pub struct RemotePaperHttp {
     base_url: String,
     bearer: Option<String>,
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
 }
 
 impl RemotePaperHttp {
@@ -93,7 +96,7 @@ impl RemotePaperHttp {
         base_url: impl Into<String>,
         bearer: Option<String>,
     ) -> Result<Self, ExecutionError> {
-        let client = reqwest::blocking::Client::builder()
+        let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .map_err(|e| ExecutionError::Transport(e.to_string()))?;
@@ -103,10 +106,8 @@ impl RemotePaperHttp {
             client,
         })
     }
-}
 
-impl HttpTransport for RemotePaperHttp {
-    fn request(&mut self, req: &HttpRequest) -> Result<HttpResponse, ExecutionError> {
+    async fn request_async(&self, req: &HttpRequest) -> Result<HttpResponse, ExecutionError> {
         let url = format!("{}{}", self.base_url, req.path);
         let mut builder = match req.method {
             HttpMethod::Get => self.client.get(&url),
@@ -124,12 +125,22 @@ impl HttpTransport for RemotePaperHttp {
         }
         let resp = builder
             .send()
+            .await
             .map_err(|e| ExecutionError::Transport(e.to_string()))?;
         let status = resp.status().as_u16();
         let body = resp
             .text()
+            .await
             .map_err(|e| ExecutionError::Transport(e.to_string()))?;
         Ok(HttpResponse { status, body })
+    }
+}
+
+impl HttpTransport for RemotePaperHttp {
+    fn request(&mut self, req: &HttpRequest) -> Result<HttpResponse, ExecutionError> {
+        let this = self.clone();
+        let req = req.clone();
+        crate::runtime::block_on_venue(async move { this.request_async(&req).await })
     }
 }
 
