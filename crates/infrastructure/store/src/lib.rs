@@ -30,7 +30,9 @@ pub use batch::{persist_trading_batch, TradingBatch};
 pub use drop_copy::{list_drop_copy_fills, DropCopyFillSnapshot};
 pub use error::StoreError;
 pub use inbox::try_claim_inbox;
-pub use leader::{heartbeat_oms_leader, is_oms_leader, load_oms_leader_lease, LeaderLease};
+pub use leader::{
+    expire_oms_leader_lease, heartbeat_oms_leader, is_oms_leader, load_oms_leader_lease, LeaderLease,
+};
 pub use ledger::{
     insert_ledger_entry, list_ledger_entries, load_ledger_entry_by_key, LedgerEntrySnapshot,
     LedgerPostingSnapshot,

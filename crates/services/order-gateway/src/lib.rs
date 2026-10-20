@@ -23,7 +23,7 @@ mod rate_limit;
 mod ui_http;
 
 pub use app::{router, unix_logical_now, AppState, GatewayConfig};
-pub use ha::run_leader_heartbeat;
+pub use ha::{promote_oms_leader, run_leader_heartbeat};
 pub use outbox_publisher::{
     publish_once as publish_outbox_once, publish_once_with as publish_outbox_once_with,
     run_publisher as run_outbox_publisher, OutboxMetrics, OutboxPublishError,

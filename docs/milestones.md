@@ -56,7 +56,7 @@ Complete for the licensed-broker **paper** path:
 
 - FIX subset still omits full admin surface (e.g. Reject `35=3`, TestRequest, Drop Copy session type)
 - Futures MD: Databento-shaped paper/live for `ESZ5` (`SHINRAI_MD_FUTURES`); raw CME MDP3 multicast not wired
-- Multi-instance OMS is **active-passive** (`SHINRAI_OG_HA`); not multi-writer active-active
+- Multi-instance OMS is **active-passive** (`SHINRAI_OG_HA`); not multi-writer active-active (hydrate-on-promote + follower warm standby)
 
 ## Phase 5 — Paper funds
 
@@ -79,16 +79,15 @@ Real custody / bank rails stay gated on regulation and licensed partners. This p
 - **Equity/futures MD**: Alpaca stock stream (`SHINRAI_MD_ALPACA`) + Databento GLBX futures (`SHINRAI_MD_FUTURES`, paper or licensed) + multi-product synth
 - **Async venue HTTP**: Alpaca + remote REST use async `reqwest` with `block_in_place` on the multi-thread Tokio runtime (no `reqwest::blocking`)
 - **Async KYC HTTP**: compliance vendor uses async `reqwest` + `block_in_place` (no `reqwest::blocking`)
-- **Multi-instance OMS HA**: Postgres `oms_leader_lease` + `SHINRAI_OG_HA` (active-passive; followers `503 not_oms_leader`; outbox publishes only on leader)
+- **Multi-instance OMS HA**: Postgres `oms_leader_lease` + `SHINRAI_OG_HA` (active-passive; followers `503 not_oms_leader`; outbox publishes only on leader; hydrate-on-promote + follower warm rehydrate)
 - **Durable risk control plane**: `risk_state` table (kills/limits/restrictions) restored on hydrate; collar fail-closed when `collar_bps>0` and no mark
 
 ## Suggested next (priority)
 
-1. Shared read replicas / hydrate-on-promote for faster HA failover
-2. Ops audit trail for every risk mutation
-3. FIX Reject / TestRequest / Drop Copy session type
-4. Raw CME MDP3 / fuller Databento live schemas (L2 depth)
-5. KYC empty map fail-closed in production (`M-0346`)
+1. Ops audit trail for every risk mutation
+2. FIX Reject / TestRequest / Drop Copy session type
+3. Raw CME MDP3 / fuller Databento live schemas (L2 depth)
+4. KYC empty map fail-closed in production (`M-0346`)
 
 ## Full backlog (500+)
 

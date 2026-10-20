@@ -83,6 +83,20 @@ pub async fn load_oms_leader_lease(pool: &PgPool) -> Result<LeaderLease, StoreEr
     })
 }
 
+/// Forces the OMS leader lease to expire (failover drills / integration tests).
+///
+/// # Errors
+///
+/// Returns sqlx errors.
+pub async fn expire_oms_leader_lease(pool: &PgPool) -> Result<(), StoreError> {
+    sqlx::query(
+        "UPDATE oms_leader_lease SET expires_at = NOW() - INTERVAL '1 second' WHERE id = 1",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Returns whether `instance_id` currently holds an unexpired lease.
 ///
 /// # Errors

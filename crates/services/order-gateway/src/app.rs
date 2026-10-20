@@ -154,6 +154,8 @@ pub struct AppState {
     pub(crate) instance_id: String,
     /// Cached leader flag (HA); always `true` when HA is disabled.
     pub(crate) oms_leader: Arc<AtomicBool>,
+    /// True while a promote path is rehydrating (still returns `not_oms_leader`).
+    pub(crate) oms_promoting: Arc<AtomicBool>,
 }
 
 /// Process configuration (tokens / secrets are not displayed).
@@ -328,6 +330,14 @@ impl GatewayConfig {
             cfg.apply_paper_dev_defaults();
         }
         cfg
+    }
+
+    /// Enables active-passive HA with a stable instance id (tests / fixtures).
+    #[must_use]
+    pub fn with_ha(mut self, instance_id: impl Into<String>) -> Self {
+        self.ha_enabled = true;
+        self.instance_id = instance_id.into();
+        self
     }
 
     /// Whether active-passive HA leader election is enabled.
@@ -577,6 +587,7 @@ impl AppState {
             // Single-instance (HA off) is always the leader; HA starts as follower
             // until the first successful lease heartbeat.
             oms_leader: Arc::new(AtomicBool::new(!config.ha_enabled)),
+            oms_promoting: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -601,6 +612,17 @@ impl AppState {
     /// Updates the cached OMS leader flag (HA heartbeat).
     pub fn set_oms_leader(&self, leader: bool) {
         self.oms_leader.store(leader, Ordering::Relaxed);
+    }
+
+    /// Whether this instance is mid promote (rehydrate before serving).
+    #[must_use]
+    pub fn is_oms_promoting(&self) -> bool {
+        self.oms_promoting.load(Ordering::Relaxed)
+    }
+
+    /// Updates the promote-in-progress flag (HA heartbeat).
+    pub fn set_oms_promoting(&self, promoting: bool) {
+        self.oms_promoting.store(promoting, Ordering::Relaxed);
     }
 
     /// Shared leader flag for background tasks (outbox publisher).
@@ -648,8 +670,31 @@ impl AppState {
         &mut self,
         pool: StorePool,
     ) -> Result<(), shinrai_store::StoreError> {
-        let payload = crate::hydrate::load_hydrate_payload(&pool).await?;
-        let risk_snap = shinrai_store::load_risk_state(&pool).await?;
+        self.apply_store_hydrate(&pool).await?;
+        self.store = Some(pool);
+        Ok(())
+    }
+
+    /// Reloads durable OMS state from the attached store (HA promote / warm standby).
+    ///
+    /// # Errors
+    ///
+    /// Returns store / decode errors, or when no store is attached.
+    pub async fn rehydrate_from_store(&self) -> Result<(), shinrai_store::StoreError> {
+        let Some(pool) = self.store.as_ref() else {
+            return Err(shinrai_store::StoreError::InvalidArgument(
+                "rehydrate requires an attached Postgres store".into(),
+            ));
+        };
+        self.apply_store_hydrate(pool).await
+    }
+
+    async fn apply_store_hydrate(
+        &self,
+        pool: &StorePool,
+    ) -> Result<(), shinrai_store::StoreError> {
+        let payload = crate::hydrate::load_hydrate_payload(pool).await?;
+        let risk_snap = shinrai_store::load_risk_state(pool).await?;
         let max_seq = {
             let mut engine = lock_engine(self);
             let max = crate::hydrate::apply_hydrate(&mut engine, payload)?;
@@ -658,7 +703,7 @@ impl AppState {
             }
             max
         };
-        if let Ok(rows) = shinrai_store::list_approval_requests(&pool).await {
+        if let Ok(rows) = shinrai_store::list_approval_requests(pool).await {
             let restored: Vec<_> = rows
                 .into_iter()
                 .map(|r| crate::compliance::ApprovalRequest {
@@ -687,7 +732,6 @@ impl AppState {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             store.restore_from(restored);
         }
-        self.store = Some(pool);
         self.audit_persisted_seq.store(max_seq, Ordering::Release);
         Ok(())
     }
@@ -1141,6 +1185,7 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "ha": {
             "enabled": state.ha_enabled(),
             "leader": state.is_oms_leader(),
+            "promoting": state.is_oms_promoting(),
         },
     }))
 }

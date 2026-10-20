@@ -41,6 +41,9 @@ pub async fn require_oms_leader(
 }
 
 /// Renews / acquires the OMS leader lease until the process exits.
+///
+/// On follower → leader promote, rehydrates from Postgres before serving traffic.
+/// Followers warm-rehydrate on each tick so failover stays fast.
 pub async fn run_leader_heartbeat(
     pool: StorePool,
     state: AppState,
@@ -50,23 +53,85 @@ pub async fn run_leader_heartbeat(
     let instance = state.instance_id().to_owned();
     loop {
         match heartbeat_oms_leader(&pool, &instance, ttl).await {
-            Ok(is_leader) => {
+            Ok(true) => {
                 let was = state.is_oms_leader_flag();
-                state.set_oms_leader(is_leader);
-                if is_leader && !was {
+                if was {
+                    state.set_oms_leader(true);
+                } else if promote_oms_leader(&pool, &state, ttl).await {
                     eprintln!(
-                        "shinrai-order-gateway: acquired OMS leader lease (instance={instance})"
+                        "shinrai-order-gateway: acquired OMS leader lease after hydrate (instance={instance})"
                     );
-                } else if !is_leader && was {
-                    eprintln!("shinrai-order-gateway: lost OMS leader lease (instance={instance})");
+                } else {
+                    eprintln!(
+                        "shinrai-order-gateway: promote incomplete; staying follower (instance={instance})"
+                    );
+                }
+            }
+            Ok(false) => {
+                let was = state.is_oms_leader_flag();
+                state.set_oms_leader(false);
+                state.set_oms_promoting(false);
+                if was {
+                    eprintln!(
+                        "shinrai-order-gateway: lost OMS leader lease (instance={instance})"
+                    );
+                }
+                // Warm standby: keep in-memory OMS aligned with shared Postgres.
+                if let Err(err) = state.rehydrate_from_store().await {
+                    eprintln!(
+                        "shinrai-order-gateway: follower warm hydrate failed (instance={instance}): {err}"
+                    );
                 }
             }
             Err(err) => {
                 state.set_oms_leader(false);
+                state.set_oms_promoting(false);
                 eprintln!("shinrai-order-gateway: OMS leader heartbeat error: {err}");
             }
         }
         tokio::time::sleep(interval).await;
+    }
+}
+
+/// Rehydrates from the store, reconfirms the lease, then flips the leader flag.
+///
+/// Returns `true` when this instance may serve OMS traffic.
+pub async fn promote_oms_leader(
+    pool: &StorePool,
+    state: &AppState,
+    ttl: Duration,
+) -> bool {
+    let instance = state.instance_id();
+    state.set_oms_promoting(true);
+    state.set_oms_leader(false);
+
+    let outcome = async {
+        state.rehydrate_from_store().await?;
+        // Hydrate may outlast a lease tick; renew before serving.
+        heartbeat_oms_leader(pool, instance, ttl).await
+    }
+    .await;
+
+    state.set_oms_promoting(false);
+    match outcome {
+        Ok(true) => {
+            state.set_oms_leader(true);
+            true
+        }
+        Ok(false) => {
+            state.set_oms_leader(false);
+            eprintln!(
+                "shinrai-order-gateway: lost OMS lease during promote hydrate (instance={instance})"
+            );
+            false
+        }
+        Err(err) => {
+            state.set_oms_leader(false);
+            eprintln!(
+                "shinrai-order-gateway: promote hydrate failed (instance={instance}): {err}"
+            );
+            false
+        }
     }
 }
 

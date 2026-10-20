@@ -9,11 +9,14 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::json;
 use shinrai_ledger::AccountId;
-use shinrai_order_gateway::{router, AppState};
+use shinrai_md_fanout::TokenTtl;
+use shinrai_order_gateway::{promote_oms_leader, router, AppState, GatewayConfig};
 use shinrai_orders::ClientOrderId;
 use shinrai_store::{
-    connect_from_env, load_audit_after, load_order_by_client, migrate, StoreError,
+    connect_from_env, expire_oms_leader_lease, heartbeat_oms_leader, load_audit_after,
+    load_order_by_client, migrate, StoreError,
 };
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tower::ServiceExt;
 
@@ -278,6 +281,164 @@ async fn restart_hydrates_working_order_and_cancel() {
     let cjson: serde_json::Value = serde_json::from_slice(&cbody).expect("json");
     assert_eq!(cancel_status, StatusCode::OK, "cancel failed: {cjson}");
     assert_eq!(cjson["status"], "Canceled");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn ha_promote_rehydrates_before_serving() {
+    if !database_configured() {
+        eprintln!("skipping: set SHINRAI_DATABASE_URL to run dual-write tests");
+        return;
+    }
+    let _guard = DB_LOCK.lock().await;
+
+    let pool = match connect_from_env().await {
+        Ok(p) => p,
+        Err(StoreError::MissingDatabaseUrl) => return,
+        Err(err) => panic!("connect: {err}"),
+    };
+    migrate(&pool).await.expect("migrate");
+
+    // Free the singleton lease so this test can acquire.
+    expire_oms_leader_lease(&pool)
+        .await
+        .expect("expire lease");
+
+    let account_raw = 505_u64;
+    let clid_a = format!("ha-a-{}", unique_suffix());
+    let clid_b = format!("ha-b-{}", unique_suffix());
+
+    let writer =
+        AppState::for_test_with_store("ha-tok", "trader", account_raw, 10_000, pool.clone()).await;
+    let writer_app = router(writer);
+    let resp = writer_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/orders?token=ha-tok")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "client_order_id": clid_a,
+                        "symbol": "AAPL",
+                        "side": "Buy",
+                        "qty": 2,
+                        "price": 10000
+                    })
+                    .to_string(),
+                ))
+                .expect("req"),
+        )
+        .await
+        .expect("resp");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let instance = format!("ha-standby-{}", unique_suffix());
+    let cfg = GatewayConfig::new(
+        vec![("ha-tok".to_owned(), "trader".to_owned())],
+        Vec::new(),
+        vec![("trader".to_owned(), account_raw)],
+        Vec::new(),
+        TokenTtl::default(),
+    )
+    .with_ha(instance.clone());
+    let mut standby = AppState::from_config(&cfg);
+    standby
+        .hydrate_from_store(pool.clone())
+        .await
+        .expect("standby hydrate");
+    assert!(!standby.is_oms_leader(), "HA standby starts as follower");
+    assert!(!standby.is_oms_promoting());
+
+    let app = router(standby.clone());
+    let blocked = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/orders?token=ha-tok")
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("blocked");
+    assert_eq!(blocked.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // Writer continues while standby memory is stale relative to Postgres.
+    let resp = writer_app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/orders?token=ha-tok")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "client_order_id": clid_b,
+                        "symbol": "AAPL",
+                        "side": "Buy",
+                        "qty": 1,
+                        "price": 10000
+                    })
+                    .to_string(),
+                ))
+                .expect("req"),
+        )
+        .await
+        .expect("resp");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let ttl = Duration::from_secs(30);
+    assert!(
+        heartbeat_oms_leader(&pool, &instance, ttl)
+            .await
+            .expect("acquire"),
+        "standby should acquire lease"
+    );
+    assert!(
+        promote_oms_leader(&pool, &standby, ttl).await,
+        "promote must hydrate then serve"
+    );
+    assert!(standby.is_oms_leader());
+    assert!(!standby.is_oms_promoting());
+
+    let health = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("health");
+    assert_eq!(health.status(), StatusCode::OK);
+    let hbody = axum::body::to_bytes(health.into_body(), usize::MAX)
+        .await
+        .expect("bytes");
+    let hjson: serde_json::Value = serde_json::from_slice(&hbody).expect("json");
+    assert_eq!(hjson["ha"]["leader"], true);
+    assert_eq!(hjson["ha"]["promoting"], false);
+
+    let list = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/orders?token=ha-tok")
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("list");
+    assert_eq!(list.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(list.into_body(), usize::MAX)
+        .await
+        .expect("bytes");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let orders = json["orders"].as_array().expect("orders");
+    let found_b = orders.iter().any(|o| o["client_order_id"] == clid_b);
+    assert!(
+        found_b,
+        "promote hydrate must surface order written while follower was stale: {clid_b}"
+    );
 }
 
 #[tokio::test]
