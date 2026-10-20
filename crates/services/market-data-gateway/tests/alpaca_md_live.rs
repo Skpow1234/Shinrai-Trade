@@ -29,10 +29,16 @@ async fn alpaca_snapshot_aapl() {
     for (k, v) in spec.headers() {
         req = req.header(k.as_str(), v.as_str());
     }
-    let body = req.send().await.expect("http").bytes().await.expect("bytes");
+    let body = req
+        .send()
+        .await
+        .expect("http")
+        .bytes()
+        .await
+        .expect("bytes");
     let master = phase1_master();
-    let rec = vendor
+    let snapshot = vendor
         .decode_snapshot(&body, 1, "AAPL", &master)
         .expect("decode snapshot");
-    assert!(rec.price().scaled() > 0, "expected positive AAPL mark");
+    assert!(snapshot.price().scaled() > 0, "expected positive AAPL mark");
 }

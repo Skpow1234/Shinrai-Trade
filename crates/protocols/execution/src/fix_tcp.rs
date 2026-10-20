@@ -139,7 +139,7 @@ pub fn spawn_paper_acceptor(
     let stop_thread = Arc::clone(&stop);
     let join = thread::Builder::new()
         .name("shinrai-fix-acceptor".into())
-        .spawn(move || paper_acceptor_loop(listener, config, stop_thread))
+        .spawn(move || paper_acceptor_loop(&listener, &config, &stop_thread))
         .map_err(|e| ExecutionError::Transport(format!("fix acceptor spawn: {e}")))?;
     Ok((
         addr,
@@ -150,7 +150,7 @@ pub fn spawn_paper_acceptor(
     ))
 }
 
-fn paper_acceptor_loop(listener: TcpListener, config: FixConfig, stop: Arc<AtomicBool>) {
+fn paper_acceptor_loop(listener: &TcpListener, config: &FixConfig, stop: &Arc<AtomicBool>) {
     while !stop.load(Ordering::SeqCst) {
         let mut stream = loop {
             if stop.load(Ordering::SeqCst) {
@@ -173,9 +173,8 @@ fn paper_acceptor_loop(listener: TcpListener, config: FixConfig, stop: Arc<Atomi
         let mut working: HashMap<String, Working> = HashMap::new();
 
         while !stop.load(Ordering::SeqCst) {
-            let wire = match read_fix_message(&mut stream) {
-                Ok(w) => w,
-                Err(_) => break,
+            let Ok(wire) = read_fix_message(&mut stream) else {
+                break;
             };
             let Ok(map) = decode_fix(&wire) else {
                 continue;
@@ -187,23 +186,23 @@ fn paper_acceptor_loop(listener: TcpListener, config: FixConfig, stop: Arc<Atomi
                 "A" => {
                     let _ = send_acceptor(
                         &mut stream,
-                        &config,
+                        config,
                         &mut next_out,
                         "A",
                         &[("98", "0"), ("108", "30")],
                     );
                 }
                 "0" => {
-                    let _ = send_acceptor(&mut stream, &config, &mut next_out, "0", &[]);
+                    let _ = send_acceptor(&mut stream, config, &mut next_out, "0", &[]);
                 }
                 "5" => {
-                    let _ = send_acceptor(&mut stream, &config, &mut next_out, "5", &[]);
+                    let _ = send_acceptor(&mut stream, config, &mut next_out, "5", &[]);
                     break;
                 }
                 "D" => {
                     let _ = handle_new(
                         &mut stream,
-                        &config,
+                        config,
                         &mut next_out,
                         &mut next_venue,
                         &mut next_exec,
@@ -212,10 +211,10 @@ fn paper_acceptor_loop(listener: TcpListener, config: FixConfig, stop: Arc<Atomi
                     );
                 }
                 "F" => {
-                    let _ = handle_cancel(&mut stream, &config, &mut next_out, &mut working, &map);
+                    let _ = handle_cancel(&mut stream, config, &mut next_out, &mut working, &map);
                 }
                 "G" => {
-                    let _ = handle_replace(&mut stream, &config, &mut next_out, &mut working, &map);
+                    let _ = handle_replace(&mut stream, config, &mut next_out, &mut working, &map);
                 }
                 _ => {}
             }
@@ -266,7 +265,7 @@ fn handle_new(
     let qty: i64 = map.get("38").and_then(|s| s.parse().ok()).unwrap_or(0);
     let px: i64 = map.get("44").and_then(|s| s.parse().ok()).unwrap_or(0);
     let side = map.get("54").cloned().unwrap_or_else(|| "1".into());
-    let tif = map.get("59").map(String::as_str).unwrap_or("1");
+    let tif = map.get("59").map_or("1", String::as_str);
     if qty <= 0 || px <= 0 || cl_ord.is_empty() {
         return Ok(());
     }

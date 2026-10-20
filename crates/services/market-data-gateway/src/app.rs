@@ -601,7 +601,10 @@ fn parse_products(raw: Option<&str>) -> Vec<String> {
     }
 }
 
-fn synth_specs(master: &InstrumentMaster, products: &[String]) -> Vec<(shinrai_instruments::InstrumentId, i64)> {
+fn synth_specs(
+    master: &InstrumentMaster,
+    products: &[String],
+) -> Vec<(shinrai_instruments::InstrumentId, i64)> {
     let mut out = Vec::new();
     for product in products {
         let Ok(alias) = ExternalId::ticker(product) else {
@@ -628,7 +631,7 @@ fn equity_products(master: &InstrumentMaster, products: &[String]) -> Vec<String
     products
         .iter()
         .filter(|p| {
-            ExternalId::ticker(p)
+            ExternalId::ticker(p.as_str())
                 .ok()
                 .and_then(|a| master.resolve_alias(&a).ok())
                 .and_then(|id| master.get(id).ok())
@@ -642,7 +645,7 @@ fn non_equity_products(master: &InstrumentMaster, products: &[String]) -> Vec<St
     products
         .iter()
         .filter(|p| {
-            ExternalId::ticker(p)
+            ExternalId::ticker(p.as_str())
                 .ok()
                 .and_then(|a| master.resolve_alias(&a).ok())
                 .and_then(|id| master.get(id).ok())

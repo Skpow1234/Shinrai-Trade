@@ -47,10 +47,7 @@ impl SnapshotSpec {
 
     /// Builds a GET snapshot spec with HTTP headers (e.g. Alpaca API keys).
     #[must_use]
-    pub fn get_with_headers(
-        url: impl Into<String>,
-        headers: Vec<(String, String)>,
-    ) -> Self {
+    pub fn get_with_headers(url: impl Into<String>, headers: Vec<(String, String)>) -> Self {
         Self {
             url: url.into(),
             headers,

@@ -1,0 +1,102 @@
+name: Nightly
+
+on:
+  schedule:
+    # 06:15 UTC — after typical US evening, before EU morning.
+    - cron: "15 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUSTFLAGS: -D warnings
+  RUST_BACKTRACE: "1"
+
+jobs:
+  test-cross:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-test-${{ matrix.os }}
+      - name: Test workspace
+        run: cargo test --workspace --all-features --locked
+
+  deny:
+    name: deny (advisories refresh)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  # Optional live smokes — run only when the matching secrets exist.
+  live-alpaca-md:
+    name: live (alpaca md)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: ${{ secrets.SHINRAI_MD_ALPACA_KEY != '' && secrets.SHINRAI_MD_ALPACA_SECRET != '' }}
+    env:
+      SHINRAI_MD_ALPACA_KEY: ${{ secrets.SHINRAI_MD_ALPACA_KEY }}
+      SHINRAI_MD_ALPACA_SECRET: ${{ secrets.SHINRAI_MD_ALPACA_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-live
+      - name: Alpaca MD live (ignored)
+        run: >-
+          cargo test -p shinrai-md-gateway --all-features --locked
+          --test alpaca_md_live -- --ignored --nocapture
+
+  live-coinbase-md:
+    name: live (coinbase md)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-live
+      - name: Coinbase MD live (ignored)
+        run: >-
+          cargo test -p shinrai-md-gateway --all-features --locked
+          --test coinbase_live -- --ignored --nocapture
+
+  live-alpaca-orders:
+    name: live (alpaca paper orders)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    if: ${{ secrets.SHINRAI_OG_ALPACA_KEY != '' && secrets.SHINRAI_OG_ALPACA_SECRET != '' }}
+    env:
+      SHINRAI_OG_ALPACA_KEY: ${{ secrets.SHINRAI_OG_ALPACA_KEY }}
+      SHINRAI_OG_ALPACA_SECRET: ${{ secrets.SHINRAI_OG_ALPACA_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-live
+      - name: Alpaca paper venue (ignored)
+        run: >-
+          cargo test -p shinrai-execution --all-features --locked
+          --test alpaca_paper_live -- --ignored --nocapture

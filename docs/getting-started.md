@@ -50,7 +50,7 @@ SHINRAI_DATABASE_URL=postgres://shinrai:shinrai@127.0.0.1:5432/shinrai \
   cargo test -p shinrai-order-gateway --all-features --test dual_write -- --test-threads=1
 ```
 
-CI matrix `cargo test --workspace` stays host-only; a dedicated **`test-db`** job runs store + dual-write tests against a Postgres service.
+CI host tests stay Postgres-free; the **`test-db`** job runs store, dual-write, and chaos tests against a Postgres service. Protect the branch with the single required check named **CI**.
 
 ## Build
 

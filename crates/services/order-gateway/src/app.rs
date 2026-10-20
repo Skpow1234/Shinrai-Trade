@@ -102,6 +102,7 @@ impl GatewayMetrics {
 
 /// Shared gateway state (mutex only at this I/O edge).
 #[derive(Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct AppState {
     pub(crate) engine: Arc<Mutex<PaperEngine>>,
     pub(crate) auth: TokenAuth,

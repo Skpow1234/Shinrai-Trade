@@ -30,11 +30,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let bind = env::var("SHINRAI_OG_BIND").unwrap_or_else(|_| "127.0.0.1:8081".into());
     if dev && !bind_is_loopback(&bind) && !env_truthy("SHINRAI_OG_DEV_ALLOW_PUBLIC") {
-        return Err(
-            "refusing --dev / SHINRAI_OG_DEV on a non-loopback bind; \
+        return Err("refusing --dev / SHINRAI_OG_DEV on a non-loopback bind; \
              use 127.0.0.1 / ::1, or set SHINRAI_OG_DEV_ALLOW_PUBLIC=1"
-                .into(),
-        );
+            .into());
     }
     let mut config = GatewayConfig::from_env();
     if dev {
@@ -45,9 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             "shinrai-order-gateway: ops/metrics require SHINRAI_OG_OPS_TOKEN \
              (set it, or SHINRAI_OG_OPS_OPEN=1 / --dev for local open ops)"
         );
-    } else if !config.ops_token_configured()
-        && config.ops_allow_open()
-        && !bind_is_loopback(&bind)
+    } else if !config.ops_token_configured() && config.ops_allow_open() && !bind_is_loopback(&bind)
     {
         eprintln!(
             "shinrai-order-gateway: WARNING ops/metrics are open on a non-loopback bind; \

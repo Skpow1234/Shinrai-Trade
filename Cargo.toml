@@ -64,7 +64,7 @@ shinrai-portfolio = { path = "crates/domain/portfolio", version = "0.1.0" }
 shinrai-store = { path = "crates/infrastructure/store", version = "0.1.0" }
 shinrai-telemetry = { path = "crates/infrastructure/telemetry", version = "0.1.0" }
 shinrai-messaging = { path = "crates/infrastructure/messaging", version = "0.1.0" }
-async-nats = "0.39"
+async-nats = "0.50"
 bytes = "1"
 thiserror = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

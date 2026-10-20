@@ -5,7 +5,7 @@
 | Piece | In repo? | Notes |
 |---|---|---|
 | Rust binaries | Yes | `shinrai-md-gateway`, `shinrai-order-gateway` |
-| Dockerfile | Yes | Multi-stage; targets `md-gateway` / `order-gateway` |
+| Dockerfile | Yes | Multi-stage; targets `md-gateway` / `order-gateway` (both built in CI) |
 | Compose secrets | Yes | `deploy/secrets/` + `init-secrets` scripts |
 | Compose (deps) | Yes | Postgres + NATS |
 | Compose (full stack) | Yes | `--profile full` |

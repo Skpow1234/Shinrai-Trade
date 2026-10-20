@@ -136,7 +136,6 @@ impl MarketDataVendor for AlpacaMarkets {
             .and_then(Value::as_str)
             .ok_or(ProviderError::MissingField("T"))?;
         match msg_type {
-            "success" | "subscription" | "error" => Ok(DecodedFrame::Control),
             "t" => {
                 let symbol = json_str(&value, "S")?;
                 let instrument_id = Self::resolve_product(master, symbol)?;
@@ -164,7 +163,7 @@ impl MarketDataVendor for AlpacaMarkets {
                 let bid = value.get("bp").and_then(Value::as_f64).unwrap_or(0.0);
                 let ask = value.get("ap").and_then(Value::as_f64).unwrap_or(0.0);
                 let mid = if bid > 0.0 && ask > 0.0 {
-                    (bid + ask) / 2.0
+                    f64::midpoint(bid, ask)
                 } else if ask > 0.0 {
                     ask
                 } else {
@@ -246,7 +245,7 @@ fn snapshot_mark(value: &Value) -> Result<(f64, u64), ProviderError> {
         let bid = quote.get("bp").and_then(Value::as_f64).unwrap_or(0.0);
         let ask = quote.get("ap").and_then(Value::as_f64).unwrap_or(0.0);
         let mid = if bid > 0.0 && ask > 0.0 {
-            (bid + ask) / 2.0
+            f64::midpoint(bid, ask)
         } else if ask > 0.0 {
             ask
         } else {
@@ -275,7 +274,7 @@ fn json_f64(value: &Value, field: &'static str) -> Result<f64, ProviderError> {
 
 fn json_u64_opt(cell: &Value) -> Option<u64> {
     match cell {
-        Value::Number(n) => n.as_u64().or_else(|| n.as_i64().map(|i| i.unsigned_abs())),
+        Value::Number(n) => n.as_u64().or_else(|| n.as_i64().map(i64::unsigned_abs)),
         Value::String(s) => s.parse().ok(),
         _ => None,
     }

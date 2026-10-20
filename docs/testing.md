@@ -4,8 +4,9 @@ Same flags as CI:
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-features --locked
+cargo deny check
 ```
 
 Format in place:
@@ -42,7 +43,14 @@ SHINRAI_DATABASE_URL=postgres://shinrai:shinrai@127.0.0.1:5432/shinrai \
   cargo test -p shinrai-order-gateway --all-features --test dual_write -- --test-threads=1
 ```
 
-CI matrix `cargo test --workspace` is host-only. A dedicated **`test-db`** job runs store + dual-write against a Postgres service.
+### GitHub Actions
+
+| Workflow | When | What |
+|---|---|---|
+| `ci.yml` | PR + push to `main`/`master` | `fmt`, Clippy (`--locked`, `-D warnings`), `cargo deny`, Ubuntu tests, Postgres (`store` / `dual_write` / `chaos`), Docker image builds, release gateway build |
+| `nightly.yml` | Daily + manual | Windows/macOS tests; optional ignored live smokes when secrets are set |
+
+Branch protection should require the single aggregate check named **CI** (not each leaf job). All Cargo steps use `--locked` so the lockfile cannot drift.
 
 ## Network / ignored tests
 

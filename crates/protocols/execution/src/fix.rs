@@ -120,15 +120,12 @@ impl FixConfig {
                 "1" | "true" | "yes" | "on"
             );
         }
-        let tcp_flag = std::env::var("SHINRAI_OG_FIX_TCP")
-            .ok()
-            .map(|s| {
-                matches!(
-                    s.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            })
-            .unwrap_or(false);
+        let tcp_flag = std::env::var("SHINRAI_OG_FIX_TCP").ok().is_some_and(|s| {
+            matches!(
+                s.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        });
         let tcp_addr = std::env::var("SHINRAI_OG_FIX_TCP_ADDR")
             .ok()
             .map(|s| s.trim().to_string())
@@ -139,11 +136,7 @@ impl FixConfig {
             .filter(|s| !s.is_empty());
         if tcp_flag {
             cfg.tcp_loopback = true;
-            cfg.tcp_listen = Some(
-                tcp_addr
-                    .clone()
-                    .unwrap_or_else(|| "127.0.0.1:19878".into()),
-            );
+            cfg.tcp_listen = Some(tcp_addr.clone().unwrap_or_else(|| "127.0.0.1:19878".into()));
             cfg.tcp_connect = Some(tcp_addr.unwrap_or_else(|| "127.0.0.1:19878".into()));
         } else if let Some(connect) = tcp_connect {
             cfg.tcp_loopback = false;
@@ -360,12 +353,9 @@ impl FixPaperVenue {
             let wire = self.read_tcp()?;
             self.inbound_wire.push(wire.clone());
             let map = decode_fix(&wire).map_err(ExecutionError::InvalidState)?;
-            let got = map.get("35").map(String::as_str).unwrap_or("");
+            let got = map.get("35").map_or("", String::as_str);
             if got == expect_type {
                 return Ok(());
-            }
-            if got == "0" {
-                continue;
             }
             if got == "8" {
                 self.ingest_execution_report(&map)?;
@@ -396,14 +386,9 @@ impl FixPaperVenue {
             let wire = self.read_tcp()?;
             self.inbound_wire.push(wire.clone());
             let map = decode_fix(&wire).map_err(ExecutionError::InvalidState)?;
-            match map.get("35").map(String::as_str) {
-                Some("0") => {}
-                Some("8") => {
-                    self.ingest_execution_report(&map)?;
-                    got = got.saturating_add(1);
-                }
-                Some("A" | "5") => {}
-                _ => {}
+            if map.get("35").map(String::as_str) == Some("8") {
+                self.ingest_execution_report(&map)?;
+                got = got.saturating_add(1);
             }
         }
         if got >= min_reports {
@@ -438,7 +423,7 @@ impl FixPaperVenue {
             .unwrap_or_else(|| format!("FIX-{}", self.next_venue));
         let venue_order_id =
             VenueOrderId::new(venue_raw).map_err(|_| ExecutionError::InvalidIdentifier)?;
-        let exec_type_tag = map.get("150").map(String::as_str).unwrap_or("");
+        let exec_type_tag = map.get("150").map_or("", String::as_str);
         let last_qty: i64 = map.get("32").and_then(|s| s.parse().ok()).unwrap_or(0);
         let last_px: i64 = map.get("31").and_then(|s| s.parse().ok()).unwrap_or(0);
         let cum: i64 = map.get("14").and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -448,10 +433,7 @@ impl FixPaperVenue {
             "4" => ExecType::Canceled,
             "5" => ExecType::Replaced,
             "8" => ExecType::Rejected {
-                reason: map
-                    .get("58")
-                    .cloned()
-                    .unwrap_or_else(|| "rejected".into()),
+                reason: map.get("58").cloned().unwrap_or_else(|| "rejected".into()),
             },
             "C" => ExecType::Expired,
             _ => {
@@ -481,11 +463,7 @@ impl FixPaperVenue {
                     .unwrap_or(0)
                     .saturating_add(cum),
                 cum_qty: cum,
-                price: PriceTicks::from_scaled(if last_px > 0 {
-                    last_px
-                } else {
-                    0
-                }),
+                price: PriceTicks::from_scaled(if last_px > 0 { last_px } else { 0 }),
                 canceled: false,
             });
             if let Some(row) = self.inflight.get_mut(&order_id) {
@@ -714,9 +692,36 @@ impl FixPaperVenue {
         self.next_exec = self.next_exec.saturating_add(1);
         Ok(id)
     }
+
+    /// Non-blocking drain of pending TCP execution reports into the outbox.
+    fn drain_tcp_available(&mut self) {
+        let Some(tcp) = self.tcp.clone() else {
+            return;
+        };
+        let Ok(mut guard) = tcp.lock() else {
+            return;
+        };
+        let _ = guard.set_read_timeout(Some(Duration::from_millis(1)));
+        while let Ok(wire) = read_fix_message(&mut *guard) {
+            drop(guard);
+            self.inbound_wire.push(wire.clone());
+            if let Ok(map) = decode_fix(&wire) {
+                if map.get("35").map(String::as_str) == Some("8") {
+                    let _ = self.ingest_execution_report(&map);
+                }
+            }
+            let Ok(g) = tcp.lock() else {
+                return;
+            };
+            guard = g;
+            let _ = guard.set_read_timeout(Some(Duration::from_millis(1)));
+        }
+        let _ = guard.set_read_timeout(Some(Duration::from_secs(5)));
+    }
 }
 
 impl ExecutionVenue for FixPaperVenue {
+    #[allow(clippy::too_many_lines)]
     fn submit(&mut self, order: &NewVenueOrder) -> Result<(), ExecutionError> {
         if !self.connected {
             return Err(ExecutionError::Disconnected);
@@ -948,36 +953,6 @@ impl ExecutionVenue for FixPaperVenue {
     fn poll(&mut self) -> Vec<ExecutionReport> {
         self.drain_tcp_available();
         self.outbox.drain(..).collect()
-    }
-
-    fn drain_tcp_available(&mut self) {
-        let Some(tcp) = self.tcp.clone() else {
-            return;
-        };
-        let Ok(mut guard) = tcp.lock() else {
-            return;
-        };
-        let _ = guard.set_read_timeout(Some(Duration::from_millis(1)));
-        loop {
-            match read_fix_message(&mut *guard) {
-                Ok(wire) => {
-                    drop(guard);
-                    self.inbound_wire.push(wire.clone());
-                    if let Ok(map) = decode_fix(&wire) {
-                        if map.get("35").map(String::as_str) == Some("8") {
-                            let _ = self.ingest_execution_report(&map);
-                        }
-                    }
-                    let Ok(g) = tcp.lock() else {
-                        return;
-                    };
-                    guard = g;
-                    let _ = guard.set_read_timeout(Some(Duration::from_millis(1)));
-                }
-                Err(_) => break,
-            }
-        }
-        let _ = guard.set_read_timeout(Some(Duration::from_secs(5)));
     }
 
     fn tick(&mut self, ticks: u64) {

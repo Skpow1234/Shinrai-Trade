@@ -16,7 +16,7 @@ The intended product is a trading application connected to a licensed broker or 
 | Messaging | Optional NATS for outbox (`shinrai-messaging`) |
 | Telemetry | `tracing` + optional OTLP (`shinrai-telemetry`) |
 | Tests | Colocated unit tests, crate `tests/`, Proptest on the paper loop |
-| CI | GitHub Actions: `fmt`, Clippy `-D warnings`, tests on Ubuntu / Windows / macOS, release build |
+| CI | GitHub Actions: `fmt`, Clippy `-D warnings`, `cargo deny`, Ubuntu tests + Postgres + Docker image builds, release gateways; Nightly for Windows/macOS + optional live smokes |
 
 ## Layout
 
@@ -29,7 +29,7 @@ Shinrai-Trade/
 ├── crates/testing/         # exchange simulator
 ├── compose.yaml            # optional Postgres + NATS for durable store / event bus
 ├── .env.example            # SHINRAI_* placeholders
-└── .github/workflows/ci.yml
+└── .github/workflows/   # ci.yml (required gate) + nightly.yml
 ```
 
 ## Crates

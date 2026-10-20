@@ -6,10 +6,10 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use shinrai_instruments::{aapl, ExternalId, InstrumentMaster};
-use shinrai_market_data::{HistoricalArchive, MdKind};
+use shinrai_market_data::HistoricalArchive;
 use shinrai_md_fanout::{FanoutHub, TokenAuth};
 use shinrai_md_protocol::{
-    AlpacaMarkets, FeedCommand, FeedSupervisor, IngestOutcome, MarketDataVendor, SupervisorEvent,
+    AlpacaMarkets, FeedCommand, FeedSupervisor, IngestOutcome, SupervisorEvent,
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
