@@ -30,12 +30,16 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
 ENTRYPOINT ["shinrai-md-gateway"]
 
 FROM runtime-base AS order-gateway
+USER root
+COPY deploy/docker/entrypoint-order-gateway.sh /usr/local/bin/entrypoint-order-gateway.sh
+RUN chmod 755 /usr/local/bin/entrypoint-order-gateway.sh
 COPY --from=builder /app/target/release/shinrai-order-gateway /usr/local/bin/shinrai-order-gateway
+USER shinrai
 ENV SHINRAI_OG_BIND=0.0.0.0:8081
 EXPOSE 8081
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8081/health || exit 1
-ENTRYPOINT ["shinrai-order-gateway"]
+ENTRYPOINT ["/usr/local/bin/entrypoint-order-gateway.sh"]
 
 # Default image = order gateway (most common paper entrypoint).
 FROM order-gateway

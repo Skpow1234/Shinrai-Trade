@@ -1,0 +1,50 @@
+# TLS overlay: Caddy terminates HTTPS and (optionally) hides direct gateway ports.
+#
+# Requires Compose v2.24+ for `!reset` on ports.
+# Run init-secrets first, then:
+#
+#   docker compose --profile full --profile tls \
+#     -f compose.yaml -f compose.tls.yaml up -d --build
+#
+#   https://og.localhost/ui
+#   https://md.localhost/health
+#
+# Trust the local Caddy CA once (first browser visit), or:
+#   docker compose --profile tls -f compose.yaml -f compose.tls.yaml exec caddy \
+#     caddy trust
+
+services:
+  md-gateway:
+    # Prefer access via Caddy only when using this overlay.
+    ports: !reset []
+
+  order-gateway:
+    ports: !reset []
+
+  caddy:
+    profiles: ["tls"]
+    image: caddy:2.8-alpine
+    container_name: shinrai-caddy
+    depends_on:
+      - md-gateway
+      - order-gateway
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - shinrai_caddy_data:/data
+      - shinrai_caddy_config:/config
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:80"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  shinrai_caddy_data:
+    name: shinrai_caddy_data
+  shinrai_caddy_config:
+    name: shinrai_caddy_config

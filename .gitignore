@@ -15,6 +15,13 @@ Thumbs.db
 .env.local
 .env.*.local
 
+# Compose file secrets (keep deploy/secrets/*.example tracked)
+deploy/secrets/postgres_password
+deploy/secrets/ops_token
+deploy/secrets/*.local
+!deploy/secrets/*.example
+!deploy/secrets/README.md
+
 # Local / private docs
 .cursorrules
 docs/design.md

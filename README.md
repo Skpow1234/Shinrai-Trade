@@ -21,9 +21,11 @@ cargo build --workspace --all-features
 cargo run -p shinrai-order-gateway -- --dev
 # → http://127.0.0.1:8081/ui
 
-# Optional durable store
+# Optional durable store (Compose needs secret files once)
+./deploy/scripts/init-secrets.sh    # or: .\deploy\scripts\init-secrets.ps1
 docker compose up -d postgres
 cp .env.example .env
+# TLS demo: docs/deployment.md (Caddy profile)
 ```
 
 Scripts: `./scripts/dev-ui.sh` · `.\scripts\dev-ui.ps1` · `scripts\dev-ui.cmd`

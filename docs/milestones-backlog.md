@@ -19,6 +19,8 @@ Total: **800** milestones.
 - **M-deploy-compose-full**: `compose.yaml` `--profile full` runs Postgres, NATS, both gateways
 - **M-ops-fail-closed**: Non-dev order gateway requires `SHINRAI_OG_OPS_TOKEN` (`ops_auth_required`)
 - **M-dev-bind-guard**: Refuse `--dev` on non-loopback bind unless `SHINRAI_OG_DEV_ALLOW_PUBLIC=1`
+- **M-deploy-compose-secrets**: File secrets for Postgres password + ops token (`deploy/secrets/`, init scripts)
+- **M-deploy-caddy-tls**: Caddy TLS termination (`deploy/Caddyfile`, `compose.tls.yaml`, profile `tls`)
 
 ## Backlog
 

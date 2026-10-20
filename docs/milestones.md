@@ -71,15 +71,16 @@ Real custody / bank rails stay gated on regulation and licensed partners. This p
 - `compose.yaml` `--profile full` runs Postgres, NATS, MD + order gateways
 - Non-dev ops fail-closed without `SHINRAI_OG_OPS_TOKEN` (`ops_auth_required`)
 - Refuse `--dev` on non-loopback bind unless `SHINRAI_OG_DEV_ALLOW_PUBLIC=1`
+- **Compose file secrets** for Postgres password + ops token (`deploy/secrets/`, `init-secrets`)
+- **Caddy TLS overlay** (`deploy/Caddyfile`, `compose.tls.yaml`, profile `tls`)
 
 ## Suggested next (priority)
 
-1. TLS termination example (Caddy) + compose secrets for DB password
-2. FIX vendor TCP session to a real counterparty
-3. Licensed equity/futures market-data feeds
-4. Async Alpaca / non-blocking venue HTTP on the Tokio runtime
-5. Multi-instance OMS / HA story if running more than one order-gateway process
-6. Persist risk kills/limits across hydrate; collar fail-closed without marks
+1. FIX vendor TCP session to a real counterparty
+2. Licensed equity/futures market-data feeds
+3. Async Alpaca / non-blocking venue HTTP on the Tokio runtime
+4. Multi-instance OMS / HA story if running more than one order-gateway process
+5. Persist risk kills/limits across hydrate; collar fail-closed without marks
 
 ## Full backlog (500+)
 

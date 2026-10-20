@@ -7,6 +7,9 @@ All knobs are environment variables. Copy `.env.example` to `.env` for local too
 | Variable | Meaning |
 |---|---|
 | `SHINRAI_DATABASE_URL` | Postgres URL; without it the order gateway is in-memory only |
+| `SHINRAI_DATABASE_PASSWORD_FILE` | Docker: path to password file (default `/run/secrets/postgres_password`); builds URL when `SHINRAI_DATABASE_URL` unset |
+| `SHINRAI_DATABASE_HOST` / `_USER` / `_NAME` / `_PORT` | Used with password file to build the URL (Compose defaults: `postgres` / `shinrai` / `shinrai` / `5432`) |
+| `SHINRAI_OG_OPS_TOKEN_FILE` | Docker: path to ops bearer file (default `/run/secrets/ops_token`) when `SHINRAI_OG_OPS_TOKEN` unset |
 | `SHINRAI_DB_POOL_SIZE` | Connection pool size (default 5) |
 | `SHINRAI_RUN_MIGRATIONS` | When `1`/`true`, order gateway runs migrations on start (dev) |
 | `SHINRAI_OUTBOX_POLL_MS` | Outbox publisher poll interval when Postgres is enabled (default `1000`) |

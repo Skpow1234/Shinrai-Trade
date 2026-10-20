@@ -1,19 +1,34 @@
 # Dev / local stack for Shinrai-Trade.
 #
+# Create secrets once (files are gitignored):
+#   ./deploy/scripts/init-secrets.sh
+#   .\deploy\scripts\init-secrets.ps1
+#
 # Dependencies only:
 #   docker compose up -d postgres
 #   docker compose up -d postgres nats
 #
-# Full paper stack (build Rust binaries into images — first build is slow):
+# Full paper stack (build Rust binaries — first build is slow):
 #   docker compose --profile full up -d --build
 #
 #   MD:  http://127.0.0.1:8080/health
 #   OG:  http://127.0.0.1:8081/ui   (token: full-dev)
-#   Ops: requires SHINRAI_OG_OPS_TOKEN=compose-ops (see below)
+#   Ops: bearer from deploy/secrets/ops_token (default compose-ops)
+#
+# TLS termination (Caddy, self-signed local CA):
+#   docker compose --profile full --profile tls \
+#     -f compose.yaml -f compose.tls.yaml up -d --build
+#   → https://og.localhost/ui  ·  https://md.localhost/health
 #
 # Tear down:
-#   docker compose --profile full down
+#   docker compose --profile full --profile tls -f compose.yaml -f compose.tls.yaml down
 #   docker compose down -v
+
+secrets:
+  postgres_password:
+    file: ./deploy/secrets/postgres_password
+  ops_token:
+    file: ./deploy/secrets/ops_token
 
 services:
   postgres:
@@ -21,8 +36,10 @@ services:
     container_name: shinrai-postgres
     environment:
       POSTGRES_USER: shinrai
-      POSTGRES_PASSWORD: shinrai
       POSTGRES_DB: shinrai
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
     ports:
       - "5432:5432"
     volumes:
@@ -82,9 +99,15 @@ services:
         condition: service_started
       md-gateway:
         condition: service_started
+    secrets:
+      - postgres_password
+      - ops_token
     environment:
       SHINRAI_OG_BIND: "0.0.0.0:8081"
-      SHINRAI_DATABASE_URL: "postgres://shinrai:shinrai@postgres:5432/shinrai"
+      # Built by entrypoint from /run/secrets/postgres_password when URL unset.
+      SHINRAI_DATABASE_HOST: "postgres"
+      SHINRAI_DATABASE_USER: "shinrai"
+      SHINRAI_DATABASE_NAME: "shinrai"
       SHINRAI_RUN_MIGRATIONS: "1"
       SHINRAI_OG_TOKENS: "full-dev:trader"
       SHINRAI_OG_CLIENTS: "dev:s3cret:trader"
@@ -93,8 +116,6 @@ services:
       SHINRAI_OG_MARKS: "AAPL:10000"
       SHINRAI_OG_MD_URL: "http://md-gateway:8080"
       SHINRAI_OG_MD_TOKEN: "dev"
-      # Non-dev: ops fail closed without a token.
-      SHINRAI_OG_OPS_TOKEN: "compose-ops"
       SHINRAI_OG_OPS_ALLOWLIST: "*"
       SHINRAI_NATS_URL: "nats://nats:4222"
     ports:

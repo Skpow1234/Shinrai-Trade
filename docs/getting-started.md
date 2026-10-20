@@ -13,10 +13,13 @@ Dev Postgres backs `shinrai-store` (orders, ledger, audit, transactional outbox)
 Optional NATS (`SHINRAI_NATS_URL`) publishes outbox rows to `{prefix}.{topic}` then marks them published (at-least-once). Without NATS the publisher uses the log sink only.
 
 ```bash
+# File secrets for Compose (gitignored) — defaults match local docs
+./deploy/scripts/init-secrets.sh          # or: .\deploy\scripts\init-secrets.ps1
+
 docker compose up -d postgres
 docker compose up -d nats          # optional event bus
 
-# postgres://shinrai:shinrai@127.0.0.1:5432/shinrai
+# postgres://shinrai:<deploy/secrets/postgres_password>@127.0.0.1:5432/shinrai
 # nats://127.0.0.1:4222
 
 docker compose ps
@@ -24,8 +27,11 @@ docker compose down                # stop
 docker compose down -v             # stop and delete the data volume
 ```
 
+Full stack + optional TLS: see [Deployment](deployment.md).
+
 ```bash
 cp .env.example .env
+# Align SHINRAI_DATABASE_URL password with deploy/secrets/postgres_password
 ```
 
 | Variable | Meaning |

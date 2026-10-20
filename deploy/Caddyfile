@@ -1,0 +1,33 @@
+# TLS termination in front of Shinrai gateways (Compose profile `tls`).
+# Local self-signed certs via `tls internal` — browsers will warn once; accept/trust for demos.
+#
+#   https://og.localhost/ui
+#   https://md.localhost/health
+#
+# `.localhost` resolves to 127.0.0.1 on modern OS/resolvers (no hosts file needed).
+
+{
+	# Keep ACME off for local/dev; use internal CA.
+	auto_https disable_redirects
+}
+
+og.localhost {
+	tls internal
+	encode gzip
+	reverse_proxy order-gateway:8081
+}
+
+md.localhost {
+	tls internal
+	encode gzip
+	reverse_proxy md-gateway:8080
+}
+
+# Optional plain HTTP → HTTPS for the same hostnames.
+http://og.localhost {
+	redir https://og.localhost{uri} permanent
+}
+
+http://md.localhost {
+	redir https://md.localhost{uri} permanent
+}
