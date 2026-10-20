@@ -48,7 +48,7 @@ Total: **800** milestones.
 
 - **M-0016**: Verify hash chain on hydrate; reject breaks
 - **M-0017**: Stop accepting from_parts_legacy in prod hydrate
-- **M-0018**: Audit kinds for ops/KYC/approvals/risk changes
+- **M-0018**: ~~Audit kinds for ops/KYC/approvals/risk changes~~ **partial** (risk via `risk_ops_audit`; KYC/approvals still separate tables)
 - **M-0019**: Require correlation id on all order-path records
 - **M-0020**: HMAC export key rotation + dual-key verify
 - **M-0021**: Retention/compaction for audit_records
@@ -894,7 +894,7 @@ Total: **800** milestones.
 - **M-0731**: Single-name concentration limits
 - **M-0732**: Market-hours calendars (holidays/early close)
 - **M-0733**: Day P&L reset persistence across restarts
-- **M-0734**: Ops audit trail for every risk mutation
+- **M-0734**: ~~Ops audit trail for every risk mutation~~ **done** (`risk_ops_audit` + `GET /v1/ops/risk-audit`)
 - **M-0735**: Reject negative/zero patched limits in ops HTTP
 - **M-0736**: Short locate / borrow check stub
 - **M-0737**: Asset-class exposure multi-currency edge cases

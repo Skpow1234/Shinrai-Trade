@@ -116,19 +116,28 @@ pub async fn post_risk(
     if let Err(resp) = require_ops_auth(&state, &headers, query.ops_token.as_deref(), None) {
         return resp;
     }
+    let mut mutations: Vec<(String, Value)> = Vec::new();
     let (limits, global_kill, risk_snap) = {
         let mut engine = lock_engine(&state);
         if let Some(on) = body.global_kill {
             engine.risk_mut().set_global_kill(on);
+            mutations.push(("global_kill".into(), json!({ "on": on })));
         }
         if let Some(patch) = body.limits {
             let mut limits = engine.risk().limits();
             apply_limits_patch(&mut limits, &patch);
             engine.risk_mut().set_limits(limits);
+            mutations.push(("limits".into(), limits_patch_json(&patch)));
         }
         if let Some(symbol) = body.restrict_symbol.as_deref() {
             match resolve_symbol_id(&state, symbol) {
-                Ok(id) => engine.risk_mut().restrict_instrument(id),
+                Ok(id) => {
+                    engine.risk_mut().restrict_instrument(id);
+                    mutations.push((
+                        "restrict_symbol".into(),
+                        json!({ "symbol": symbol, "instrument_id": id.get() }),
+                    ));
+                }
                 Err(code) => {
                     return (
                         StatusCode::BAD_REQUEST,
@@ -140,7 +149,13 @@ pub async fn post_risk(
         }
         if let Some(symbol) = body.allow_symbol.as_deref() {
             match resolve_symbol_id(&state, symbol) {
-                Ok(id) => engine.risk_mut().allow_instrument(id),
+                Ok(id) => {
+                    engine.risk_mut().allow_instrument(id);
+                    mutations.push((
+                        "allow_symbol".into(),
+                        json!({ "symbol": symbol, "instrument_id": id.get() }),
+                    ));
+                }
                 Err(code) => {
                     return (
                         StatusCode::BAD_REQUEST,
@@ -154,6 +169,10 @@ pub async fn post_risk(
             engine
                 .risk_mut()
                 .set_account_kill(AccountId::from_u64(ak.account_id), ak.on);
+            mutations.push((
+                "account_kill".into(),
+                json!({ "account_id": ak.account_id, "on": ak.on }),
+            ));
         }
         (
             engine.risk().limits(),
@@ -170,13 +189,75 @@ pub async fn post_risk(
             )
                 .into_response();
         }
+        if let Err(err) = persist_risk_ops_audit(&state, &pool, "ops", &mutations).await {
+            eprintln!("shinrai-order-gateway: persist risk_ops_audit failed: {err}");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "type": "error", "code": "risk_audit_persist_failed" })),
+            )
+                .into_response();
+        }
     }
     Json(json!({
         "ok": true,
         "global_kill": global_kill,
         "limits": limits_json(limits),
+        "audit_events": mutations.len(),
     }))
     .into_response()
+}
+
+async fn persist_risk_ops_audit(
+    state: &AppState,
+    pool: &shinrai_store::StorePool,
+    actor: &str,
+    mutations: &[(String, Value)],
+) -> Result<(), shinrai_store::StoreError> {
+    for (action, detail) in mutations {
+        let snap = shinrai_store::RiskOpsAuditSnapshot {
+            id: 0,
+            action: action.clone(),
+            detail: detail.clone(),
+            actor: Some(actor.to_owned()),
+            instance_id: Some(state.instance_id().to_owned()),
+        };
+        shinrai_store::insert_risk_ops_audit(pool, &snap).await?;
+    }
+    Ok(())
+}
+
+fn limits_patch_json(patch: &RiskLimitsPatch) -> Value {
+    let mut obj = serde_json::Map::new();
+    if let Some(v) = patch.max_order_qty_lots {
+        obj.insert("max_order_qty_lots".into(), json!(v));
+    }
+    if let Some(v) = patch.max_order_notional_minor {
+        obj.insert("max_order_notional_minor".into(), json!(v));
+    }
+    if let Some(v) = patch.max_position_lots {
+        obj.insert("max_position_lots".into(), json!(v));
+    }
+    if let Some(v) = patch.collar_bps {
+        obj.insert("collar_bps".into(), json!(v));
+    }
+    if patch.clear_market_session == Some(true) {
+        obj.insert("clear_market_session".into(), json!(true));
+    } else if let Some(session) = patch.market_session_utc {
+        obj.insert("market_session_utc".into(), json!(session));
+    }
+    if let Some(v) = patch.max_daily_loss_minor {
+        obj.insert("max_daily_loss_minor".into(), json!(v));
+    }
+    if let Some(v) = patch.allow_short {
+        obj.insert("allow_short".into(), json!(v));
+    }
+    if let Some(v) = patch.max_short_lots {
+        obj.insert("max_short_lots".into(), json!(v));
+    }
+    if let Some(v) = patch.max_asset_class_notional_minor {
+        obj.insert("max_asset_class_notional_minor".into(), json!(v));
+    }
+    Value::Object(obj)
 }
 
 fn apply_limits_patch(limits: &mut RiskLimits, patch: &RiskLimitsPatch) {
@@ -297,7 +378,7 @@ pub async fn get_ops_dashboard(
     <thead><tr><th>order_id</th><th>status</th><th>age_secs</th><th>last_at</th></tr></thead>
     <tbody id="stuck"></tbody>
   </table>
-  <p class="sub" style="margin-top:1rem"><a href="/ui">/ui</a> · <a href="/v1/metrics">/v1/metrics</a> · <a href="/v1/ops/stuck-orders">/v1/ops/stuck-orders</a> · <a href="/v1/ops/risk">/v1/ops/risk</a></p>
+  <p class="sub" style="margin-top:1rem"><a href="/ui">/ui</a> · <a href="/v1/metrics">/v1/metrics</a> · <a href="/v1/ops/stuck-orders">/v1/ops/stuck-orders</a> · <a href="/v1/ops/risk">/v1/ops/risk</a> · <a href="/v1/ops/risk-audit">/v1/ops/risk-audit</a></p>
   <div id="err"></div>
 <script>
 async function refresh() {{
@@ -686,6 +767,27 @@ pub async fn post_approvals(
                 .risk_mut()
                 .grant_override(approved.account_id, approved.instrument_id);
         }
+        if let Some(pool) = state.store_pool() {
+            let mutations = [(
+                "grant_override".into(),
+                json!({
+                    "approval_id": approved.id,
+                    "account_id": approved.account_id.get(),
+                    "instrument_id": approved.instrument_id.get(),
+                    "symbol": approved.symbol,
+                    "requested_by": approved.requested_by,
+                    "approved_by": approved.approved_by,
+                }),
+            )];
+            if let Err(err) = persist_risk_ops_audit(&state, &pool, &actor, &mutations).await {
+                eprintln!("shinrai-order-gateway: risk_ops_audit grant_override failed: {err}");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({ "type": "error", "code": "risk_audit_persist_failed" })),
+                )
+                    .into_response();
+            }
+        }
         return Json(json!({
             "ok": true,
             "status": "approved",
@@ -792,6 +894,47 @@ pub async fn get_approvals(
         "durable": state.store.is_some(),
     }))
     .into_response()
+}
+
+/// `GET /v1/ops/risk-audit` — recent risk control-plane mutation audit rows.
+pub async fn get_risk_audit(
+    headers: HeaderMap,
+    Query(query): Query<OpsAuthQuery>,
+    State(state): State<AppState>,
+) -> Response {
+    if let Err(resp) = require_ops_auth(&state, &headers, query.ops_token.as_deref(), None) {
+        return resp;
+    }
+    let Some(pool) = state.store.as_ref() else {
+        return Json(json!({
+            "durable": false,
+            "rows": [],
+            "hint": "Attach SHINRAI_DATABASE_URL for durable risk ops audit.",
+        }))
+        .into_response();
+    };
+    match shinrai_store::list_risk_ops_audit(pool, 100).await {
+        Ok(rows) => Json(json!({
+            "durable": true,
+            "rows": rows.iter().map(|r| json!({
+                "id": r.id,
+                "action": r.action,
+                "detail": r.detail,
+                "actor": r.actor,
+                "instance_id": r.instance_id,
+            })).collect::<Vec<_>>(),
+        }))
+        .into_response(),
+        Err(err) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "type": "error",
+                "code": "store_unavailable",
+                "message": err.to_string(),
+            })),
+        )
+            .into_response(),
+    }
 }
 
 /// `GET /v1/ops/withdraw-audit` — recent paper withdraw audit rows (Postgres when configured).

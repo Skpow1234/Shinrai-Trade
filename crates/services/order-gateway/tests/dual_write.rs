@@ -284,6 +284,76 @@ async fn restart_hydrates_working_order_and_cancel() {
 }
 
 #[tokio::test]
+async fn risk_ops_audit_records_mutations() {
+    if !database_configured() {
+        eprintln!("skipping: set SHINRAI_DATABASE_URL to run dual-write tests");
+        return;
+    }
+    let _guard = DB_LOCK.lock().await;
+
+    let pool = match connect_from_env().await {
+        Ok(p) => p,
+        Err(StoreError::MissingDatabaseUrl) => return,
+        Err(err) => panic!("connect: {err}"),
+    };
+    migrate(&pool).await.expect("migrate");
+
+    let account_raw = 606_u64;
+    let state =
+        AppState::for_test_with_store("risk-tok", "trader", account_raw, 10_000, pool.clone())
+            .await;
+    let app = router(state);
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/ops/risk")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "global_kill": true,
+                        "restrict_symbol": "AAPL",
+                        "account_kill": { "account_id": account_raw, "on": true }
+                    })
+                    .to_string(),
+                ))
+                .expect("req"),
+        )
+        .await
+        .expect("resp");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("bytes");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["audit_events"], 3);
+
+    let audit = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/ops/risk-audit")
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("audit");
+    assert_eq!(audit.status(), StatusCode::OK);
+    let abody = axum::body::to_bytes(audit.into_body(), usize::MAX)
+        .await
+        .expect("bytes");
+    let ajson: serde_json::Value = serde_json::from_slice(&abody).expect("json");
+    assert_eq!(ajson["durable"], true);
+    let rows = ajson["rows"].as_array().expect("rows");
+    let actions: Vec<&str> = rows.iter().filter_map(|r| r["action"].as_str()).collect();
+    assert!(actions.contains(&"global_kill"));
+    assert!(actions.contains(&"restrict_symbol"));
+    assert!(actions.contains(&"account_kill"));
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn ha_promote_rehydrates_before_serving() {
     if !database_configured() {
@@ -300,9 +370,7 @@ async fn ha_promote_rehydrates_before_serving() {
     migrate(&pool).await.expect("migrate");
 
     // Free the singleton lease so this test can acquire.
-    expire_oms_leader_lease(&pool)
-        .await
-        .expect("expire lease");
+    expire_oms_leader_lease(&pool).await.expect("expire lease");
 
     let account_raw = 505_u64;
     let clid_a = format!("ha-a-{}", unique_suffix());

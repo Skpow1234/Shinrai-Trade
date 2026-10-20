@@ -316,6 +316,24 @@ async fn risk_state_round_trip() {
     upsert_risk_state(&pool, &snap).await.expect("upsert risk");
     let loaded = load_risk_state(&pool).await.expect("load").expect("row");
     assert_eq!(loaded, snap);
+
+    let audit = shinrai_store::RiskOpsAuditSnapshot {
+        id: 0,
+        action: "global_kill".into(),
+        detail: serde_json::json!({ "on": true }),
+        actor: Some("ops".into()),
+        instance_id: Some(format!("test-{}", uuid_like())),
+    };
+    let aid = shinrai_store::insert_risk_ops_audit(&pool, &audit)
+        .await
+        .expect("risk ops audit");
+    assert!(aid > 0);
+    let rows = shinrai_store::list_risk_ops_audit(&pool, 10)
+        .await
+        .expect("list risk ops audit");
+    assert!(rows
+        .iter()
+        .any(|r| r.id == aid && r.action == "global_kill"));
 }
 
 #[tokio::test]

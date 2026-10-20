@@ -81,13 +81,13 @@ Real custody / bank rails stay gated on regulation and licensed partners. This p
 - **Async KYC HTTP**: compliance vendor uses async `reqwest` + `block_in_place` (no `reqwest::blocking`)
 - **Multi-instance OMS HA**: Postgres `oms_leader_lease` + `SHINRAI_OG_HA` (active-passive; followers `503 not_oms_leader`; outbox publishes only on leader; hydrate-on-promote + follower warm rehydrate)
 - **Durable risk control plane**: `risk_state` table (kills/limits/restrictions) restored on hydrate; collar fail-closed when `collar_bps>0` and no mark
+- **Risk ops audit**: `risk_ops_audit` + `GET /v1/ops/risk-audit` for every ops risk mutation (and system persist-fail kills / approval overrides)
 
 ## Suggested next (priority)
 
-1. Ops audit trail for every risk mutation
-2. FIX Reject / TestRequest / Drop Copy session type
-3. Raw CME MDP3 / fuller Databento live schemas (L2 depth)
-4. KYC empty map fail-closed in production (`M-0346`)
+1. FIX Reject / TestRequest / Drop Copy session type
+2. Raw CME MDP3 / fuller Databento live schemas (L2 depth)
+3. KYC empty map fail-closed in production (`M-0346`)
 
 ## Full backlog (500+)
 

@@ -72,9 +72,7 @@ pub async fn run_leader_heartbeat(
                 state.set_oms_leader(false);
                 state.set_oms_promoting(false);
                 if was {
-                    eprintln!(
-                        "shinrai-order-gateway: lost OMS leader lease (instance={instance})"
-                    );
+                    eprintln!("shinrai-order-gateway: lost OMS leader lease (instance={instance})");
                 }
                 // Warm standby: keep in-memory OMS aligned with shared Postgres.
                 if let Err(err) = state.rehydrate_from_store().await {
@@ -96,11 +94,7 @@ pub async fn run_leader_heartbeat(
 /// Rehydrates from the store, reconfirms the lease, then flips the leader flag.
 ///
 /// Returns `true` when this instance may serve OMS traffic.
-pub async fn promote_oms_leader(
-    pool: &StorePool,
-    state: &AppState,
-    ttl: Duration,
-) -> bool {
+pub async fn promote_oms_leader(pool: &StorePool, state: &AppState, ttl: Duration) -> bool {
     let instance = state.instance_id();
     state.set_oms_promoting(true);
     state.set_oms_leader(false);
@@ -127,9 +121,7 @@ pub async fn promote_oms_leader(
         }
         Err(err) => {
             state.set_oms_leader(false);
-            eprintln!(
-                "shinrai-order-gateway: promote hydrate failed (instance={instance}): {err}"
-            );
+            eprintln!("shinrai-order-gateway: promote hydrate failed (instance={instance}): {err}");
             false
         }
     }

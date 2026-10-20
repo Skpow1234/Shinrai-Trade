@@ -689,10 +689,7 @@ impl AppState {
         self.apply_store_hydrate(pool).await
     }
 
-    async fn apply_store_hydrate(
-        &self,
-        pool: &StorePool,
-    ) -> Result<(), shinrai_store::StoreError> {
+    async fn apply_store_hydrate(&self, pool: &StorePool) -> Result<(), shinrai_store::StoreError> {
         let payload = crate::hydrate::load_hydrate_payload(pool).await?;
         let risk_snap = shinrai_store::load_risk_state(pool).await?;
         let max_seq = {
@@ -788,6 +785,22 @@ impl AppState {
                 if let Err(risk_err) = shinrai_store::upsert_risk_state(pool, &risk_snap).await {
                     eprintln!(
                         "shinrai-order-gateway: persist risk_state after kill failed: {risk_err}"
+                    );
+                }
+                let audit = shinrai_store::RiskOpsAuditSnapshot {
+                    id: 0,
+                    action: "global_kill".into(),
+                    detail: serde_json::json!({
+                        "on": true,
+                        "reason": "persist_failed",
+                        "error": err.to_string(),
+                    }),
+                    actor: Some("system:persist_failed".into()),
+                    instance_id: Some(self.instance_id.clone()),
+                };
+                if let Err(audit_err) = shinrai_store::insert_risk_ops_audit(pool, &audit).await {
+                    eprintln!(
+                        "shinrai-order-gateway: risk_ops_audit after kill failed: {audit_err}"
                     );
                 }
                 eprintln!("shinrai-order-gateway: persist failed (kill switch engaged): {err}");
@@ -1153,6 +1166,7 @@ pub fn router(state: AppState) -> Router {
             "/v1/ops/risk",
             get(crate::ops_http::get_risk).post(crate::ops_http::post_risk),
         )
+        .route("/v1/ops/risk-audit", get(crate::ops_http::get_risk_audit))
         .route(
             "/v1/ops/reconciliation/eod",
             post(crate::ops_http::post_eod_reconciliation),

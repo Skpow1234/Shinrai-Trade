@@ -18,6 +18,7 @@ mod outbox;
 mod pool;
 mod positions;
 mod risk;
+mod risk_ops_audit;
 mod venue_session;
 mod withdraw_audit;
 
@@ -31,7 +32,8 @@ pub use drop_copy::{list_drop_copy_fills, DropCopyFillSnapshot};
 pub use error::StoreError;
 pub use inbox::try_claim_inbox;
 pub use leader::{
-    expire_oms_leader_lease, heartbeat_oms_leader, is_oms_leader, load_oms_leader_lease, LeaderLease,
+    expire_oms_leader_lease, heartbeat_oms_leader, is_oms_leader, load_oms_leader_lease,
+    LeaderLease,
 };
 pub use ledger::{
     insert_ledger_entry, list_ledger_entries, load_ledger_entry_by_key, LedgerEntrySnapshot,
@@ -47,6 +49,7 @@ pub use outbox::{
 pub use pool::{connect, connect_from_env, migrate, StorePool};
 pub use positions::{list_paper_positions, upsert_paper_position, PaperPositionSnapshot};
 pub use risk::{load_risk_state, upsert_risk_state};
+pub use risk_ops_audit::{insert_risk_ops_audit, list_risk_ops_audit, RiskOpsAuditSnapshot};
 pub use venue_session::{load_venue_session_cursor, VenueSessionCursorSnapshot};
 pub use withdraw_audit::{insert_withdraw_audit, list_withdraw_audit, WithdrawAuditSnapshot};
 

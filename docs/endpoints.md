@@ -91,6 +91,7 @@ When `SHINRAI_DATABASE_URL` is set, Postgres is **required write-through**: subm
 | `GET` | `/v1/ops` | Ops | Ops HTML dashboard |
 | `GET` | `/v1/ops/stuck-orders` | Ops | Stuck pending OMS |
 | `GET`/`POST` | `/v1/ops/risk` | Ops | Risk control plane |
+| `GET` | `/v1/ops/risk-audit` | Ops | Risk mutation audit trail |
 | `POST` | `/v1/ops/reconciliation/eod` | Ops | EOD broker recon |
 | `GET`/`POST` | `/v1/ops/approvals` | Ops | Approvals |
 | `GET` | `/v1/ops/withdraw-audit` | Ops | Paper withdraw audit |
