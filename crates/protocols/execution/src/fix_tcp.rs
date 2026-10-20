@@ -450,6 +450,7 @@ fn handle_new(
             ("151", "0"),
             ("32", "0"),
             ("31", "0"),
+            ("103", "11"), // Unsupported order characteristic
             ("58", "fok cannot rest"),
         ];
         return send_acceptor(stream, config, next_out, outbound, "8", &body);
@@ -535,22 +536,22 @@ fn handle_cancel(
     let cum = row.cum_qty.to_string();
     let px = row.price.to_string();
     if leaves <= 0 {
+        let cxl = map
+            .get("11")
+            .cloned()
+            .unwrap_or_else(|| format!("cxl-{orig}"));
         return send_acceptor(
             stream,
             config,
             next_out,
             outbound,
-            "8",
+            "9",
             &[
                 ("37", venue.as_str()),
-                ("11", orig.as_str()),
-                ("150", "8"),
-                ("39", "8"),
-                ("54", side.as_str()),
-                ("14", cum.as_str()),
-                ("151", "0"),
-                ("32", "0"),
-                ("31", "0"),
+                ("11", cxl.as_str()),
+                ("41", orig.as_str()),
+                ("39", "2"),  // OrdStatus=Filled
+                ("102", "0"), // Too late to cancel
                 ("58", "already filled"),
             ],
         );

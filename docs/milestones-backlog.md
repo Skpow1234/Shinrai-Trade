@@ -175,7 +175,7 @@ Total: **800** milestones.
 - **M-0123**: ~~FIX Drop Copy session type~~ **done** (`FixSessionKind::DropCopy` / `SHINRAI_OG_FIX_SESSION=drop_copy`)
 - **M-0123b**: ~~FIX Reject `35=3` + TestRequest `35=1`~~ **done** (initiator + paper acceptor)
 - **M-0124**: FIX Order Cancel Request full path
-- **M-0125**: FIX ExecutionReport Reject mapping
+- **M-0125**: ~~FIX ExecutionReport Reject mapping~~ **done** (ER `150=8` + `OrdRejReason`/`Text`; CancelReject as `35=9` + `CxlRejReason`)
 - **M-0126**: Venue capability matrix documentation
 - **M-0127**: Paper→live kill switch per venue
 - **M-0128**: Venue health probe endpoint

@@ -2,7 +2,9 @@
 //!
 //! Encodes real SOH-delimited FIX for Logon / Heartbeat / `TestRequest` /
 //! `Reject` / `NewOrderSingle` / Cancel / Replace and consumes
-//! [`ExecutionReport`] (`35=8`) replies.
+//! [`ExecutionReport`] (`35=8`) / `OrderCancelReject` (`35=9`) replies.
+//! Business rejects use `ExecType`=`8` with `OrdRejReason` (`103`) + `Text` (`58`);
+//! cancel rejects are a distinct `35=9` with `CxlRejReason` (`102`).
 //! Session recovery: inbound gap → `ResendRequest` (`35=2`); respond with
 //! retransmit (`43=Y`) or `SequenceReset` gap-fill (`35=4` / `123=Y`).
 //! Session kinds: order-entry (default) or drop-copy (receive ERs only).
@@ -509,6 +511,7 @@ impl FixPaperVenue {
     ) -> Result<(), ExecutionError> {
         match map.get("35").map(String::as_str) {
             Some("8") => self.ingest_execution_report(map),
+            Some("9") => self.ingest_cancel_reject(map),
             Some("2") => self.fulfill_resend_request(map),
             Some("4") => self.apply_sequence_reset(map),
             Some("1") => self.reply_test_request(map),
@@ -720,6 +723,10 @@ impl FixPaperVenue {
                     self.ingest_execution_report(&map)?;
                     got = got.saturating_add(1);
                 }
+                Some("9") => {
+                    self.ingest_cancel_reject(&map)?;
+                    got = got.saturating_add(1);
+                }
                 Some("3") => {
                     self.note_session_reject(&map);
                     return Err(ExecutionError::InvalidState("session reject"));
@@ -772,7 +779,7 @@ impl FixPaperVenue {
             "4" => ExecType::Canceled,
             "5" => ExecType::Replaced,
             "8" => ExecType::Rejected {
-                reason: map.get("58").cloned().unwrap_or_else(|| "rejected".into()),
+                reason: reject_reason_from_tags(map.get("103").map(String::as_str), map.get("58")),
             },
             "C" => ExecType::Expired,
             _ => {
@@ -792,6 +799,9 @@ impl FixPaperVenue {
             if let Some(row) = self.inflight.get_mut(&order_id) {
                 row.canceled = true;
             }
+        }
+        if matches!(exec_type, ExecType::Rejected { .. }) {
+            self.inflight.remove(&order_id);
         }
         if matches!(exec_type, ExecType::New | ExecType::Replaced) {
             self.inflight.entry(order_id).or_insert_with(|| Inflight {
@@ -832,6 +842,57 @@ impl FixPaperVenue {
             exec_id,
             exec_type,
             qty,
+            price,
+            self.session,
+            report_seq,
+        );
+        self.history.push(report.clone());
+        self.outbox.push_back(report);
+        Ok(())
+    }
+
+    /// Ingests `OrderCancelReject` (`35=9`).
+    fn ingest_cancel_reject(
+        &mut self,
+        map: &BTreeMap<String, String>,
+    ) -> Result<(), ExecutionError> {
+        let cl_ord = map
+            .get("41")
+            .or_else(|| map.get("11"))
+            .ok_or(ExecutionError::InvalidState("OCR missing ClOrdID"))?;
+        let order_key = cl_ord
+            .strip_prefix("cxl-")
+            .or_else(|| cl_ord.strip_prefix("rpl-"))
+            .unwrap_or(cl_ord.as_str());
+        let order_id = OrderId::from_u64(
+            order_key
+                .parse()
+                .map_err(|_| ExecutionError::InvalidState("OCR ClOrdID not u64"))?,
+        );
+        let venue_raw = map
+            .get("37")
+            .cloned()
+            .or_else(|| {
+                self.inflight
+                    .get(&order_id)
+                    .map(|r| r.venue_order_id.as_str().to_owned())
+            })
+            .unwrap_or_else(|| format!("FIX-{}", self.next_venue));
+        let venue_order_id =
+            VenueOrderId::new(venue_raw).map_err(|_| ExecutionError::InvalidIdentifier)?;
+        let reason = reject_reason_from_tags(map.get("102").map(String::as_str), map.get("58"));
+        let price = self
+            .inflight
+            .get(&order_id)
+            .map_or_else(|| PriceTicks::from_scaled(0), |r| r.price);
+        let report_seq = self.next_report_seq;
+        self.next_report_seq = self.next_report_seq.saturating_add(1);
+        let report = ExecutionReport::new(
+            order_id,
+            venue_order_id,
+            None,
+            ExecType::CancelReject { reason },
+            QuantityLots::from_lots(0),
             price,
             self.session,
             report_seq,
@@ -949,6 +1010,40 @@ impl FixPaperVenue {
         cum: i64,
         side: Side,
     ) -> Result<(), ExecutionError> {
+        let cl_ord = order_id.get().to_string();
+        let venue = venue_order_id.as_str().to_string();
+
+        // Cancel rejects are a distinct FIX message (`35=9`), not ExecType=8.
+        if let ExecType::CancelReject { reason } = &exec_type {
+            let cxl_id = format!("cxl-{cl_ord}");
+            let code = cxl_rej_reason_code(reason).to_string();
+            let ord_status = if leaves <= 0 && cum > 0 { "2" } else { "0" };
+            let body = [
+                ("37", venue.as_str()),
+                ("11", cxl_id.as_str()),
+                ("41", cl_ord.as_str()),
+                ("39", ord_status),
+                ("102", code.as_str()),
+                ("58", reason.as_str()),
+            ];
+            let _ = self.emit_acceptor("9", &body);
+            let report_seq = self.next_report_seq;
+            self.next_report_seq = self.next_report_seq.saturating_add(1);
+            let report = ExecutionReport::new(
+                order_id,
+                venue_order_id,
+                None,
+                exec_type,
+                qty,
+                price,
+                self.session,
+                report_seq,
+            );
+            self.history.push(report.clone());
+            self.outbox.push_back(report);
+            return Ok(());
+        }
+
         let (fix_exec, ord_status) = match &exec_type {
             ExecType::New => ("0", "0"),
             ExecType::Trade => {
@@ -960,11 +1055,10 @@ impl FixPaperVenue {
             }
             ExecType::Canceled => ("4", "4"),
             ExecType::Replaced => ("5", "1"),
-            ExecType::Rejected { .. } | ExecType::CancelReject { .. } => ("8", "8"),
+            ExecType::Rejected { .. } => ("8", "8"),
+            ExecType::CancelReject { .. } => unreachable!("handled above"),
             ExecType::Expired => ("C", "C"),
         };
-        let cl_ord = order_id.get().to_string();
-        let venue = venue_order_id.as_str().to_string();
         let exec = exec_id
             .as_ref()
             .map(|e| e.as_str().to_string())
@@ -990,6 +1084,10 @@ impl FixPaperVenue {
         ];
         if !exec.is_empty() {
             fields.push(("17", exec));
+        }
+        if let ExecType::Rejected { reason } = &exec_type {
+            fields.push(("103", ord_rej_reason_code(reason).to_string()));
+            fields.push(("58", reason.clone()));
         }
         let body: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
         let _wire_seq = self.emit_acceptor("8", &body);
@@ -1424,6 +1522,53 @@ impl ExecutionVenue for FixPaperVenue {
     }
 }
 
+/// Builds a human reason from FIX reject tags (prefer `Text`, else code).
+fn reject_reason_from_tags(code: Option<&str>, text: Option<&String>) -> String {
+    if let Some(t) = text.map(|s| s.as_str().trim()).filter(|s| !s.is_empty()) {
+        return t.to_string();
+    }
+    match code {
+        Some(c) if !c.is_empty() => format!("code={c}"),
+        _ => "rejected".into(),
+    }
+}
+
+/// Maps a reject reason string to FIX `OrdRejReason` (tag 103).
+fn ord_rej_reason_code(reason: &str) -> &'static str {
+    let r = reason.to_ascii_lowercase();
+    if r.contains("fok") || r.contains("unsupported") {
+        "11" // Unsupported order characteristic
+    } else if r.contains("unknown symbol") {
+        "1"
+    } else if r.contains("exchange closed") {
+        "2"
+    } else if r.contains("limit") {
+        "3"
+    } else if r.contains("too late") {
+        "4"
+    } else if r.contains("unknown order") {
+        "5"
+    } else if r.contains("duplicate") {
+        "6"
+    } else {
+        "99" // Other
+    }
+}
+
+/// Maps a cancel-reject reason string to FIX `CxlRejReason` (tag 102).
+fn cxl_rej_reason_code(reason: &str) -> &'static str {
+    let r = reason.to_ascii_lowercase();
+    if r.contains("already filled") || r.contains("too late") {
+        "0" // Too late to cancel
+    } else if r.contains("unknown") {
+        "1"
+    } else if r.contains("pending") {
+        "3"
+    } else {
+        "99" // Other
+    }
+}
+
 /// Encodes a FIX 4.2 message with body length and checksum.
 #[must_use]
 #[allow(clippy::format_push_string)]
@@ -1579,6 +1724,68 @@ mod tests {
             .iter()
             .any(|r| matches!(r.exec_type(), ExecType::Canceled)));
         assert!(v.outbound_wire().iter().any(|m| m.contains("35=F")));
+    }
+
+    #[test]
+    fn fok_reject_emits_ord_rej_reason() {
+        let mut v = FixPaperVenue::new(FixConfig::ack_only());
+        v.logon().expect("logon");
+        v.submit(&NewVenueOrder {
+            order_id: OrderId::from_u64(8),
+            instrument_id: InstrumentId::from_u64(1),
+            side: Side::Buy,
+            qty: QuantityLots::from_lots(1),
+            price: PriceTicks::from_scaled(100),
+            tif: TimeInForce::Fok,
+        })
+        .expect("submit");
+        let reports = v.poll();
+        assert_eq!(reports.len(), 1);
+        assert!(matches!(
+            reports[0].exec_type(),
+            ExecType::Rejected { reason } if reason == "fok cannot rest"
+        ));
+        let wire = v
+            .inbound_wire()
+            .iter()
+            .find(|m| m.contains("150=8"))
+            .expect("reject ER");
+        assert!(wire.contains("35=8"));
+        assert!(wire.contains("103=11"));
+        assert!(wire.contains("58=fok cannot rest"));
+        assert!(v.venue_order(OrderId::from_u64(8)).is_none());
+    }
+
+    #[test]
+    fn cancel_after_fill_emits_cancel_reject() {
+        let mut v = FixPaperVenue::local_mock();
+        v.submit(&NewVenueOrder {
+            order_id: OrderId::from_u64(7),
+            instrument_id: InstrumentId::from_u64(1),
+            side: Side::Buy,
+            qty: QuantityLots::from_lots(2),
+            price: PriceTicks::from_scaled(100),
+            tif: TimeInForce::Gtc,
+        })
+        .expect("submit");
+        let _ = v.poll();
+        v.cancel(OrderId::from_u64(7)).expect("cxl");
+        let reports = v.poll();
+        assert!(
+            reports.iter().any(|r| matches!(
+                r.exec_type(),
+                ExecType::CancelReject { reason } if reason == "already filled"
+            )),
+            "missing CancelReject: {reports:?}"
+        );
+        let wire = v
+            .inbound_wire()
+            .iter()
+            .find(|m| m.contains("35=9"))
+            .expect("OrderCancelReject");
+        assert!(wire.contains("102=0"));
+        assert!(wire.contains("58=already filled"));
+        assert!(!wire.contains("150=8"));
     }
 
     #[test]
@@ -1784,6 +1991,62 @@ mod tests {
                 || drop.inbound_wire().iter().any(|m| m.contains("35=3")),
             "expected session Reject on drop-copy order entry"
         );
+    }
+
+    #[test]
+    fn tcp_fok_reject_and_cancel_reject() {
+        let mut cfg = FixConfig::tcp_loopback_ephemeral();
+        cfg.auto_fill = false;
+        let mut v = FixPaperVenue::new(cfg);
+        v.logon().expect("tcp logon");
+        v.submit(&NewVenueOrder {
+            order_id: OrderId::from_u64(21),
+            instrument_id: InstrumentId::from_u64(1),
+            side: Side::Buy,
+            qty: QuantityLots::from_lots(1),
+            price: PriceTicks::from_scaled(100),
+            tif: TimeInForce::Fok,
+        })
+        .expect("fok submit");
+        let reports = v.poll();
+        assert!(
+            reports.iter().any(|r| matches!(
+                r.exec_type(),
+                ExecType::Rejected { reason } if reason == "fok cannot rest"
+            )),
+            "missing Rejected: {reports:?}"
+        );
+        assert!(v
+            .inbound_wire()
+            .iter()
+            .any(|m| m.contains("150=8") && m.contains("103=11")));
+
+        let mut filled = FixPaperVenue::new(FixConfig::tcp_loopback_ephemeral());
+        filled.logon().expect("tcp logon");
+        filled
+            .submit(&NewVenueOrder {
+                order_id: OrderId::from_u64(22),
+                instrument_id: InstrumentId::from_u64(1),
+                side: Side::Buy,
+                qty: QuantityLots::from_lots(1),
+                price: PriceTicks::from_scaled(100),
+                tif: TimeInForce::Gtc,
+            })
+            .expect("submit");
+        let _ = filled.poll();
+        filled.cancel(OrderId::from_u64(22)).expect("cxl");
+        let cxl_reports = filled.poll();
+        assert!(
+            cxl_reports.iter().any(|r| matches!(
+                r.exec_type(),
+                ExecType::CancelReject { reason } if reason == "already filled"
+            )),
+            "missing CancelReject: {cxl_reports:?}"
+        );
+        assert!(filled
+            .inbound_wire()
+            .iter()
+            .any(|m| m.contains("35=9") && m.contains("102=0")));
     }
 
     #[test]

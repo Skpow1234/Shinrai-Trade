@@ -54,7 +54,7 @@ Complete for the licensed-broker **paper** path:
 
 ### Known gaps (Phase 4+)
 
-- FIX subset still omits some admin/business edges (e.g. fuller business Reject mapping, Drop Copy fanout to a second CompID)
+- FIX subset still omits some admin/business edges (e.g. Drop Copy fanout to a second CompID)
 - Futures MD: Databento-shaped paper/live for `ESZ5` (`SHINRAI_MD_FUTURES`) with mbp-10 L2; raw CME MDP3 multicast not wired
 - Multi-instance OMS is **active-passive** (`SHINRAI_OG_HA`); not multi-writer active-active (hydrate-on-promote + follower warm standby)
 
@@ -85,12 +85,13 @@ Real custody / bank rails stay gated on regulation and licensed partners. This p
 - **Durable risk control plane**: `risk_state` table (kills/limits/restrictions) restored on hydrate; collar fail-closed when `collar_bps>0` and no mark
 - **Risk ops audit**: `risk_ops_audit` + `GET /v1/ops/risk-audit` for every ops risk mutation (and system persist-fail kills / approval overrides)
 - **KYC fail-closed**: empty `SHINRAI_OG_KYC_STATUS` blocks trading outside `--dev` / `SHINRAI_OG_KYC_OPEN` (`M-0346`)
+- **FIX business Reject**: ER Reject `150=8` + `OrdRejReason`/`Text`; CancelReject as `35=9` + `CxlRejReason` (`M-0125`)
 
 ## Suggested next (priority)
 
-1. FIX ExecutionReport Reject mapping (`M-0125`)
-2. Raw CME MDP3 multicast (licensed binary UDP) — optional when vendor JSON feed unavailable
-3. Ops audit trail polish / readiness probes
+1. Raw CME MDP3 multicast (licensed binary UDP) — optional when vendor JSON feed unavailable
+2. Ops audit trail polish / readiness probes
+3. FIX Order Cancel Request full path (`M-0124`)
 
 ## Full backlog (500+)
 
