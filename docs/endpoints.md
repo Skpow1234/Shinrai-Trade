@@ -13,6 +13,7 @@ Ops routes (`/v1/ops*`, `/v1/metrics`): require `SHINRAI_OG_OPS_TOKEN` (header o
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `GET` | `/health` | No | Liveness; includes feed mode |
+| `GET` | `/ready` | No | Readiness (process serving); includes feed mode |
 | `POST` | `/v1/auth/token` | Client credentials / refresh | Issue or refresh access tokens |
 | `POST` | `/v1/auth/revoke` | Body token | Revoke access or refresh |
 | `GET` | `/v1/bars` | Yes | Historical OHLCV bars |
@@ -20,11 +21,14 @@ Ops routes (`/v1/ops*`, `/v1/metrics`): require `SHINRAI_OG_OPS_TOKEN` (header o
 | `GET` | `/v1/quotes` | Yes | Latest quote for a symbol |
 | `GET` | `/v1/ws` | Yes | WebSocket fanout |
 
-### Health
+### Health / readiness
 
 ```bash
 curl http://127.0.0.1:8080/health
-# {"status":"ok","service":"market-data-gateway","feed":"none|synth|alpaca|coinbase"}
+# {"status":"ok","service":"market-data-gateway","feed":"none|synth|alpaca|coinbase|…"}
+
+curl http://127.0.0.1:8080/ready
+# {"status":"ok","ready":true,"reasons":[],"feed":"…"}
 ```
 
 ### Auth
@@ -72,7 +76,8 @@ When `SHINRAI_DATABASE_URL` is set, Postgres is **required write-through**: subm
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| `GET` | `/health` | No | Liveness |
+| `GET` | `/health` | No | Liveness (always 200 when process up) |
+| `GET` | `/ready` | No | Readiness: 200 when leader, hydrated, not persist-degraded; else 503 |
 | `GET` | `/ui` | No (UI uses token) | Paper trader HTML |
 | `POST` | `/v1/auth/token` | Client credentials / refresh | Issue or refresh |
 | `POST` | `/v1/auth/revoke` | Body token | Revoke |
@@ -91,7 +96,7 @@ When `SHINRAI_DATABASE_URL` is set, Postgres is **required write-through**: subm
 | `GET` | `/v1/ops` | Ops | Ops HTML dashboard |
 | `GET` | `/v1/ops/stuck-orders` | Ops | Stuck pending OMS |
 | `GET`/`POST` | `/v1/ops/risk` | Ops | Risk control plane |
-| `GET` | `/v1/ops/risk-audit` | Ops | Risk mutation audit trail |
+| `GET` | `/v1/ops/risk-audit` | Ops | Risk mutation audit trail (`?limit=`, `?action=`) |
 | `POST` | `/v1/ops/reconciliation/eod` | Ops | EOD broker recon |
 | `GET`/`POST` | `/v1/ops/approvals` | Ops | Approvals |
 | `GET` | `/v1/ops/withdraw-audit` | Ops | Paper withdraw audit |
@@ -139,6 +144,15 @@ curl -X POST "http://127.0.0.1:8081/v1/accounts/withdraw?token=dev" \
   -d '{"idempotency_key":"wd-1","amount_minor":10000}'
 ```
 
+### Liveness / readiness
+
+```bash
+curl http://127.0.0.1:8081/health   # always 200 when process is up
+curl http://127.0.0.1:8081/ready    # 200 when ready for traffic; 503 + reasons otherwise
+```
+
+`/ready` fails (503) when `persist_degraded`, HA `promoting`, HA follower (`not_leader`), or hydrate incomplete.
+
 ### Ops and metrics
 
 Outside `--dev`, set `SHINRAI_OG_OPS_TOKEN` (Compose `full` uses `compose-ops`).
@@ -150,6 +164,7 @@ curl http://127.0.0.1:8081/v1/ops/risk
 curl -X POST http://127.0.0.1:8081/v1/ops/risk \
   -H 'content-type: application/json' \
   -d '{"global_kill":true,"limits":{"collar_bps":100}}'
+curl "http://127.0.0.1:8081/v1/ops/risk-audit?limit=20&action=global_kill"
 
 curl -X POST http://127.0.0.1:8081/v1/ops/reconciliation/eod \
   -H 'content-type: application/json' \

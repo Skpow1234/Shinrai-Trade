@@ -42,7 +42,8 @@ docker compose --profile full up -d --build
 
 | Service | URL / note |
 |---|---|
-| Market data | `http://127.0.0.1:8080/health` |
+| Market data | `http://127.0.0.1:8080/health` (liveness) / `/ready` |
+| Order gateway | `http://127.0.0.1:8081/health` (liveness) / `/ready` |
 | Paper UI | `http://127.0.0.1:8081/ui` — token `full-dev` |
 | Ops / metrics | Bearer = contents of `deploy/secrets/ops_token` |
 | Postgres | user `shinrai`, password from secret file |
@@ -92,7 +93,7 @@ SHINRAI_OG_INSTANCE_ID=og-a \
   cargo run -p shinrai-order-gateway --release
 ```
 
-- Only the lease holder serves `/v1/*` (and publishes the outbox). Followers keep `/health` up with `"ha":{"leader":false,"promoting":false}` and return `503` + `not_oms_leader` elsewhere.
+- Only the lease holder serves `/v1/*` (and publishes the outbox). Followers keep `/health` up with `"ha":{"leader":false,"promoting":false}` and return `503` + `not_oms_leader` elsewhere. `/ready` is also reachable on followers and returns **503** with `not_leader` (use it for Kubernetes readiness; keep `/health` for liveness).
 - On promote, the new leader **rehydrates from Postgres** before flipping `leader:true` (`promoting:true` during that window). Followers also warm-rehydrate each heartbeat so failover stays fast.
 - Outbox claim already uses `SKIP LOCKED`; HA additionally gates the publisher to the leader.
 - Do **not** run two HA instances without a shared DB — startup refuses `SHINRAI_OG_HA` when `SHINRAI_DATABASE_URL` is unset.
@@ -133,6 +134,6 @@ export SHINRAI_OG_OPS_TOKEN=…   # or match deploy/secrets/ops_token
 
 - **systemd** on a VM with `EnvironmentFile=` and Compose for Postgres
 - **Managed Postgres** + gateway containers/VMs + optional NATS
-- **Kubernetes** later: Deployments, Ingress, Secrets, probes on `/health`
+- **Kubernetes** later: Deployments, Ingress, Secrets; liveness `/health`, readiness `/ready`
 
 See [milestones-backlog.md](milestones-backlog.md) for Helm, SBOM, image scanning, and HA follow-ups.

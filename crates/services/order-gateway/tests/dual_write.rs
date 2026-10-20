@@ -332,6 +332,7 @@ async fn risk_ops_audit_records_mutations() {
     assert_eq!(json["audit_events"], 3);
 
     let audit = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/v1/ops/risk-audit")
@@ -351,6 +352,27 @@ async fn risk_ops_audit_records_mutations() {
     assert!(actions.contains(&"global_kill"));
     assert!(actions.contains(&"restrict_symbol"));
     assert!(actions.contains(&"account_kill"));
+    assert!(rows.iter().any(|r| r["created_at"].as_str().is_some()));
+
+    let filtered = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/ops/risk-audit?limit=2&action=global_kill")
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("filtered");
+    assert_eq!(filtered.status(), StatusCode::OK);
+    let fbody = axum::body::to_bytes(filtered.into_body(), usize::MAX)
+        .await
+        .expect("bytes");
+    let fjson: serde_json::Value = serde_json::from_slice(&fbody).expect("json");
+    assert_eq!(fjson["limit"], 2);
+    assert_eq!(fjson["action"], "global_kill");
+    let frows = fjson["rows"].as_array().expect("rows");
+    assert!(!frows.is_empty());
+    assert!(frows.iter().all(|r| r["action"] == "global_kill"));
 }
 
 #[tokio::test]

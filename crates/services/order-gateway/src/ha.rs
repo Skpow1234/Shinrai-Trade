@@ -14,14 +14,15 @@ use shinrai_store::{heartbeat_oms_leader, StorePool};
 
 use crate::app::AppState;
 
-/// Rejects `/v1/*` (and other non-health routes) when HA is on and this
-/// instance does not hold the OMS leader lease.
+/// Rejects `/v1/*` (and other non-probe routes) when HA is on and this
+/// instance does not hold the OMS leader lease. `/health` and `/ready` always pass.
 pub async fn require_oms_leader(
     State(state): State<AppState>,
     req: Request<Body>,
     next: Next,
 ) -> Response {
-    if !state.ha_enabled() || req.uri().path() == "/health" {
+    let path = req.uri().path();
+    if !state.ha_enabled() || path == "/health" || path == "/ready" {
         return next.run(req).await;
     }
     if state.is_oms_leader() {

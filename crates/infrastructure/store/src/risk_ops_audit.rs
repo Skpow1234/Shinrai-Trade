@@ -18,6 +18,8 @@ pub struct RiskOpsAuditSnapshot {
     pub actor: Option<String>,
     /// Gateway instance id when known.
     pub instance_id: Option<String>,
+    /// Row creation time (UTC RFC3339-ish from Postgres).
+    pub created_at: Option<String>,
 }
 
 /// Inserts a risk ops audit row.
@@ -47,24 +49,47 @@ pub async fn insert_risk_ops_audit(
 
 /// Lists recent risk ops audit rows (newest first).
 ///
+/// `limit` is clamped to `[1, 500]`. When `action` is `Some`, only matching rows
+/// are returned.
+///
 /// # Errors
 ///
 /// Returns sqlx errors.
 pub async fn list_risk_ops_audit(
     pool: &PgPool,
     limit: i64,
+    action: Option<&str>,
 ) -> Result<Vec<RiskOpsAuditSnapshot>, StoreError> {
-    let rows = sqlx::query_as::<_, RiskOpsRow>(
-        r"
-        SELECT id, action, detail_json, actor, instance_id
-        FROM risk_ops_audit
-        ORDER BY id DESC
-        LIMIT $1
-        ",
-    )
-    .bind(limit.max(1))
-    .fetch_all(pool)
-    .await?;
+    let limit = limit.clamp(1, 500);
+    let rows = if let Some(action) = action.filter(|a| !a.is_empty()) {
+        sqlx::query_as::<_, RiskOpsRow>(
+            r#"
+            SELECT id, action, detail_json, actor, instance_id,
+                   to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at
+            FROM risk_ops_audit
+            WHERE action = $2
+            ORDER BY id DESC
+            LIMIT $1
+            "#,
+        )
+        .bind(limit)
+        .bind(action)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, RiskOpsRow>(
+            r#"
+            SELECT id, action, detail_json, actor, instance_id,
+                   to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at
+            FROM risk_ops_audit
+            ORDER BY id DESC
+            LIMIT $1
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(pool)
+        .await?
+    };
     Ok(rows.into_iter().map(RiskOpsRow::into_snap).collect())
 }
 
@@ -75,6 +100,7 @@ struct RiskOpsRow {
     detail_json: Value,
     actor: Option<String>,
     instance_id: Option<String>,
+    created_at: Option<String>,
 }
 
 impl RiskOpsRow {
@@ -85,6 +111,7 @@ impl RiskOpsRow {
             detail: self.detail_json,
             actor: self.actor,
             instance_id: self.instance_id,
+            created_at: self.created_at,
         }
     }
 }

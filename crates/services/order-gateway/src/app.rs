@@ -156,6 +156,8 @@ pub struct AppState {
     pub(crate) oms_leader: Arc<AtomicBool>,
     /// True while a promote path is rehydrating (still returns `not_oms_leader`).
     pub(crate) oms_promoting: Arc<AtomicBool>,
+    /// True after startup hydrate (or when no durable store is attached).
+    pub(crate) hydrate_complete: Arc<AtomicBool>,
 }
 
 /// Process configuration (tokens / secrets are not displayed).
@@ -606,6 +608,8 @@ impl AppState {
             // until the first successful lease heartbeat.
             oms_leader: Arc::new(AtomicBool::new(!config.ha_enabled)),
             oms_promoting: Arc::new(AtomicBool::new(false)),
+            // Memory-only and fresh attach paths are ready; hydrate_from_store also sets true.
+            hydrate_complete: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -641,6 +645,22 @@ impl AppState {
     /// Updates the promote-in-progress flag (HA heartbeat).
     pub fn set_oms_promoting(&self, promoting: bool) {
         self.oms_promoting.store(promoting, Ordering::Relaxed);
+    }
+
+    /// Whether startup hydrate finished (always true without a store).
+    #[must_use]
+    pub fn is_hydrate_complete(&self) -> bool {
+        self.hydrate_complete.load(Ordering::Relaxed)
+    }
+
+    /// Marks hydrate complete/incomplete (startup / tests).
+    pub fn set_hydrate_complete(&self, complete: bool) {
+        self.hydrate_complete.store(complete, Ordering::Relaxed);
+    }
+
+    /// Test helper: engage persist-degraded (same as a dual-write failure).
+    pub fn mark_persist_degraded_for_test(&self) {
+        self.metrics.record_dual_write_failure();
     }
 
     /// Shared leader flag for background tasks (outbox publisher).
@@ -688,9 +708,18 @@ impl AppState {
         &mut self,
         pool: StorePool,
     ) -> Result<(), shinrai_store::StoreError> {
-        self.apply_store_hydrate(&pool).await?;
-        self.store = Some(pool);
-        Ok(())
+        self.set_hydrate_complete(false);
+        match self.apply_store_hydrate(&pool).await {
+            Ok(()) => {
+                self.store = Some(pool);
+                self.set_hydrate_complete(true);
+                Ok(())
+            }
+            Err(err) => {
+                self.set_hydrate_complete(false);
+                Err(err)
+            }
+        }
     }
 
     /// Reloads durable OMS state from the attached store (HA promote / warm standby).
@@ -815,6 +844,7 @@ impl AppState {
                     }),
                     actor: Some("system:persist_failed".into()),
                     instance_id: Some(self.instance_id.clone()),
+                    created_at: None,
                 };
                 if let Err(audit_err) = shinrai_store::insert_risk_ops_audit(pool, &audit).await {
                     eprintln!(
@@ -1139,6 +1169,7 @@ pub fn unix_logical_now() -> u64 {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/ready", get(ready))
         .route("/ui", get(crate::ui_http::get_ui))
         .route("/ui/", get(crate::ui_http::get_ui))
         .route("/v1/auth/token", post(crate::auth_http::post_token))
@@ -1220,6 +1251,43 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
             "promoting": state.is_oms_promoting(),
         },
     }))
+}
+
+/// Readiness: may take traffic (hydrate done, leader, not persist-degraded).
+async fn ready(State(state): State<AppState>) -> Response {
+    let mut reasons = Vec::new();
+    if state.metrics.is_persist_degraded() {
+        reasons.push("persist_degraded");
+    }
+    if state.is_oms_promoting() {
+        reasons.push("promoting");
+    }
+    if state.ha_enabled() && !state.is_oms_leader() {
+        reasons.push("not_leader");
+    }
+    if state.store.is_some() && !state.is_hydrate_complete() {
+        reasons.push("hydrate_incomplete");
+    }
+    let ready = reasons.is_empty();
+    let body = json!({
+        "status": if ready { "ok" } else { "not_ready" },
+        "service": "order-gateway",
+        "ready": ready,
+        "reasons": reasons,
+        "persist_degraded": state.metrics.is_persist_degraded(),
+        "hydrate_complete": state.is_hydrate_complete(),
+        "instance_id": state.instance_id(),
+        "ha": {
+            "enabled": state.ha_enabled(),
+            "leader": state.is_oms_leader(),
+            "promoting": state.is_oms_promoting(),
+        },
+    });
+    if ready {
+        (StatusCode::OK, Json(body)).into_response()
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response()
+    }
 }
 
 /// Token query param for REST auth.

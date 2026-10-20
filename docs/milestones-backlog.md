@@ -102,7 +102,7 @@ Total: **800** milestones.
 - **M-0060**: ~~Multi-instance OMS leader election~~ **done** (`oms_leader_lease` + `SHINRAI_OG_HA`)
 - **M-0060b**: ~~Hydrate-on-promote / follower warm standby~~ **done** (rehydrate before `leader:true`; warm rehydrate while follower)
 - **M-0061**: Document single-writer sticky sessions
-- **M-0062**: Readiness vs liveness probes
+- **M-0062**: ~~Readiness vs liveness probes~~ **done** (`GET /ready` on OG + MD; `/health` stays liveness)
 - **M-0063**: Postgres backup/restore runbook
 - **M-0064**: Horizontal MD fanout scaling design
 - **M-0065**: systemd unit examples
@@ -306,7 +306,7 @@ Total: **800** milestones.
 - **M-0235**: Backpressure when history mutex contended
 - **M-0236**: Seed journal retention policy
 - **M-0237**: Document bind address security defaults
-- **M-0238**: Readiness probe separate from liveness
+- **M-0238**: ~~Readiness probe separate from liveness~~ **done** (MD `GET /ready`)
 - **M-0239**: Graceful shutdown of WS sessions
 - **M-0240**: OpenAPI for MD REST
 - **M-0241**: CORS policy for browser clients
@@ -414,7 +414,7 @@ Total: **800** milestones.
 - **M-0327**: Replace vs in-flight cancel concurrency
 - **M-0328**: Document X-Admin-Override security
 - **M-0329**: Startup banner: ops auth open/closed
-- **M-0330**: Readiness: hydrate complete && !persist_degraded
+- **M-0330**: ~~Readiness: hydrate complete && !persist_degraded~~ **done** (OG `/ready` reasons; also HA leader/promoting)
 
 ### order-gateway-observability
 
@@ -896,7 +896,7 @@ Total: **800** milestones.
 - **M-0731**: Single-name concentration limits
 - **M-0732**: Market-hours calendars (holidays/early close)
 - **M-0733**: Day P&L reset persistence across restarts
-- **M-0734**: ~~Ops audit trail for every risk mutation~~ **done** (`risk_ops_audit` + `GET /v1/ops/risk-audit`)
+- **M-0734**: ~~Ops audit trail for every risk mutation~~ **done** (`risk_ops_audit` + `GET /v1/ops/risk-audit` with `created_at`, `?limit=`, `?action=`)
 - **M-0735**: Reject negative/zero patched limits in ops HTTP
 - **M-0736**: Short locate / borrow check stub
 - **M-0737**: Asset-class exposure multi-currency edge cases

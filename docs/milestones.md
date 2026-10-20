@@ -87,12 +87,14 @@ Real custody / bank rails stay gated on regulation and licensed partners. This p
 - **KYC fail-closed**: empty `SHINRAI_OG_KYC_STATUS` blocks trading outside `--dev` / `SHINRAI_OG_KYC_OPEN` (`M-0346`)
 - **FIX business Reject**: ER Reject `150=8` + `OrdRejReason`/`Text`; CancelReject as `35=9` + `CxlRejReason` (`M-0125`)
 - **FIX Order Cancel Request**: full `35=F` (Side/Symbol/OrderQty/TransactTime); unknown/dup/filled → `35=9` (`M-0124`)
+- **Readiness probes**: OG + MD `GET /ready` (liveness stays `/health`); OG fails when persist-degraded / HA follower / promoting / hydrate incomplete (`M-0062` / `M-0238` / `M-0330`)
+- **Risk-audit polish**: `created_at` + `?limit=` / `?action=` on `GET /v1/ops/risk-audit`
 
 ## Suggested next (priority)
 
-1. Ops audit trail polish / readiness probes
-2. Raw CME MDP3 multicast stub (licensed binary UDP) — optional when Databento JSON unavailable
-3. CME iLink adapter stub (`M-0132`)
+1. Raw CME MDP3 multicast stub (licensed binary UDP) — optional when Databento JSON unavailable
+2. CME iLink adapter stub (`M-0132`)
+3. Venue health probe endpoint (`M-0128`)
 
 ## Full backlog (500+)
 

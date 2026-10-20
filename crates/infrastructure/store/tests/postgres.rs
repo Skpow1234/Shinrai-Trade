@@ -323,17 +323,28 @@ async fn risk_state_round_trip() {
         detail: serde_json::json!({ "on": true }),
         actor: Some("ops".into()),
         instance_id: Some(format!("test-{}", uuid_like())),
+        created_at: None,
     };
     let aid = shinrai_store::insert_risk_ops_audit(&pool, &audit)
         .await
         .expect("risk ops audit");
     assert!(aid > 0);
-    let rows = shinrai_store::list_risk_ops_audit(&pool, 10)
+    let rows = shinrai_store::list_risk_ops_audit(&pool, 10, None)
         .await
         .expect("list risk ops audit");
-    assert!(rows
-        .iter()
-        .any(|r| r.id == aid && r.action == "global_kill"));
+    assert!(rows.iter().any(|r| {
+        r.id == aid
+            && r.action == "global_kill"
+            && r.created_at.as_deref().is_some_and(|t| t.contains('T'))
+    }));
+    let filtered = shinrai_store::list_risk_ops_audit(&pool, 10, Some("global_kill"))
+        .await
+        .expect("filter");
+    assert!(filtered.iter().any(|r| r.id == aid));
+    let empty = shinrai_store::list_risk_ops_audit(&pool, 10, Some("no_such_action"))
+        .await
+        .expect("empty filter");
+    assert!(empty.is_empty());
 }
 
 #[tokio::test]

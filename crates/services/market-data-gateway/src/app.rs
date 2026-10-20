@@ -471,6 +471,7 @@ pub fn unix_logical_now() -> u64 {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/ready", get(ready))
         .route("/v1/auth/token", post(crate::auth_http::post_token))
         .route("/v1/auth/revoke", post(crate::auth_http::post_revoke))
         .route("/v1/bars", get(crate::historical::get_bars))
@@ -484,6 +485,17 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "status": "ok",
         "service": "market-data-gateway",
+        "feed": state.feed_mode().as_str(),
+    }))
+}
+
+/// Readiness: process is serving HTTP (feed mode is informational).
+async fn ready(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({
+        "status": "ok",
+        "service": "market-data-gateway",
+        "ready": true,
+        "reasons": [],
         "feed": state.feed_mode().as_str(),
     }))
 }

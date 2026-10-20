@@ -34,6 +34,27 @@ async fn health_ok() {
 }
 
 #[tokio::test]
+async fn ready_ok() {
+    let app = router(AppState::for_test("t", "alice"));
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/ready")
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let v: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(v["ready"], true);
+    assert_eq!(v["status"], "ok");
+}
+
+#[tokio::test]
 async fn ws_rejects_missing_token() {
     let addr = spawn_gateway(AppState::for_test("t", "alice")).await;
     let url = format!("ws://{addr}/v1/ws");

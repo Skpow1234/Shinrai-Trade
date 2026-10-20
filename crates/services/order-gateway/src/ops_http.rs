@@ -27,6 +27,16 @@ pub struct OpsAuthQuery {
     ops_token: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RiskAuditQuery {
+    /// Ops bearer when `SHINRAI_OG_OPS_TOKEN` is configured.
+    ops_token: Option<String>,
+    /// Max rows (default 100, max 500).
+    limit: Option<i64>,
+    /// Filter by action label (`global_kill`, `limits`, …).
+    action: Option<String>,
+}
+
 /// `GET /v1/ops/stuck-orders` — pending OMS rows older than threshold.
 pub async fn get_stuck_orders(
     headers: HeaderMap,
@@ -220,6 +230,7 @@ async fn persist_risk_ops_audit(
             detail: detail.clone(),
             actor: Some(actor.to_owned()),
             instance_id: Some(state.instance_id().to_owned()),
+            created_at: None,
         };
         shinrai_store::insert_risk_ops_audit(pool, &snap).await?;
     }
@@ -899,7 +910,7 @@ pub async fn get_approvals(
 /// `GET /v1/ops/risk-audit` — recent risk control-plane mutation audit rows.
 pub async fn get_risk_audit(
     headers: HeaderMap,
-    Query(query): Query<OpsAuthQuery>,
+    Query(query): Query<RiskAuditQuery>,
     State(state): State<AppState>,
 ) -> Response {
     if let Err(resp) = require_ops_auth(&state, &headers, query.ops_token.as_deref(), None) {
@@ -913,15 +924,20 @@ pub async fn get_risk_audit(
         }))
         .into_response();
     };
-    match shinrai_store::list_risk_ops_audit(pool, 100).await {
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let action = query.action.as_deref().filter(|a| !a.is_empty());
+    match shinrai_store::list_risk_ops_audit(pool, limit, action).await {
         Ok(rows) => Json(json!({
             "durable": true,
+            "limit": limit,
+            "action": action,
             "rows": rows.iter().map(|r| json!({
                 "id": r.id,
                 "action": r.action,
                 "detail": r.detail,
                 "actor": r.actor,
                 "instance_id": r.instance_id,
+                "created_at": r.created_at,
             })).collect::<Vec<_>>(),
         }))
         .into_response(),

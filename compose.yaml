@@ -98,7 +98,7 @@ services:
       nats:
         condition: service_started
       md-gateway:
-        condition: service_started
+        condition: service_healthy
     secrets:
       - postgres_password
       - ops_token
