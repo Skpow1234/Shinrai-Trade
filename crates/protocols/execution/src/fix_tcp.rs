@@ -170,6 +170,7 @@ fn paper_acceptor_loop(listener: &TcpListener, config: &FixConfig, stop: &Arc<At
         let mut next_out = 1_u64;
         let mut next_venue = 1_u64;
         let mut next_exec = 1_u64;
+        let mut outbound: Vec<(u64, String)> = Vec::new();
         let mut working: HashMap<String, Working> = HashMap::new();
 
         while !stop.load(Ordering::SeqCst) {
@@ -188,22 +189,47 @@ fn paper_acceptor_loop(listener: &TcpListener, config: &FixConfig, stop: &Arc<At
                         &mut stream,
                         config,
                         &mut next_out,
+                        &mut outbound,
                         "A",
                         &[("98", "0"), ("108", "30")],
                     );
                 }
                 "0" => {
-                    let _ = send_acceptor(&mut stream, config, &mut next_out, "0", &[]);
+                    let _ = send_acceptor(
+                        &mut stream,
+                        config,
+                        &mut next_out,
+                        &mut outbound,
+                        "0",
+                        &[],
+                    );
                 }
                 "5" => {
-                    let _ = send_acceptor(&mut stream, config, &mut next_out, "5", &[]);
+                    let _ = send_acceptor(
+                        &mut stream,
+                        config,
+                        &mut next_out,
+                        &mut outbound,
+                        "5",
+                        &[],
+                    );
                     break;
+                }
+                "2" => {
+                    let _ = handle_resend_request(
+                        &mut stream,
+                        config,
+                        &mut next_out,
+                        &outbound,
+                        &map,
+                    );
                 }
                 "D" => {
                     let _ = handle_new(
                         &mut stream,
                         config,
                         &mut next_out,
+                        &mut outbound,
                         &mut next_venue,
                         &mut next_exec,
                         &mut working,
@@ -211,10 +237,24 @@ fn paper_acceptor_loop(listener: &TcpListener, config: &FixConfig, stop: &Arc<At
                     );
                 }
                 "F" => {
-                    let _ = handle_cancel(&mut stream, config, &mut next_out, &mut working, &map);
+                    let _ = handle_cancel(
+                        &mut stream,
+                        config,
+                        &mut next_out,
+                        &mut outbound,
+                        &mut working,
+                        &map,
+                    );
                 }
                 "G" => {
-                    let _ = handle_replace(&mut stream, config, &mut next_out, &mut working, &map);
+                    let _ = handle_replace(
+                        &mut stream,
+                        config,
+                        &mut next_out,
+                        &mut outbound,
+                        &mut working,
+                        &map,
+                    );
                 }
                 _ => {}
             }
