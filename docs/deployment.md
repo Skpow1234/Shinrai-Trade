@@ -80,6 +80,22 @@ Caddyfile: `deploy/Caddyfile`.
 
 Order-gateway still calls MD over the Docker network (`http://md-gateway:8080`), not through Caddy.
 
+## Multi-instance order-gateway (HA)
+
+Default is single-writer. For active-passive failover with a shared Postgres:
+
+```bash
+SHINRAI_DATABASE_URL=postgres://… \
+SHINRAI_RUN_MIGRATIONS=1 \
+SHINRAI_OG_HA=1 \
+SHINRAI_OG_INSTANCE_ID=og-a \
+  cargo run -p shinrai-order-gateway --release
+```
+
+- Only the lease holder serves `/v1/*` (and publishes the outbox). Followers keep `/health` up with `"ha":{"leader":false}` and return `503` + `not_oms_leader` elsewhere.
+- Outbox claim already uses `SKIP LOCKED`; HA additionally gates the publisher to the leader.
+- Do **not** run two HA instances without a shared DB — startup refuses `SHINRAI_OG_HA` when `SHINRAI_DATABASE_URL` is unset.
+
 ## Local binary “deploy” (no Docker for gateways)
 
 ```bash

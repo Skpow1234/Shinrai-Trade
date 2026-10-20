@@ -2,16 +2,18 @@
 //!
 //! Skips when `SHINRAI_DATABASE_URL` / `DATABASE_URL` is unset so host CI stays green.
 
+use std::time::Duration;
+
 use shinrai_audit::{AuditKind, AuditRecord};
 use shinrai_instruments::{InstrumentId, PriceTicks, QuantityLots};
 use shinrai_ledger::{AccountId, Direction, EntryBuilder, LedgerAccount};
 use shinrai_money::{Currency, Money};
 use shinrai_orders::{ClientOrderId, ExecId, Order, OrderId, OrderStatus, Side, VenueOrderId};
 use shinrai_store::{
-    claim_unpublished, connect_from_env, insert_audit_record, insert_ledger_entry,
-    load_audit_after, load_ledger_entry_by_key, load_order_by_client, load_order_by_id,
-    mark_published, migrate, upsert_order, LedgerEntrySnapshot, OrderSnapshot, StoreError,
-    StoredStatus,
+    claim_unpublished, connect_from_env, heartbeat_oms_leader, insert_audit_record,
+    insert_ledger_entry, is_oms_leader, load_audit_after, load_ledger_entry_by_key,
+    load_oms_leader_lease, load_order_by_client, load_order_by_id, mark_published, migrate,
+    upsert_order, LedgerEntrySnapshot, OrderSnapshot, StoreError, StoredStatus,
 };
 use sqlx::Row;
 
@@ -293,6 +295,44 @@ async fn missing_url_is_explicit_error() {
     // Ensure the error type exists for callers even when URL is unset in subprocesses.
     // This test does not clear the parent env; it only documents the API.
     let _ = StoreError::MissingDatabaseUrl;
+}
+
+#[tokio::test]
+async fn oms_leader_lease_election() {
+    let Some(pool) = pool_or_skip().await else {
+        return;
+    };
+    let ttl = Duration::from_secs(30);
+    let a = format!("leader-a-{}", uuid_like());
+    let b = format!("leader-b-{}", uuid_like());
+
+    assert!(
+        heartbeat_oms_leader(&pool, &a, ttl)
+            .await
+            .expect("a acquire"),
+        "a should acquire"
+    );
+    assert!(is_oms_leader(&pool, &a).await.expect("a is leader"));
+    assert!(!heartbeat_oms_leader(&pool, &b, ttl)
+        .await
+        .expect("b blocked"));
+    assert!(!is_oms_leader(&pool, &b).await.expect("b not leader"));
+
+    // Force expiry so b can steal.
+    sqlx::query(
+        "UPDATE oms_leader_lease SET expires_at = NOW() - INTERVAL '1 second' WHERE id = 1",
+    )
+    .execute(&pool)
+    .await
+    .expect("expire");
+    assert!(
+        heartbeat_oms_leader(&pool, &b, ttl).await.expect("b steal"),
+        "b should steal after expiry"
+    );
+    let lease = load_oms_leader_lease(&pool).await.expect("lease");
+    assert_eq!(lease.holder, b);
+    assert!(lease.active);
+    assert!(lease.epoch >= 1);
 }
 
 async fn unique_seq(pool: &sqlx::PgPool) -> u64 {

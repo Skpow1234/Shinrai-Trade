@@ -73,6 +73,9 @@ Prefer `SHINRAI_MD_CLIENTS` + short-lived access tokens. `SHINRAI_MD_TOKENS` is 
 | `SHINRAI_OG_DEV_ALLOW_PUBLIC` | `1` — permit `--dev` when bind is not loopback |
 | `SHINRAI_OG_OPS_ALLOWLIST` | Comma-separated IPs/CIDRs (or `*`) for ops/metrics; empty = no IP filter |
 | `SHINRAI_OG_STORE_FAIL_HARD` | Fail-hard on Postgres write-through (default on; `0`/`false` = fail-soft) |
+| `SHINRAI_OG_HA` | `1` — active-passive OMS: Postgres leader lease; non-leaders return `503 not_oms_leader` for `/v1/*` (requires DB) |
+| `SHINRAI_OG_INSTANCE_ID` | Stable instance id for the lease / outbox claim (default: `HOSTNAME` / `COMPUTERNAME` / random) |
+| `SHINRAI_OG_HA_LEASE_SECS` | Leader lease TTL seconds (default `15`, minimum `3`) |
 
 Venues that need no API key: `sim`, `sandbox`, `rest` without `SHINRAI_OG_REST_URL`, `licensed`, `fix` (in-process or local TCP), and `alpaca` without Alpaca credentials (local mock). Live Alpaca paper needs free keys from Alpaca.
 

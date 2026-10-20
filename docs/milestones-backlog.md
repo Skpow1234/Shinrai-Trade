@@ -99,7 +99,7 @@ Total: **800** milestones.
 - **M-0057**: Compose profile full for gateways (done)
 - **M-0058**: Example Caddyfile TLS termination
 - **M-0059**: Compose secrets for DB password
-- **M-0060**: Multi-instance OMS leader election
+- **M-0060**: ~~Multi-instance OMS leader election~~ **done** (`oms_leader_lease` + `SHINRAI_OG_HA`)
 - **M-0061**: Document single-writer sticky sessions
 - **M-0062**: Readiness vs liveness probes
 - **M-0063**: Postgres backup/restore runbook

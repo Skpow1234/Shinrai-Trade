@@ -1,11 +1,13 @@
 //! Axum router, shared state, and env configuration.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware::from_fn_with_state;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -146,6 +148,12 @@ pub struct AppState {
     pub(crate) withdraw_approval_threshold_minor: Option<i128>,
     /// Last injected broker EOD snapshot (ops).
     pub(crate) eod_snapshot: Arc<Mutex<Option<shinrai_paper::BrokerEodSnapshot>>>,
+    /// When true, only the Postgres lease holder serves `/v1/*`.
+    pub(crate) ha_enabled: bool,
+    /// Stable instance identity for outbox claim + leader lease.
+    pub(crate) instance_id: String,
+    /// Cached leader flag (HA); always `true` when HA is disabled.
+    pub(crate) oms_leader: Arc<AtomicBool>,
 }
 
 /// Process configuration (tokens / secrets are not displayed).
@@ -187,6 +195,12 @@ pub struct GatewayConfig {
     /// Defaults: `true` in `new()` / tests; `false` from env unless `--dev` /
     /// `SHINRAI_OG_DEV` or explicit `SHINRAI_OG_OPS_OPEN=1`.
     ops_allow_open: bool,
+    /// Active-passive HA via Postgres OMS leader lease.
+    ha_enabled: bool,
+    /// Instance id for leader lease / outbox `claimed_by`.
+    instance_id: String,
+    /// Leader lease TTL in seconds (default 15).
+    ha_lease_secs: u64,
 }
 
 impl GatewayConfig {
@@ -224,6 +238,9 @@ impl GatewayConfig {
             withdrawals_enabled: true,
             withdraw_approval_threshold_minor: None,
             ops_allow_open: true,
+            ha_enabled: false,
+            instance_id: default_instance_id(),
+            ha_lease_secs: 15,
         }
     }
 
@@ -299,10 +316,36 @@ impl GatewayConfig {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .filter(|n: &i128| *n > 0);
+        cfg.ha_enabled = env_truthy("SHINRAI_OG_HA");
+        cfg.instance_id = std::env::var("SHINRAI_OG_INSTANCE_ID")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(default_instance_id);
+        if let Some(secs) = env_u64("SHINRAI_OG_HA_LEASE_SECS") {
+            cfg.ha_lease_secs = secs.max(3);
+        }
         if env_truthy("SHINRAI_OG_DEV") {
             cfg.apply_paper_dev_defaults();
         }
         cfg
+    }
+
+    /// Whether active-passive HA leader election is enabled.
+    #[must_use]
+    pub const fn ha_enabled(&self) -> bool {
+        self.ha_enabled
+    }
+
+    /// Instance identity used for the OMS leader lease.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    /// Leader lease TTL.
+    #[must_use]
+    pub const fn ha_lease_secs(&self) -> u64 {
+        self.ha_lease_secs
     }
 
     /// Whether `SHINRAI_OG_OPS_TOKEN` is configured.
@@ -529,7 +572,35 @@ impl AppState {
             withdrawals_enabled: config.withdrawals_enabled,
             withdraw_approval_threshold_minor: config.withdraw_approval_threshold_minor,
             eod_snapshot: Arc::new(Mutex::new(None)),
+            ha_enabled: config.ha_enabled,
+            instance_id: config.instance_id.clone(),
+            // Single-instance (HA off) is always the leader; HA starts as follower
+            // until the first successful lease heartbeat.
+            oms_leader: Arc::new(AtomicBool::new(!config.ha_enabled)),
         }
+    }
+
+    /// Whether HA leader election is enabled for this process.
+    #[must_use]
+    pub const fn ha_enabled(&self) -> bool {
+        self.ha_enabled
+    }
+
+    /// Instance id (lease holder / outbox claim identity).
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
+    /// Whether this process may serve OMS `/v1/*` traffic.
+    #[must_use]
+    pub fn is_oms_leader(&self) -> bool {
+        !self.ha_enabled || self.oms_leader.load(Ordering::Relaxed)
+    }
+
+    /// Updates the cached OMS leader flag (HA heartbeat).
+    pub fn set_oms_leader(&self, leader: bool) {
+        self.oms_leader.store(leader, Ordering::Relaxed);
     }
 
     /// Attaches a Postgres pool for write-through after trading mutations.
@@ -1037,12 +1108,24 @@ pub fn router(state: AppState) -> Router {
             "/v1/ops/audit/export",
             get(crate::ops_http::get_audit_export),
         )
+        .layer(from_fn_with_state(
+            state.clone(),
+            crate::ha::require_oms_leader,
+        ))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 
-async fn health() -> Json<Value> {
-    Json(json!({ "status": "ok", "service": "order-gateway" }))
+async fn health(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({
+        "status": "ok",
+        "service": "order-gateway",
+        "instance_id": state.instance_id(),
+        "ha": {
+            "enabled": state.ha_enabled(),
+            "leader": state.is_oms_leader(),
+        },
+    }))
 }
 
 /// Token query param for REST auth.
@@ -1166,6 +1249,14 @@ pub(crate) fn resolve_account(state: &AppState, subject: &str) -> Result<Account
 
 fn env_u64(key: &str) -> Option<u64> {
     std::env::var(key).ok()?.parse().ok()
+}
+
+fn default_instance_id() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("og-{}", uuid::Uuid::new_v4()))
 }
 
 fn parse_tokens(raw: Option<&str>) -> Vec<(String, String)> {

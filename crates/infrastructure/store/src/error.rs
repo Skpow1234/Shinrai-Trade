@@ -30,4 +30,7 @@ pub enum StoreError {
         /// Raw value.
         value: String,
     },
+    /// Caller passed an invalid argument (e.g. empty instance id).
+    #[error("{0}")]
+    InvalidArgument(String),
 }

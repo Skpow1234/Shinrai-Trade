@@ -55,7 +55,7 @@ Complete for the licensed-broker **paper** path:
 
 - FIX TCP is a subset (Logon/HB/D/F/G/ER); no ResendRequest / sequence reset / full session recovery yet
 - Futures live MD: `ESZ5` uses synth (no CME feed yet); equities live via Alpaca when keys are set
-- Single-process OMS; no documented multi-instance leader election beyond outbox claim
+- Multi-instance OMS is **active-passive** (`SHINRAI_OG_HA`); not multi-writer active-active
 
 ## Phase 5 — Paper funds
 
@@ -76,14 +76,15 @@ Real custody / bank rails stay gated on regulation and licensed partners. This p
 - **FIX TCP**: initiator + loopback paper acceptor (`SHINRAI_OG_FIX_TCP`) or external connect (`SHINRAI_OG_FIX_TCP_CONNECT`)
 - **Equity/futures MD**: Alpaca stock stream (`SHINRAI_MD_ALPACA`) + multi-product synth (`AAPL`/`ESZ5`/`BTC-USD`)
 - **Async venue HTTP**: Alpaca + remote REST use async `reqwest` with `block_in_place` on the multi-thread Tokio runtime (no `reqwest::blocking`)
+- **Multi-instance OMS HA**: Postgres `oms_leader_lease` + `SHINRAI_OG_HA` (active-passive; followers `503 not_oms_leader`; outbox publishes only on leader)
 
 ## Suggested next (priority)
 
-1. Multi-instance OMS / HA story if running more than one order-gateway process
-2. Persist risk kills/limits across hydrate; collar fail-closed without marks
-3. FIX ResendRequest / gap-fill / sequence reset completeness
-4. CME / licensed futures market-data vendor (replace ESZ5 synth)
-5. Non-blocking KYC HTTP (replace remaining `reqwest::blocking` in compliance)
+1. Persist risk kills/limits across hydrate; collar fail-closed without marks
+2. FIX ResendRequest / gap-fill / sequence reset completeness
+3. CME / licensed futures market-data vendor (replace ESZ5 synth)
+4. Non-blocking KYC HTTP (replace remaining `reqwest::blocking` in compliance)
+5. Shared read replicas / hydrate-on-promote for faster HA failover
 
 ## Full backlog (500+)
 

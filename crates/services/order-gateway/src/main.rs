@@ -10,7 +10,7 @@ use axum::http::Request;
 use axum::middleware::{from_fn, Next};
 use axum::response::Response;
 use shinrai_messaging::{connect_nats, EventSink, LogSink};
-use shinrai_order_gateway::{router, AppState, GatewayConfig};
+use shinrai_order_gateway::{router, run_leader_heartbeat, AppState, GatewayConfig};
 use shinrai_store::{connect_from_env, migrate, StoreError};
 
 #[tokio::main]
@@ -51,6 +51,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         );
     }
     let mut state = AppState::from_config(&config);
+    if config.ha_enabled() {
+        eprintln!(
+            "shinrai-order-gateway: HA enabled (instance={}, lease={}s)",
+            config.instance_id(),
+            config.ha_lease_secs()
+        );
+    }
 
     match connect_from_env().await {
         Ok(pool) => {
@@ -68,6 +75,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     "shinrai-order-gateway: Postgres write-through enabled (fresh bootstrap)"
                 );
             }
+            if config.ha_enabled() {
+                let Some(pool) = state.store_pool() else {
+                    return Err("SHINRAI_OG_HA requires a configured Postgres store".into());
+                };
+                let ttl = Duration::from_secs(config.ha_lease_secs());
+                let interval = Duration::from_secs((config.ha_lease_secs() / 3).max(1));
+                tokio::spawn(run_leader_heartbeat(pool, state.clone(), ttl, interval));
+            }
             if let Some(pool) = state.store_pool() {
                 let metrics = state.outbox_metrics();
                 let poll_ms: u64 = env::var("SHINRAI_OUTBOX_POLL_MS")
@@ -76,11 +91,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     .unwrap_or(1_000);
                 let sink = build_event_sink().await?;
                 let kind = sink.kind();
+                let leader_flag = state.oms_leader.clone();
+                let ha = state.ha_enabled();
                 tokio::spawn(shinrai_order_gateway::run_outbox_publisher(
                     pool,
                     metrics,
                     sink,
                     Duration::from_millis(poll_ms),
+                    ha,
+                    leader_flag,
                 ));
                 eprintln!(
                     "shinrai-order-gateway: outbox publisher started (poll {poll_ms}ms, sink={kind:?})"
@@ -88,6 +107,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         }
         Err(StoreError::MissingDatabaseUrl) => {
+            if config.ha_enabled() {
+                return Err("SHINRAI_OG_HA requires SHINRAI_DATABASE_URL".into());
+            }
             eprintln!("shinrai-order-gateway: no SHINRAI_DATABASE_URL; in-memory only");
         }
         Err(err) => return Err(err.into()),

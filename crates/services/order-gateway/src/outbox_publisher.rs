@@ -1,6 +1,6 @@
 //! Background outbox publisher: claim → sink → mark published.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,16 +41,23 @@ pub enum OutboxPublishError {
 }
 
 /// Runs until the process exits: poll unpublished outbox rows and deliver.
+///
+/// When `ha_enabled` is true, publishes only while `leader_flag` is set.
 pub async fn run_publisher(
     pool: StorePool,
     metrics: Arc<OutboxMetrics>,
     sink: Arc<dyn EventSink>,
     interval: Duration,
+    ha_enabled: bool,
+    leader_flag: Arc<AtomicBool>,
 ) {
     loop {
-        if let Err(err) = publish_once_with(&pool, &metrics, sink.as_ref()).await {
-            metrics.publish_errors.fetch_add(1, Ordering::Relaxed);
-            eprintln!("shinrai-order-gateway: outbox publish error: {err}");
+        let may_publish = !ha_enabled || leader_flag.load(Ordering::Relaxed);
+        if may_publish {
+            if let Err(err) = publish_once_with(&pool, &metrics, sink.as_ref()).await {
+                metrics.publish_errors.fetch_add(1, Ordering::Relaxed);
+                eprintln!("shinrai-order-gateway: outbox publish error: {err}");
+            }
         }
         tokio::time::sleep(interval).await;
     }

@@ -11,6 +11,7 @@ mod batch;
 mod drop_copy;
 mod error;
 mod inbox;
+mod leader;
 mod ledger;
 mod orders;
 mod outbox;
@@ -28,6 +29,7 @@ pub use batch::{persist_trading_batch, TradingBatch};
 pub use drop_copy::{list_drop_copy_fills, DropCopyFillSnapshot};
 pub use error::StoreError;
 pub use inbox::try_claim_inbox;
+pub use leader::{heartbeat_oms_leader, is_oms_leader, load_oms_leader_lease, LeaderLease};
 pub use ledger::{
     insert_ledger_entry, list_ledger_entries, load_ledger_entry_by_key, LedgerEntrySnapshot,
     LedgerPostingSnapshot,
@@ -36,7 +38,9 @@ pub use orders::{
     has_durable_state, list_orders, load_order_by_client, load_order_by_id, upsert_order,
     OrderSnapshot, StoredSide, StoredStatus,
 };
-pub use outbox::{claim_unpublished, insert_outbox_event, mark_published, OutboxEvent};
+pub use outbox::{
+    claim_unpublished, claim_unpublished_as, insert_outbox_event, mark_published, OutboxEvent,
+};
 pub use pool::{connect, connect_from_env, migrate, StorePool};
 pub use positions::{list_paper_positions, upsert_paper_position, PaperPositionSnapshot};
 pub use venue_session::{load_venue_session_cursor, VenueSessionCursorSnapshot};
