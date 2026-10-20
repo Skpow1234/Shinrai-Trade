@@ -315,7 +315,7 @@ Total: **800** milestones.
 
 ### md-protocol
 
-- **M-0246**: Second vendor adapter (Alpaca/IEX/CME)
+- **M-0246**: ~~Second vendor adapter (Alpaca/IEX/CME)~~ **done** (Alpaca equities + Databento GLBX futures paper/live)
 - **M-0247**: Equity/futures live products beyond BTC-USD
 - **M-0248**: Authenticated vendor streams
 - **M-0249**: Supervisor multi-product watch lists

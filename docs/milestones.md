@@ -55,7 +55,7 @@ Complete for the licensed-broker **paper** path:
 ### Known gaps (Phase 4+)
 
 - FIX subset still omits full admin surface (e.g. Reject `35=3`, TestRequest, Drop Copy session type)
-- Futures live MD: `ESZ5` uses synth (no CME feed yet); equities live via Alpaca when keys are set
+- Futures MD: Databento-shaped paper/live for `ESZ5` (`SHINRAI_MD_FUTURES`); raw CME MDP3 multicast not wired
 - Multi-instance OMS is **active-passive** (`SHINRAI_OG_HA`); not multi-writer active-active
 
 ## Phase 5 — Paper funds
@@ -76,18 +76,18 @@ Real custody / bank rails stay gated on regulation and licensed partners. This p
 - **Caddy TLS overlay** (`deploy/Caddyfile`, `compose.tls.yaml`, profile `tls`)
 - **FIX TCP**: initiator + loopback paper acceptor (`SHINRAI_OG_FIX_TCP`) or external connect (`SHINRAI_OG_FIX_TCP_CONNECT`)
 - **FIX session recovery**: ResendRequest / PossDup retransmit / SequenceReset gap-fill (initiator + paper acceptor)
-- **Equity/futures MD**: Alpaca stock stream (`SHINRAI_MD_ALPACA`) + multi-product synth (`AAPL`/`ESZ5`/`BTC-USD`)
+- **Equity/futures MD**: Alpaca stock stream (`SHINRAI_MD_ALPACA`) + Databento GLBX futures (`SHINRAI_MD_FUTURES`, paper or licensed) + multi-product synth
 - **Async venue HTTP**: Alpaca + remote REST use async `reqwest` with `block_in_place` on the multi-thread Tokio runtime (no `reqwest::blocking`)
 - **Multi-instance OMS HA**: Postgres `oms_leader_lease` + `SHINRAI_OG_HA` (active-passive; followers `503 not_oms_leader`; outbox publishes only on leader)
 - **Durable risk control plane**: `risk_state` table (kills/limits/restrictions) restored on hydrate; collar fail-closed when `collar_bps>0` and no mark
 
 ## Suggested next (priority)
 
-1. CME / licensed futures market-data vendor (replace ESZ5 synth)
-2. Non-blocking KYC HTTP (replace remaining `reqwest::blocking` in compliance)
-3. Shared read replicas / hydrate-on-promote for faster HA failover
-4. Ops audit trail for every risk mutation
-5. FIX Reject / TestRequest / Drop Copy session type
+1. Non-blocking KYC HTTP (replace remaining `reqwest::blocking` in compliance)
+2. Shared read replicas / hydrate-on-promote for faster HA failover
+3. Ops audit trail for every risk mutation
+4. FIX Reject / TestRequest / Drop Copy session type
+5. Raw CME MDP3 / fuller Databento live schemas (L2 depth)
 
 ## Full backlog (500+)
 

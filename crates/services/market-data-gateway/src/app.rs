@@ -27,8 +27,10 @@ pub enum FeedMode {
     None,
     /// Synthetic trades for configured products (AAPL / ESZ5 / BTC-USD).
     Synth,
-    /// Live Alpaca stock stream (equities); futures in the product list use synth.
+    /// Live Alpaca stock stream (equities); futures use Databento GLBX when enabled.
     Alpaca,
+    /// CME Globex futures via Databento-shaped feed (paper or licensed live).
+    Futures,
     /// Live Coinbase Exchange public feed.
     Coinbase,
 }
@@ -41,6 +43,7 @@ impl FeedMode {
             Self::None => "none",
             Self::Synth => "synth",
             Self::Alpaca => "alpaca",
+            Self::Futures => "futures",
             Self::Coinbase => "coinbase",
         }
     }
@@ -58,10 +61,16 @@ pub struct AppState {
     pub(crate) alpaca_key: Option<String>,
     pub(crate) alpaca_secret: Option<String>,
     pub(crate) alpaca_feed: String,
+    pub(crate) futures: bool,
+    pub(crate) futures_key: Option<String>,
+    pub(crate) futures_ws: Option<String>,
+    pub(crate) futures_rest: Option<String>,
+    pub(crate) futures_dataset: Option<String>,
 }
 
 /// Process configuration (tokens / secrets are not displayed).
 #[derive(Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct GatewayConfig {
     static_tokens: Vec<(String, String)>,
     clients: Vec<(String, String, String)>,
@@ -70,10 +79,15 @@ pub struct GatewayConfig {
     synth: bool,
     coinbase: bool,
     alpaca: bool,
+    futures: bool,
     products: Vec<String>,
     alpaca_key: Option<String>,
     alpaca_secret: Option<String>,
     alpaca_feed: String,
+    futures_key: Option<String>,
+    futures_ws: Option<String>,
+    futures_rest: Option<String>,
+    futures_dataset: Option<String>,
 }
 
 impl GatewayConfig {
@@ -95,14 +109,19 @@ impl GatewayConfig {
             synth,
             coinbase,
             alpaca: false,
+            futures: false,
             products: default_products(),
             alpaca_key: None,
             alpaca_secret: None,
             alpaca_feed: "iex".into(),
+            futures_key: None,
+            futures_ws: None,
+            futures_rest: None,
+            futures_dataset: None,
         }
     }
 
-    /// Reads env: tokens, clients, TTLs, feed flags, products, Alpaca keys.
+    /// Reads env: tokens, clients, TTLs, feed flags, products, Alpaca / futures keys.
     #[must_use]
     pub fn from_env() -> Self {
         let access = env_u64("SHINRAI_MD_ACCESS_TTL").unwrap_or(60);
@@ -141,6 +160,24 @@ impl GatewayConfig {
             cfg.alpaca = false;
             cfg.synth = true;
         }
+        cfg.futures = env_flag("SHINRAI_MD_FUTURES");
+        cfg.futures_key = std::env::var("SHINRAI_MD_FUTURES_KEY")
+            .ok()
+            .or_else(|| std::env::var("DATABENTO_API_KEY").ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        cfg.futures_ws = std::env::var("SHINRAI_MD_FUTURES_WS")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        cfg.futures_rest = std::env::var("SHINRAI_MD_FUTURES_REST")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        cfg.futures_dataset = std::env::var("SHINRAI_MD_FUTURES_DATASET")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         cfg
     }
 
@@ -162,19 +199,27 @@ impl GatewayConfig {
         self.alpaca
     }
 
+    /// Whether the CME / Databento futures publisher should run.
+    #[must_use]
+    pub const fn futures(&self) -> bool {
+        self.futures
+    }
+
     /// Configured product tickers.
     #[must_use]
     pub fn products(&self) -> &[String] {
         &self.products
     }
 
-    /// Selected publisher (Coinbase > Alpaca > Synth > None).
+    /// Selected publisher (Coinbase > Alpaca > Futures > Synth > None).
     #[must_use]
     pub const fn feed_mode(&self) -> FeedMode {
         if self.coinbase {
             FeedMode::Coinbase
         } else if self.alpaca {
             FeedMode::Alpaca
+        } else if self.futures {
+            FeedMode::Futures
         } else if self.synth {
             FeedMode::Synth
         } else {
@@ -193,10 +238,15 @@ impl core::fmt::Debug for GatewayConfig {
             .field("synth", &self.synth)
             .field("coinbase", &self.coinbase)
             .field("alpaca", &self.alpaca)
+            .field("futures", &self.futures)
             .field("products", &self.products)
             .field("alpaca_key_configured", &self.alpaca_key.is_some())
             .field("alpaca_secret_configured", &self.alpaca_secret.is_some())
             .field("alpaca_feed", &self.alpaca_feed)
+            .field("futures_key_configured", &self.futures_key.is_some())
+            .field("futures_ws", &self.futures_ws)
+            .field("futures_rest", &self.futures_rest)
+            .field("futures_dataset", &self.futures_dataset)
             .finish()
     }
 }
@@ -231,6 +281,11 @@ impl AppState {
             alpaca_key: config.alpaca_key.clone(),
             alpaca_secret: config.alpaca_secret.clone(),
             alpaca_feed: config.alpaca_feed.clone(),
+            futures: config.futures,
+            futures_key: config.futures_key.clone(),
+            futures_ws: config.futures_ws.clone(),
+            futures_rest: config.futures_rest.clone(),
+            futures_dataset: config.futures_dataset.clone(),
         }
     }
 
@@ -320,18 +375,30 @@ impl AppState {
         );
     }
 
-    /// Connects to Alpaca stock MD for equity products; synth for futures in the list.
+    /// Connects to Alpaca stock MD for equity products; futures/crypto sidecars as configured.
     pub fn spawn_alpaca(&self) {
         let equities = equity_products(&self.master, &self.products);
-        let futures = non_equity_products(&self.master, &self.products);
-        if !futures.is_empty() {
-            // Sidecar synth for futures / crypto not on Alpaca stock stream.
+        let futures = future_products(&self.master, &self.products);
+        let other = crypto_and_other_non_equity(&self.master, &self.products);
+        if self.futures && !futures.is_empty() {
+            self.spawn_futures_products(futures);
+        } else if !futures.is_empty() {
             let mut sidecar = self.clone();
             sidecar.products = futures;
             sidecar.feed_mode = FeedMode::Synth;
             sidecar.spawn_synth();
             eprintln!(
-                "shinrai-md-gateway: synth sidecar for non-equity products: {:?}",
+                "shinrai-md-gateway: synth sidecar for futures (enable SHINRAI_MD_FUTURES): {:?}",
+                sidecar.products
+            );
+        }
+        if !other.is_empty() {
+            let mut sidecar = self.clone();
+            sidecar.products = other;
+            sidecar.feed_mode = FeedMode::Synth;
+            sidecar.spawn_synth();
+            eprintln!(
+                "shinrai-md-gateway: synth sidecar for non-equity non-futures: {:?}",
                 sidecar.products
             );
         }
@@ -353,6 +420,30 @@ impl AppState {
             secret,
             self.alpaca_feed.clone(),
             products,
+        );
+    }
+
+    /// Databento-shaped CME Globex feed for futures products (paper unless live key+WS).
+    pub fn spawn_futures(&self) {
+        let products = future_products(&self.master, &self.products);
+        self.spawn_futures_products(products);
+    }
+
+    fn spawn_futures_products(&self, products: Vec<String>) {
+        let products = if products.is_empty() {
+            vec!["ESZ5".into()]
+        } else {
+            products
+        };
+        crate::futures_feed::spawn(
+            Arc::clone(&self.hub),
+            Arc::clone(&self.history),
+            self.master.clone(),
+            products,
+            self.futures_key.clone(),
+            self.futures_ws.clone(),
+            self.futures_rest.clone(),
+            self.futures_dataset.clone(),
         );
     }
 }
@@ -641,7 +732,7 @@ fn equity_products(master: &InstrumentMaster, products: &[String]) -> Vec<String
         .collect()
 }
 
-fn non_equity_products(master: &InstrumentMaster, products: &[String]) -> Vec<String> {
+fn future_products(master: &InstrumentMaster, products: &[String]) -> Vec<String> {
     products
         .iter()
         .filter(|p| {
@@ -649,7 +740,23 @@ fn non_equity_products(master: &InstrumentMaster, products: &[String]) -> Vec<St
                 .ok()
                 .and_then(|a| master.resolve_alias(&a).ok())
                 .and_then(|id| master.get(id).ok())
-                .is_some_and(|i| i.asset_class() != AssetClass::Equity)
+                .is_some_and(|i| i.asset_class() == AssetClass::Future)
+        })
+        .cloned()
+        .collect()
+}
+
+fn crypto_and_other_non_equity(master: &InstrumentMaster, products: &[String]) -> Vec<String> {
+    products
+        .iter()
+        .filter(|p| {
+            ExternalId::ticker(p.as_str())
+                .ok()
+                .and_then(|a| master.resolve_alias(&a).ok())
+                .and_then(|id| master.get(id).ok())
+                .is_some_and(|i| {
+                    i.asset_class() != AssetClass::Equity && i.asset_class() != AssetClass::Future
+                })
         })
         .cloned()
         .collect()

@@ -10,6 +10,7 @@ mod alpaca_feed;
 mod app;
 mod auth_http;
 mod coinbase_feed;
+mod futures_feed;
 mod historical;
 mod map;
 

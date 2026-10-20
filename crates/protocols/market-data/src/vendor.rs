@@ -14,6 +14,8 @@ impl VendorId {
     pub const COINBASE_EXCHANGE: Self = Self("coinbase-exchange");
     /// Alpaca Markets stock data (IEX / SIP feed; API keys required).
     pub const ALPACA_MARKETS: Self = Self("alpaca-markets");
+    /// Databento-shaped CME Globex futures (`GLBX.MDP3`; licensed key or paper).
+    pub const DATABENTO_GLBX: Self = Self("databento-glbx");
 
     /// Raw id string.
     #[must_use]

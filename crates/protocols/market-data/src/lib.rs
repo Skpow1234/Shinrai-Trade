@@ -3,9 +3,7 @@
 //! Sandbox vendors:
 //! - **Coinbase Exchange** public WS/REST — crypto (`BTC-USD`)
 //! - **Alpaca Markets** authenticated stock stream — equities (`AAPL`, …)
-//!
-//! Futures (e.g. `ESZ5`) stay on the instrument master; use the gateway synth
-//! publisher until a CME/licensed futures feed is wired.
+//! - **Databento GLBX** — CME Globex futures (`ESZ5` / `ES.FUT`); paper or licensed live
 //!
 //! Domain types stay vendor-agnostic. This crate maps vendor JSON onto
 //! [`shinrai_market_data::MdRecord`], keeps the raw frame for replay, and
@@ -15,6 +13,7 @@
 
 mod alpaca;
 mod coinbase;
+mod databento;
 mod error;
 mod journal;
 mod supervisor;
@@ -22,6 +21,7 @@ mod vendor;
 
 pub use alpaca::AlpacaMarkets;
 pub use coinbase::CoinbaseExchange;
+pub use databento::DatabentoGlbx;
 pub use error::ProviderError;
 pub use journal::{RawFrame, RecordingJournal};
 pub use supervisor::{FeedCommand, FeedSupervisor, IngestOutcome, SupervisorEvent};

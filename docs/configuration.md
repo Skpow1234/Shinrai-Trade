@@ -25,12 +25,16 @@ All knobs are environment variables. Copy `.env.example` to `.env` for local too
 | `SHINRAI_MD_TOKENS` | `token:subject,...` — non-expiring bootstrap access tokens (local demos) |
 | `SHINRAI_MD_ACCESS_TTL` | Access lifetime in seconds (default `60`) |
 | `SHINRAI_MD_REFRESH_TTL` | Refresh lifetime in seconds (default `3600`) |
-| `SHINRAI_MD_PRODUCTS` | Comma-separated tickers (default `AAPL,ESZ5,BTC-USD`) for synth / Alpaca |
+| `SHINRAI_MD_PRODUCTS` | Comma-separated tickers (default `AAPL,ESZ5,BTC-USD`) for synth / Alpaca / futures |
 | `SHINRAI_MD_SYNTH` | `1` / `true` — synthetic publisher for configured products |
-| `SHINRAI_MD_COINBASE` | `1` / `true` — live Coinbase public WS (BTC-USD). Wins over synth/alpaca |
+| `SHINRAI_MD_COINBASE` | `1` / `true` — live Coinbase public WS (BTC-USD). Wins over other feeds |
 | `SHINRAI_MD_ALPACA` | `1` / `true` — live Alpaca stock MD (equities); needs keys |
 | `SHINRAI_MD_ALPACA_KEY` / `_SECRET` | Alpaca data API credentials (falls back to `SHINRAI_OG_ALPACA_*`) |
 | `SHINRAI_MD_ALPACA_FEED` | `iex` (default, free) or `sip` (paid entitlement) |
+| `SHINRAI_MD_FUTURES` | `1` / `true` — CME Globex futures via Databento-shaped feed (`ESZ5`); paper if no live WS/key |
+| `SHINRAI_MD_FUTURES_KEY` | Licensed futures API key (falls back to `DATABENTO_API_KEY`) |
+| `SHINRAI_MD_FUTURES_WS` / `_REST` | Optional live WebSocket / REST origins (omit → paper publisher) |
+| `SHINRAI_MD_FUTURES_DATASET` | Dataset id (default `GLBX.MDP3`) |
 
 Prefer `SHINRAI_MD_CLIENTS` + short-lived access tokens. `SHINRAI_MD_TOKENS` is a non-expiring bootstrap for local smoke tests only. Do not log tokens.
 

@@ -26,6 +26,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 config.products()
             );
         }
+        FeedMode::Futures => {
+            state.spawn_futures();
+            eprintln!(
+                "shinrai-md-gateway: CME/Databento futures feed enabled (products={:?})",
+                config.products()
+            );
+        }
         FeedMode::Synth => {
             state.spawn_synth();
             eprintln!(
