@@ -1,7 +1,7 @@
 //! Pre-trade risk engine: fail-closed checks before the OMS.
 //!
-//! State is in-memory and intended to be rebuildable from durable events
-//! in later phases.
+//! In-memory state is snapshotted to Postgres (`risk_state`) by the order
+//! gateway and restored on hydrate.
 
 #![forbid(unsafe_code)]
 
@@ -9,6 +9,6 @@ mod engine;
 mod limits;
 mod reason;
 
-pub use engine::{RiskContext, RiskDecision, RiskEngine, RiskOrderIntent};
+pub use engine::{RiskContext, RiskDecision, RiskEngine, RiskOrderIntent, RiskStateSnapshot};
 pub use limits::RiskLimits;
 pub use reason::RiskRejectReason;

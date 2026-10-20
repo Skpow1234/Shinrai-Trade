@@ -17,6 +17,7 @@ mod orders;
 mod outbox;
 mod pool;
 mod positions;
+mod risk;
 mod venue_session;
 mod withdraw_audit;
 
@@ -43,6 +44,7 @@ pub use outbox::{
 };
 pub use pool::{connect, connect_from_env, migrate, StorePool};
 pub use positions::{list_paper_positions, upsert_paper_position, PaperPositionSnapshot};
+pub use risk::{load_risk_state, upsert_risk_state};
 pub use venue_session::{load_venue_session_cursor, VenueSessionCursorSnapshot};
 pub use withdraw_audit::{insert_withdraw_audit, list_withdraw_audit, WithdrawAuditSnapshot};
 

@@ -9,11 +9,13 @@ use shinrai_instruments::{InstrumentId, PriceTicks, QuantityLots};
 use shinrai_ledger::{AccountId, Direction, EntryBuilder, LedgerAccount};
 use shinrai_money::{Currency, Money};
 use shinrai_orders::{ClientOrderId, ExecId, Order, OrderId, OrderStatus, Side, VenueOrderId};
+use shinrai_risk::{RiskLimits, RiskStateSnapshot};
 use shinrai_store::{
     claim_unpublished, connect_from_env, heartbeat_oms_leader, insert_audit_record,
     insert_ledger_entry, is_oms_leader, load_audit_after, load_ledger_entry_by_key,
-    load_oms_leader_lease, load_order_by_client, load_order_by_id, mark_published, migrate,
-    upsert_order, LedgerEntrySnapshot, OrderSnapshot, StoreError, StoredStatus,
+    load_oms_leader_lease, load_order_by_client, load_order_by_id, load_risk_state, mark_published,
+    migrate, upsert_order, upsert_risk_state, LedgerEntrySnapshot, OrderSnapshot, StoreError,
+    StoredStatus,
 };
 use sqlx::Row;
 
@@ -295,6 +297,25 @@ async fn missing_url_is_explicit_error() {
     // Ensure the error type exists for callers even when URL is unset in subprocesses.
     // This test does not clear the parent env; it only documents the API.
     let _ = StoreError::MissingDatabaseUrl;
+}
+
+#[tokio::test]
+async fn risk_state_round_trip() {
+    let Some(pool) = pool_or_skip().await else {
+        return;
+    };
+    let mut limits = RiskLimits::demo();
+    limits.collar_bps = 250;
+    limits.max_daily_loss_minor = 12_345;
+    let snap = RiskStateSnapshot {
+        limits,
+        global_kill: true,
+        account_kills: vec![AccountId::from_u64(9)],
+        restricted: vec![InstrumentId::from_u64(1)],
+    };
+    upsert_risk_state(&pool, &snap).await.expect("upsert risk");
+    let loaded = load_risk_state(&pool).await.expect("load").expect("row");
+    assert_eq!(loaded, snap);
 }
 
 #[tokio::test]

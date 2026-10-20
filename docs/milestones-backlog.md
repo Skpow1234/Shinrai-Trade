@@ -394,7 +394,7 @@ Total: **800** milestones.
 - **M-0310**: Tune demo rate limit for abuse protection
 - **M-0311**: ~~Avoid blocking venue HTTP on async runtime~~ **done** (async reqwest + `block_in_place` / dedicated thread)
 - **M-0312**: Reduce engine clones on read paths
-- **M-0313**: Hydrate risk kills/limits/KYC fully
+- **M-0313**: ~~Hydrate risk kills/limits/KYC fully~~ **done** (kills/limits/restrictions via `risk_state`; KYC still env/vendor)
 - **M-0314**: Durable venue cursor design after hydrate
 - **M-0315**: Configurable outbox stale reclaim window
 - **M-0316**: Outbox poison queue metrics
@@ -504,7 +504,7 @@ Total: **800** milestones.
 - **M-0405**: Replace flow tests across all venues
 - **M-0406**: Reconcile auto-remediation actions
 - **M-0407**: Persist broker EOD injection ownership
-- **M-0408**: Mark staleness fail-closed for collar
+- **M-0408**: Mark staleness fail-closed for collar (missing mark done; staleness TTL still open)
 - **M-0409**: Document logical_now vs wall clock for stuck
 - **M-0410**: Expand proptest_invariants scenarios
 - **M-0411**: Unify VenueHandle error mapping
@@ -885,8 +885,8 @@ Total: **800** milestones.
 
 ### risk
 
-- **M-0726**: Persist kill switches / restrictions / overrides
-- **M-0727**: Fail closed when collar_bps>0 and ref_price None
+- **M-0726**: ~~Persist kill switches / restrictions / overrides~~ **done** (`risk_state`; overrides via approvals hydrate)
+- **M-0727**: ~~Fail closed when collar_bps>0 and ref_price None~~ **done**
 - **M-0728**: Per-symbol and per-venue limits
 - **M-0729**: Gross and net notional portfolio limits
 - **M-0730**: Order-frequency / rate-of-trading rule

@@ -77,14 +77,15 @@ Real custody / bank rails stay gated on regulation and licensed partners. This p
 - **Equity/futures MD**: Alpaca stock stream (`SHINRAI_MD_ALPACA`) + multi-product synth (`AAPL`/`ESZ5`/`BTC-USD`)
 - **Async venue HTTP**: Alpaca + remote REST use async `reqwest` with `block_in_place` on the multi-thread Tokio runtime (no `reqwest::blocking`)
 - **Multi-instance OMS HA**: Postgres `oms_leader_lease` + `SHINRAI_OG_HA` (active-passive; followers `503 not_oms_leader`; outbox publishes only on leader)
+- **Durable risk control plane**: `risk_state` table (kills/limits/restrictions) restored on hydrate; collar fail-closed when `collar_bps>0` and no mark
 
 ## Suggested next (priority)
 
-1. Persist risk kills/limits across hydrate; collar fail-closed without marks
-2. FIX ResendRequest / gap-fill / sequence reset completeness
-3. CME / licensed futures market-data vendor (replace ESZ5 synth)
-4. Non-blocking KYC HTTP (replace remaining `reqwest::blocking` in compliance)
-5. Shared read replicas / hydrate-on-promote for faster HA failover
+1. FIX ResendRequest / gap-fill / sequence reset completeness
+2. CME / licensed futures market-data vendor (replace ESZ5 synth)
+3. Non-blocking KYC HTTP (replace remaining `reqwest::blocking` in compliance)
+4. Shared read replicas / hydrate-on-promote for faster HA failover
+5. Ops audit trail for every risk mutation
 
 ## Full backlog (500+)
 

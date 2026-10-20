@@ -64,6 +64,19 @@ pub struct RiskOrderIntent {
     pub price: PriceTicks,
 }
 
+/// Durable risk control-plane snapshot (kills + limits + restrictions).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RiskStateSnapshot {
+    /// Static limits.
+    pub limits: RiskLimits,
+    /// Global kill switch.
+    pub global_kill: bool,
+    /// Per-account kills.
+    pub account_kills: Vec<AccountId>,
+    /// Restricted instruments.
+    pub restricted: Vec<InstrumentId>,
+}
+
 /// Pre-trade risk state and limits.
 #[derive(Debug, Clone)]
 pub struct RiskEngine {
@@ -151,6 +164,47 @@ impl RiskEngine {
         self.restricted.contains(&id)
     }
 
+    /// Durable snapshot of kills, limits, and restrictions (overrides excluded).
+    #[must_use]
+    pub fn snapshot(&self) -> RiskStateSnapshot {
+        let mut account_kills: Vec<_> = self.account_kills.iter().copied().collect();
+        account_kills.sort_by_key(|a| a.get());
+        let mut restricted: Vec<_> = self.restricted.iter().copied().collect();
+        restricted.sort_by_key(|i| i.get());
+        RiskStateSnapshot {
+            limits: self.limits,
+            global_kill: self.global_kill,
+            account_kills,
+            restricted,
+        }
+    }
+
+    /// Restores kills, limits, and restrictions from a durable snapshot.
+    ///
+    /// Does not clear or rewrite restricted-instrument overrides (approvals hydrate those).
+    pub fn restore(&mut self, snap: RiskStateSnapshot) {
+        self.limits = snap.limits;
+        self.global_kill = snap.global_kill;
+        self.account_kills = snap.account_kills.into_iter().collect();
+        self.restricted = snap.restricted.into_iter().collect();
+    }
+
+    /// Account ids with an active kill switch.
+    #[must_use]
+    pub fn account_kills(&self) -> Vec<AccountId> {
+        let mut v: Vec<_> = self.account_kills.iter().copied().collect();
+        v.sort_by_key(|a| a.get());
+        v
+    }
+
+    /// Restricted instrument ids.
+    #[must_use]
+    pub fn restricted_instruments(&self) -> Vec<InstrumentId> {
+        let mut v: Vec<_> = self.restricted.iter().copied().collect();
+        v.sort_by_key(|i| i.get());
+        v
+    }
+
     /// Runs pre-trade checks. Does not mutate ledger or OMS state.
     #[must_use]
     #[allow(clippy::too_many_lines)]
@@ -191,16 +245,19 @@ impl RiskEngine {
             return RiskDecision::Rejected(RiskRejectReason::MaxNotional);
         }
         if self.limits.collar_bps > 0 {
-            if let Some(ref_px) = ctx.ref_price {
-                let limit = intent.price.scaled();
-                let mark = ref_px.scaled();
-                if mark > 0 {
-                    let diff = i128::from((limit - mark).unsigned_abs());
-                    let max_diff = (i128::from(mark) * i128::from(self.limits.collar_bps)) / 10_000;
-                    if diff > max_diff {
-                        return RiskDecision::Rejected(RiskRejectReason::PriceCollar);
-                    }
-                }
+            // Fail closed: collar enabled with no usable mark must not pass.
+            let Some(ref_px) = ctx.ref_price else {
+                return RiskDecision::Rejected(RiskRejectReason::PriceCollar);
+            };
+            let mark = ref_px.scaled();
+            if mark <= 0 {
+                return RiskDecision::Rejected(RiskRejectReason::PriceCollar);
+            }
+            let limit = intent.price.scaled();
+            let diff = i128::from((limit - mark).unsigned_abs());
+            let max_diff = (i128::from(mark) * i128::from(self.limits.collar_bps)) / 10_000;
+            if diff > max_diff {
+                return RiskDecision::Rejected(RiskRejectReason::PriceCollar);
             }
         }
         if self.limits.max_asset_class_notional_minor > 0 {
@@ -289,6 +346,32 @@ mod tests {
             engine.check(&buy(1, 10_500), &c).reject_reason(),
             Some(RiskRejectReason::PriceCollar)
         );
+    }
+
+    #[test]
+    fn collar_fail_closed_without_mark() {
+        let mut limits = RiskLimits::demo();
+        limits.collar_bps = 100;
+        let engine = RiskEngine::new(limits);
+        let mut c = ctx(10_000_000, 0, 10_000);
+        c.ref_price = None;
+        assert_eq!(
+            engine.check(&buy(1, 10_000), &c).reject_reason(),
+            Some(RiskRejectReason::PriceCollar)
+        );
+    }
+
+    #[test]
+    fn snapshot_restore_round_trip() {
+        let mut engine = RiskEngine::new(RiskLimits::demo());
+        engine.set_global_kill(true);
+        engine.set_account_kill(AccountId::from_u64(7), true);
+        engine.restrict_instrument(InstrumentId::from_u64(3));
+        let snap = engine.snapshot();
+        let mut other = RiskEngine::new(RiskLimits::default());
+        other.restore(snap.clone());
+        assert_eq!(other.snapshot(), snap);
+        assert!(other.global_kill());
     }
 
     #[test]

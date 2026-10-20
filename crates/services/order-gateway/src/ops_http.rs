@@ -116,48 +116,64 @@ pub async fn post_risk(
     if let Err(resp) = require_ops_auth(&state, &headers, query.ops_token.as_deref(), None) {
         return resp;
     }
-    let mut engine = lock_engine(&state);
-    if let Some(on) = body.global_kill {
-        engine.risk_mut().set_global_kill(on);
-    }
-    if let Some(patch) = body.limits {
-        let mut limits = engine.risk().limits();
-        apply_limits_patch(&mut limits, &patch);
-        engine.risk_mut().set_limits(limits);
-    }
-    if let Some(symbol) = body.restrict_symbol.as_deref() {
-        match resolve_symbol_id(&state, symbol) {
-            Ok(id) => engine.risk_mut().restrict_instrument(id),
-            Err(code) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "type": "error", "code": code })),
-                )
-                    .into_response();
+    let (limits, global_kill, risk_snap) = {
+        let mut engine = lock_engine(&state);
+        if let Some(on) = body.global_kill {
+            engine.risk_mut().set_global_kill(on);
+        }
+        if let Some(patch) = body.limits {
+            let mut limits = engine.risk().limits();
+            apply_limits_patch(&mut limits, &patch);
+            engine.risk_mut().set_limits(limits);
+        }
+        if let Some(symbol) = body.restrict_symbol.as_deref() {
+            match resolve_symbol_id(&state, symbol) {
+                Ok(id) => engine.risk_mut().restrict_instrument(id),
+                Err(code) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "type": "error", "code": code })),
+                    )
+                        .into_response();
+                }
             }
         }
-    }
-    if let Some(symbol) = body.allow_symbol.as_deref() {
-        match resolve_symbol_id(&state, symbol) {
-            Ok(id) => engine.risk_mut().allow_instrument(id),
-            Err(code) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "type": "error", "code": code })),
-                )
-                    .into_response();
+        if let Some(symbol) = body.allow_symbol.as_deref() {
+            match resolve_symbol_id(&state, symbol) {
+                Ok(id) => engine.risk_mut().allow_instrument(id),
+                Err(code) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "type": "error", "code": code })),
+                    )
+                        .into_response();
+                }
             }
         }
+        if let Some(ak) = body.account_kill {
+            engine
+                .risk_mut()
+                .set_account_kill(AccountId::from_u64(ak.account_id), ak.on);
+        }
+        (
+            engine.risk().limits(),
+            engine.risk().global_kill(),
+            engine.risk().snapshot(),
+        )
+    };
+    if let Some(pool) = state.store_pool() {
+        if let Err(err) = shinrai_store::upsert_risk_state(&pool, &risk_snap).await {
+            eprintln!("shinrai-order-gateway: persist risk_state failed: {err}");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "type": "error", "code": "risk_persist_failed" })),
+            )
+                .into_response();
+        }
     }
-    if let Some(ak) = body.account_kill {
-        engine
-            .risk_mut()
-            .set_account_kill(AccountId::from_u64(ak.account_id), ak.on);
-    }
-    let limits = engine.risk().limits();
     Json(json!({
         "ok": true,
-        "global_kill": engine.risk().global_kill(),
+        "global_kill": global_kill,
         "limits": limits_json(limits),
     }))
     .into_response()

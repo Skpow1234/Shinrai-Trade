@@ -649,9 +649,14 @@ impl AppState {
         pool: StorePool,
     ) -> Result<(), shinrai_store::StoreError> {
         let payload = crate::hydrate::load_hydrate_payload(&pool).await?;
+        let risk_snap = shinrai_store::load_risk_state(&pool).await?;
         let max_seq = {
             let mut engine = lock_engine(self);
-            crate::hydrate::apply_hydrate(&mut engine, payload)?
+            let max = crate::hydrate::apply_hydrate(&mut engine, payload)?;
+            if let Some(snap) = risk_snap {
+                engine.risk_mut().restore(snap);
+            }
+            max
         };
         if let Ok(rows) = shinrai_store::list_approval_requests(&pool).await {
             let restored: Vec<_> = rows
@@ -731,9 +736,15 @@ impl AppState {
             }
             Err(err) => {
                 self.metrics.record_dual_write_failure();
-                {
+                let risk_snap = {
                     let mut engine = lock_engine(self);
                     engine.risk_mut().set_global_kill(true);
+                    engine.risk().snapshot()
+                };
+                if let Err(risk_err) = shinrai_store::upsert_risk_state(pool, &risk_snap).await {
+                    eprintln!(
+                        "shinrai-order-gateway: persist risk_state after kill failed: {risk_err}"
+                    );
                 }
                 eprintln!("shinrai-order-gateway: persist failed (kill switch engaged): {err}");
                 if self.store_fail_hard {

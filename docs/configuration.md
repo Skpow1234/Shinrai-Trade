@@ -92,7 +92,7 @@ Venues that need no API key: `sim`, `sandbox`, `rest` without `SHINRAI_OG_REST_U
 | `SHINRAI_OG_AUDIT_EXPORT_RETENTION_SECS` | Only export audit rows newer than this window |
 | `SHINRAI_OG_RESTRICTED_SYMBOLS` | Comma-separated symbols restricted at bootstrap |
 | `SHINRAI_OG_ADMIN_OVERRIDE_TOKEN` | Bearer for `X-Admin-Override` on restricted instruments |
-| `SHINRAI_RISK_COLLAR_BPS` | Price collar vs fill/mark (0 = off) |
+| `SHINRAI_RISK_COLLAR_BPS` | Price collar vs mark (`0` = off; when `>0`, missing/zero mark fails closed) |
 | `SHINRAI_RISK_MAX_DAILY_LOSS_MINOR` | Day loss limit in quote minor units (0 = off) |
 | `SHINRAI_RISK_MAX_ASSET_CLASS_NOTIONAL_MINOR` | Cap on same-asset-class exposure + new order (0 = off) |
 | `SHINRAI_RISK_MARKET_SESSION` | Optional `open_secs:close_secs` from midnight UTC |

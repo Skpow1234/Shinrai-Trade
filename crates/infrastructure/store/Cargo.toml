@@ -17,6 +17,7 @@ shinrai-instruments = { workspace = true }
 shinrai-ledger = { workspace = true }
 shinrai-money = { workspace = true }
 shinrai-orders = { workspace = true }
+shinrai-risk = { workspace = true }
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",
     "tls-rustls-ring",
