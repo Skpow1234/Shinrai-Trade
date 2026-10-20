@@ -152,113 +152,122 @@ pub fn spawn_paper_acceptor(
 
 fn paper_acceptor_loop(listener: &TcpListener, config: &FixConfig, stop: &Arc<AtomicBool>) {
     while !stop.load(Ordering::SeqCst) {
-        let mut stream = loop {
-            if stop.load(Ordering::SeqCst) {
-                return;
-            }
-            match listener.accept() {
-                Ok((s, _)) => break s,
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(_) => return,
-            }
+        let Some(mut stream) = accept_one(listener, stop) else {
+            return;
         };
         let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
         let _ = stream.set_nonblocking(false);
+        run_session(&mut stream, config, stop);
+    }
+}
 
-        let mut next_out = 1_u64;
-        let mut next_venue = 1_u64;
-        let mut next_exec = 1_u64;
-        let mut outbound: Vec<(u64, String)> = Vec::new();
-        let mut working: HashMap<String, Working> = HashMap::new();
-
-        while !stop.load(Ordering::SeqCst) {
-            let Ok(wire) = read_fix_message(&mut stream) else {
-                break;
-            };
-            let Ok(map) = decode_fix(&wire) else {
-                continue;
-            };
-            let Some(msg_type) = map.get("35").map(String::as_str) else {
-                continue;
-            };
-            match msg_type {
-                "A" => {
-                    let _ = send_acceptor(
-                        &mut stream,
-                        config,
-                        &mut next_out,
-                        &mut outbound,
-                        "A",
-                        &[("98", "0"), ("108", "30")],
-                    );
-                }
-                "0" => {
-                    let _ = send_acceptor(
-                        &mut stream,
-                        config,
-                        &mut next_out,
-                        &mut outbound,
-                        "0",
-                        &[],
-                    );
-                }
-                "5" => {
-                    let _ = send_acceptor(
-                        &mut stream,
-                        config,
-                        &mut next_out,
-                        &mut outbound,
-                        "5",
-                        &[],
-                    );
-                    break;
-                }
-                "2" => {
-                    let _ = handle_resend_request(
-                        &mut stream,
-                        config,
-                        &mut next_out,
-                        &outbound,
-                        &map,
-                    );
-                }
-                "D" => {
-                    let _ = handle_new(
-                        &mut stream,
-                        config,
-                        &mut next_out,
-                        &mut outbound,
-                        &mut next_venue,
-                        &mut next_exec,
-                        &mut working,
-                        &map,
-                    );
-                }
-                "F" => {
-                    let _ = handle_cancel(
-                        &mut stream,
-                        config,
-                        &mut next_out,
-                        &mut outbound,
-                        &mut working,
-                        &map,
-                    );
-                }
-                "G" => {
-                    let _ = handle_replace(
-                        &mut stream,
-                        config,
-                        &mut next_out,
-                        &mut outbound,
-                        &mut working,
-                        &map,
-                    );
-                }
-                _ => {}
-            }
+fn accept_one(listener: &TcpListener, stop: &Arc<AtomicBool>) -> Option<TcpStream> {
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return None;
         }
+        match listener.accept() {
+            Ok((s, _)) => return Some(s),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+fn run_session(stream: &mut TcpStream, config: &FixConfig, stop: &Arc<AtomicBool>) {
+    let mut next_out = 1_u64;
+    let mut next_venue = 1_u64;
+    let mut next_exec = 1_u64;
+    let mut outbound: Vec<(u64, String)> = Vec::new();
+    let mut working: HashMap<String, Working> = HashMap::new();
+
+    while !stop.load(Ordering::SeqCst) {
+        let Ok(wire) = read_fix_message(stream) else {
+            break;
+        };
+        let Ok(map) = decode_fix(&wire) else {
+            continue;
+        };
+        let Some(msg_type) = map.get("35").map(String::as_str) else {
+            continue;
+        };
+        let done = dispatch_inbound(
+            stream,
+            config,
+            &mut next_out,
+            &mut outbound,
+            &mut next_venue,
+            &mut next_exec,
+            &mut working,
+            msg_type,
+            &map,
+        );
+        if done {
+            break;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_inbound(
+    stream: &mut TcpStream,
+    config: &FixConfig,
+    next_out: &mut u64,
+    outbound: &mut Vec<(u64, String)>,
+    next_venue: &mut u64,
+    next_exec: &mut u64,
+    working: &mut HashMap<String, Working>,
+    msg_type: &str,
+    map: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    match msg_type {
+        "A" => {
+            let _ = send_acceptor(
+                stream,
+                config,
+                next_out,
+                outbound,
+                "A",
+                &[("98", "0"), ("108", "30")],
+            );
+            false
+        }
+        "0" => {
+            let _ = send_acceptor(stream, config, next_out, outbound, "0", &[]);
+            false
+        }
+        "5" => {
+            let _ = send_acceptor(stream, config, next_out, outbound, "5", &[]);
+            true
+        }
+        "2" => {
+            let _ = handle_resend_request(stream, config, next_out, outbound, map);
+            false
+        }
+        "D" => {
+            let _ = handle_new(
+                stream,
+                config,
+                next_out,
+                outbound,
+                next_venue,
+                next_exec,
+                working,
+                map,
+            );
+            false
+        }
+        "F" => {
+            let _ = handle_cancel(stream, config, next_out, outbound, working, map);
+            false
+        }
+        "G" => {
+            let _ = handle_replace(stream, config, next_out, outbound, working, map);
+            false
+        }
+        _ => false,
     }
 }
 
@@ -276,6 +285,7 @@ fn send_acceptor(
     stream: &mut TcpStream,
     config: &FixConfig,
     next_out: &mut u64,
+    outbound: &mut Vec<(u64, String)>,
     msg_type: &str,
     body: &[(&str, &str)],
 ) -> Result<(), ExecutionError> {
@@ -289,13 +299,62 @@ fn send_acceptor(
         seq,
         body,
     );
+    outbound.push((seq, wire.clone()));
     write_fix_message(stream, &wire)
 }
 
+fn handle_resend_request(
+    stream: &mut TcpStream,
+    config: &FixConfig,
+    next_out: &mut u64,
+    outbound: &[(u64, String)],
+    map: &std::collections::BTreeMap<String, String>,
+) -> Result<(), ExecutionError> {
+    let begin: u64 = map.get("7").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let end: u64 = map.get("16").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let end = if end == 0 {
+        next_out.saturating_sub(1)
+    } else {
+        end
+    };
+    if begin == 0 || begin > end {
+        return Ok(());
+    }
+    let mut cursor = begin;
+    while cursor <= end {
+        if let Some((_, wire)) = outbound.iter().find(|(s, _)| *s == cursor) {
+            let poss = with_poss_dup(wire).map_err(ExecutionError::InvalidState)?;
+            write_fix_message(stream, &poss)?;
+            cursor = cursor.saturating_add(1);
+        } else {
+            let next_real = outbound
+                .iter()
+                .map(|(s, _)| *s)
+                .filter(|s| *s > cursor)
+                .min()
+                .unwrap_or(end.saturating_add(1));
+            let new_seq = next_real.min(end.saturating_add(1));
+            let new_s = new_seq.to_string();
+            let wire = encode_fix(
+                &config.target_comp_id,
+                &config.sender_comp_id,
+                "4",
+                cursor,
+                &[("123", "Y"), ("36", new_s.as_str())],
+            );
+            write_fix_message(stream, &wire)?;
+            cursor = new_seq;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn handle_new(
     stream: &mut TcpStream,
     config: &FixConfig,
     next_out: &mut u64,
+    outbound: &mut Vec<(u64, String)>,
     next_venue: &mut u64,
     next_exec: &mut u64,
     working: &mut HashMap<String, Working>,
@@ -324,7 +383,7 @@ fn handle_new(
             ("31", "0"),
             ("58", "fok cannot rest"),
         ];
-        return send_acceptor(stream, config, next_out, "8", &body);
+        return send_acceptor(stream, config, next_out, outbound, "8", &body);
     }
     let venue = format!("FIX-{next_venue}");
     *next_venue = next_venue.saturating_add(1);
@@ -346,6 +405,7 @@ fn handle_new(
         stream,
         config,
         next_out,
+        outbound,
         "8",
         &[
             ("37", venue.as_str()),
@@ -369,6 +429,7 @@ fn handle_new(
             stream,
             config,
             next_out,
+            outbound,
             "8",
             &[
                 ("37", venue.as_str()),
@@ -391,6 +452,7 @@ fn handle_cancel(
     stream: &mut TcpStream,
     config: &FixConfig,
     next_out: &mut u64,
+    outbound: &mut Vec<(u64, String)>,
     working: &mut HashMap<String, Working>,
     map: &std::collections::BTreeMap<String, String>,
 ) -> Result<(), ExecutionError> {
@@ -408,6 +470,7 @@ fn handle_cancel(
             stream,
             config,
             next_out,
+            outbound,
             "8",
             &[
                 ("37", venue.as_str()),
@@ -429,6 +492,7 @@ fn handle_cancel(
         stream,
         config,
         next_out,
+        outbound,
         "8",
         &[
             ("37", venue.as_str()),
@@ -448,6 +512,7 @@ fn handle_replace(
     stream: &mut TcpStream,
     config: &FixConfig,
     next_out: &mut u64,
+    outbound: &mut Vec<(u64, String)>,
     working: &mut HashMap<String, Working>,
     map: &std::collections::BTreeMap<String, String>,
 ) -> Result<(), ExecutionError> {
@@ -472,6 +537,7 @@ fn handle_replace(
         stream,
         config,
         next_out,
+        outbound,
         "8",
         &[
             ("37", venue.as_str()),
@@ -541,5 +607,20 @@ mod tests {
         let m2 = decode_fix(&er_fill).expect("d2");
         assert_eq!(m2.get("150").map(String::as_str), Some("F"));
         assert_eq!(m2.get("32").map(String::as_str), Some("3"));
+
+        // ResendRequest for the logon ack (seq 1) must return PossDupFlag=Y.
+        let resend = encode_fix(
+            &cfg.sender_comp_id,
+            &cfg.target_comp_id,
+            "2",
+            3,
+            &[("7", "1"), ("16", "1")],
+        );
+        write_fix_message(&mut stream, &resend).expect("resend write");
+        let replay = read_fix_message(&mut stream).expect("poss dup");
+        let mr = decode_fix(&replay).expect("decode replay");
+        assert_eq!(mr.get("35").map(String::as_str), Some("A"));
+        assert_eq!(mr.get("43").map(String::as_str), Some("Y"));
+        assert_eq!(mr.get("34").map(String::as_str), Some("1"));
     }
 }

@@ -167,7 +167,7 @@ pub struct FixPaperVenue {
     next_wire_out: u64,
     /// Acceptor outbound msg seq (tag 34 on wire) — in-process only.
     next_wire_in: u64,
-    /// Next expected inbound MsgSeqNum from the counterparty.
+    /// Next expected inbound `MsgSeqNum` from the counterparty.
     expect_inbound_seq: u64,
     /// OMS execution-report sequence (independent of session admin msgs).
     next_report_seq: u64,
@@ -254,7 +254,7 @@ impl FixPaperVenue {
         }
     }
 
-    /// Next expected inbound MsgSeqNum (tag 34).
+    /// Next expected inbound `MsgSeqNum` (tag 34).
     #[must_use]
     pub const fn expect_inbound_seq(&self) -> u64 {
         self.expect_inbound_seq
@@ -1312,6 +1312,7 @@ fn fix_checksum(prefix: &str) -> u8 {
 ///
 /// Returns a static reason when the source message cannot be decoded.
 pub fn with_poss_dup(raw: &str) -> Result<String, &'static str> {
+    const SKIP: &[&str] = &["8", "9", "35", "49", "56", "34", "52", "10", "43"];
     let map = decode_fix(raw)?;
     let msg_type = map.get("35").ok_or("missing MsgType")?;
     let sender = map.get("49").ok_or("missing SenderCompID")?;
@@ -1320,7 +1321,6 @@ pub fn with_poss_dup(raw: &str) -> Result<String, &'static str> {
         .get("34")
         .and_then(|s| s.parse().ok())
         .ok_or("missing MsgSeqNum")?;
-    const SKIP: &[&str] = &["8", "9", "35", "49", "56", "34", "52", "10", "43"];
     let mut body: Vec<(String, String)> = vec![("43".into(), "Y".into())];
     for (k, v) in &map {
         if SKIP.contains(&k.as_str()) {
@@ -1453,5 +1453,87 @@ mod tests {
         );
         assert!(v.outbound_wire().iter().any(|m| m.contains("35=D")));
         assert!(v.inbound_wire().iter().any(|m| m.contains("150=F")));
+    }
+
+    #[test]
+    fn poss_dup_rewrites_checksum() {
+        let wire = encode_fix("SHINRAI", "SIM", "D", 3, &[("11", "1"), ("55", "1")]);
+        let poss = with_poss_dup(&wire).expect("poss dup");
+        let map = decode_fix(&poss).expect("decode");
+        assert_eq!(map.get("43").map(String::as_str), Some("Y"));
+        assert_eq!(map.get("35").map(String::as_str), Some("D"));
+        assert_eq!(map.get("34").map(String::as_str), Some("3"));
+        assert_eq!(map.get("11").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn request_resend_emits_begin_end() {
+        let mut v = FixPaperVenue::local_mock();
+        v.request_resend(2, 0).expect("resend");
+        assert!(v.outbound_wire().iter().any(|m| {
+            m.contains("35=2") && m.contains("7=2") && m.contains("16=0")
+        }));
+    }
+
+    #[test]
+    fn sequence_reset_advances_expect_inbound() {
+        let mut v = FixPaperVenue::new(FixConfig::ack_only());
+        v.logon().expect("logon");
+        assert_eq!(v.expect_inbound_seq(), 1);
+        let wire = encode_fix("SIM", "SHINRAI", "4", 1, &[("123", "Y"), ("36", "5")]);
+        let map = decode_fix(&wire).expect("decode");
+        v.apply_sequence_reset(&map).expect("reset");
+        assert_eq!(v.expect_inbound_seq(), 5);
+    }
+
+    #[test]
+    fn gap_fill_covers_missing_outbound_seq() {
+        let mut v = FixPaperVenue::new(FixConfig::ack_only());
+        v.logon().expect("logon");
+        // Pretend seqs 2..=3 were never stored; next outbound would be 5.
+        v.outbound_wire.clear();
+        v.next_wire_out = 5;
+        v.resend_outbound(2, 3).expect("resend");
+        let gap = v
+            .outbound_wire
+            .iter()
+            .find(|m| m.contains("35=4") && m.contains("123=Y"))
+            .expect("gap-fill SequenceReset");
+        let map = decode_fix(gap).expect("decode");
+        assert_eq!(map.get("34").map(String::as_str), Some("2"));
+        assert_eq!(map.get("36").map(String::as_str), Some("4"));
+    }
+
+    #[test]
+    fn tcp_resend_request_returns_poss_dup() {
+        let mut v = FixPaperVenue::new(FixConfig::tcp_loopback_ephemeral());
+        v.logon().expect("tcp logon");
+        v.submit(&NewVenueOrder {
+            order_id: OrderId::from_u64(11),
+            instrument_id: InstrumentId::from_u64(1),
+            side: Side::Buy,
+            qty: QuantityLots::from_lots(1),
+            price: PriceTicks::from_scaled(100),
+            tif: TimeInForce::Gtc,
+        })
+        .expect("submit");
+        let _ = v.poll();
+        // After logon A + New ER + Trade ER, expect_inbound is 4.
+        assert!(v.expect_inbound_seq() >= 4);
+        // Ask acceptor to retransmit from seq 1; dups must not advance expect.
+        let before = v.expect_inbound_seq();
+        v.request_resend(1, 0).expect("resend req");
+        // Drain PossDup replies (ignored as stale seq).
+        for _ in 0..8 {
+            let _ = v.poll();
+        }
+        assert_eq!(v.expect_inbound_seq(), before);
+        assert!(
+            v.inbound_wire()
+                .iter()
+                .any(|m| m.contains("43=Y") || m.contains("35=4")),
+            "expected PossDup or gap-fill in inbound: {:?}",
+            v.inbound_wire()
+        );
     }
 }

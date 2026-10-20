@@ -155,7 +155,7 @@ Total: **800** milestones.
 ### execution
 
 - **M-0106**: FIX vendor TCP session
-- **M-0107**: FIX ResendRequest / gap fill / seq reset
+- **M-0107**: ~~FIX ResendRequest / gap fill / seq reset~~ **done** (initiator gap → `35=2`; PossDup `43=Y` retransmit; `SequenceReset` `35=4`/`123=Y` gap-fill; paper acceptor store)
 - **M-0108**: FIX checksum / body-length hardening
 - **M-0109**: Alpaca: replace eprintln with metrics
 - **M-0110**: ~~Alpaca: async HTTP (no blocking reqwest)~~ **done** (`RemoteAlpacaHttp` + `block_on_venue`)

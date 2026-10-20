@@ -50,10 +50,11 @@ Complete for the licensed-broker **paper** path:
 - KYC / approvals / audit export
 - Alpaca-sourced EOD position recon
 - Local FIX 4.2 subset (`SHINRAI_OG_VENUE=fix`) — SOH-delimited wire in-process **or TCP** (`SHINRAI_OG_FIX_TCP` / `_CONNECT`)
+- FIX session recovery: inbound gap → `ResendRequest` (`35=2`); retransmit with `PossDupFlag` (`43=Y`) or `SequenceReset` gap-fill (`35=4` / `123=Y`)
 
 ### Known gaps (Phase 4+)
 
-- FIX TCP is a subset (Logon/HB/D/F/G/ER); no ResendRequest / sequence reset / full session recovery yet
+- FIX subset still omits full admin surface (e.g. Reject `35=3`, TestRequest, Drop Copy session type)
 - Futures live MD: `ESZ5` uses synth (no CME feed yet); equities live via Alpaca when keys are set
 - Multi-instance OMS is **active-passive** (`SHINRAI_OG_HA`); not multi-writer active-active
 
@@ -74,6 +75,7 @@ Real custody / bank rails stay gated on regulation and licensed partners. This p
 - **Compose file secrets** for Postgres password + ops token (`deploy/secrets/`, `init-secrets`)
 - **Caddy TLS overlay** (`deploy/Caddyfile`, `compose.tls.yaml`, profile `tls`)
 - **FIX TCP**: initiator + loopback paper acceptor (`SHINRAI_OG_FIX_TCP`) or external connect (`SHINRAI_OG_FIX_TCP_CONNECT`)
+- **FIX session recovery**: ResendRequest / PossDup retransmit / SequenceReset gap-fill (initiator + paper acceptor)
 - **Equity/futures MD**: Alpaca stock stream (`SHINRAI_MD_ALPACA`) + multi-product synth (`AAPL`/`ESZ5`/`BTC-USD`)
 - **Async venue HTTP**: Alpaca + remote REST use async `reqwest` with `block_in_place` on the multi-thread Tokio runtime (no `reqwest::blocking`)
 - **Multi-instance OMS HA**: Postgres `oms_leader_lease` + `SHINRAI_OG_HA` (active-passive; followers `503 not_oms_leader`; outbox publishes only on leader)
@@ -81,11 +83,11 @@ Real custody / bank rails stay gated on regulation and licensed partners. This p
 
 ## Suggested next (priority)
 
-1. FIX ResendRequest / gap-fill / sequence reset completeness
-2. CME / licensed futures market-data vendor (replace ESZ5 synth)
-3. Non-blocking KYC HTTP (replace remaining `reqwest::blocking` in compliance)
-4. Shared read replicas / hydrate-on-promote for faster HA failover
-5. Ops audit trail for every risk mutation
+1. CME / licensed futures market-data vendor (replace ESZ5 synth)
+2. Non-blocking KYC HTTP (replace remaining `reqwest::blocking` in compliance)
+3. Shared read replicas / hydrate-on-promote for faster HA failover
+4. Ops audit trail for every risk mutation
+5. FIX Reject / TestRequest / Drop Copy session type
 
 ## Full backlog (500+)
 
