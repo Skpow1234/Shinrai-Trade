@@ -248,14 +248,7 @@ fn dispatch_inbound(
         }
         "D" => {
             let _ = handle_new(
-                stream,
-                config,
-                next_out,
-                outbound,
-                next_venue,
-                next_exec,
-                working,
-                map,
+                stream, config, next_out, outbound, next_venue, next_exec, working, map,
             );
             false
         }

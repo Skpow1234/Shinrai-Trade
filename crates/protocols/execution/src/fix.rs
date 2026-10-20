@@ -429,10 +429,12 @@ impl FixPaperVenue {
         &mut self,
         map: &BTreeMap<String, String>,
     ) -> Result<(), ExecutionError> {
-        let begin: u64 = map
-            .get("7")
-            .and_then(|s| s.parse().ok())
-            .ok_or(ExecutionError::InvalidState("ResendRequest missing BeginSeqNo"))?;
+        let begin: u64 =
+            map.get("7")
+                .and_then(|s| s.parse().ok())
+                .ok_or(ExecutionError::InvalidState(
+                    "ResendRequest missing BeginSeqNo",
+                ))?;
         let end: u64 = map.get("16").and_then(|s| s.parse().ok()).unwrap_or(0);
         self.resend_outbound(begin, end)
     }
@@ -517,10 +519,12 @@ impl FixPaperVenue {
         &mut self,
         map: &BTreeMap<String, String>,
     ) -> Result<(), ExecutionError> {
-        let new_seq: u64 = map
-            .get("36")
-            .and_then(|s| s.parse().ok())
-            .ok_or(ExecutionError::InvalidState("SequenceReset missing NewSeqNo"))?;
+        let new_seq: u64 =
+            map.get("36")
+                .and_then(|s| s.parse().ok())
+                .ok_or(ExecutionError::InvalidState(
+                    "SequenceReset missing NewSeqNo",
+                ))?;
         if new_seq == 0 {
             return Err(ExecutionError::InvalidState("SequenceReset NewSeqNo=0"));
         }
@@ -1328,10 +1332,7 @@ pub fn with_poss_dup(raw: &str) -> Result<String, &'static str> {
         }
         body.push((k.clone(), v.clone()));
     }
-    let body_refs: Vec<(&str, &str)> = body
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
+    let body_refs: Vec<(&str, &str)> = body.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     Ok(encode_fix(sender, target, msg_type, seq, &body_refs))
 }
 
@@ -1470,9 +1471,10 @@ mod tests {
     fn request_resend_emits_begin_end() {
         let mut v = FixPaperVenue::local_mock();
         v.request_resend(2, 0).expect("resend");
-        assert!(v.outbound_wire().iter().any(|m| {
-            m.contains("35=2") && m.contains("7=2") && m.contains("16=0")
-        }));
+        assert!(v
+            .outbound_wire()
+            .iter()
+            .any(|m| { m.contains("35=2") && m.contains("7=2") && m.contains("16=0") }));
     }
 
     #[test]
