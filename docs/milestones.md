@@ -55,7 +55,7 @@ Complete for the licensed-broker **paper** path:
 ### Known gaps (Phase 4+)
 
 - FIX subset still omits some admin/business edges (e.g. fuller business Reject mapping, Drop Copy fanout to a second CompID)
-- Futures MD: Databento-shaped paper/live for `ESZ5` (`SHINRAI_MD_FUTURES`); raw CME MDP3 multicast not wired
+- Futures MD: Databento-shaped paper/live for `ESZ5` (`SHINRAI_MD_FUTURES`) with mbp-10 L2; raw CME MDP3 multicast not wired
 - Multi-instance OMS is **active-passive** (`SHINRAI_OG_HA`); not multi-writer active-active (hydrate-on-promote + follower warm standby)
 
 ## Phase 5 — Paper funds
@@ -77,18 +77,20 @@ Real custody / bank rails stay gated on regulation and licensed partners. This p
 - **FIX TCP**: initiator + loopback paper acceptor (`SHINRAI_OG_FIX_TCP`) or external connect (`SHINRAI_OG_FIX_TCP_CONNECT`)
 - **FIX session recovery**: ResendRequest / PossDup retransmit / SequenceReset gap-fill (initiator + paper acceptor)
 - **FIX admin / drop-copy**: Reject `35=3`, TestRequest `35=1` (+ Heartbeat TestReqID echo), `SHINRAI_OG_FIX_SESSION=drop_copy`
-- **Equity/futures MD**: Alpaca stock stream (`SHINRAI_MD_ALPACA`) + Databento GLBX futures (`SHINRAI_MD_FUTURES`, paper or licensed) + multi-product synth
+- **Equity/futures MD**: Alpaca stock stream (`SHINRAI_MD_ALPACA`) + Databento GLBX futures (`SHINRAI_MD_FUTURES`, paper or licensed, mbp-10 L2) + multi-product synth
+- **Databento L2**: mbp-10 snapshot/delta decode + paper book publisher (`SHINRAI_MD_FUTURES_SCHEMA`); raw MDP3 multicast still external
 - **Async venue HTTP**: Alpaca + remote REST use async `reqwest` with `block_in_place` on the multi-thread Tokio runtime (no `reqwest::blocking`)
 - **Async KYC HTTP**: compliance vendor uses async `reqwest` + `block_in_place` (no `reqwest::blocking`)
 - **Multi-instance OMS HA**: Postgres `oms_leader_lease` + `SHINRAI_OG_HA` (active-passive; followers `503 not_oms_leader`; outbox publishes only on leader; hydrate-on-promote + follower warm rehydrate)
 - **Durable risk control plane**: `risk_state` table (kills/limits/restrictions) restored on hydrate; collar fail-closed when `collar_bps>0` and no mark
 - **Risk ops audit**: `risk_ops_audit` + `GET /v1/ops/risk-audit` for every ops risk mutation (and system persist-fail kills / approval overrides)
+- **KYC fail-closed**: empty `SHINRAI_OG_KYC_STATUS` blocks trading outside `--dev` / `SHINRAI_OG_KYC_OPEN` (`M-0346`)
 
 ## Suggested next (priority)
 
-1. Raw CME MDP3 / fuller Databento live schemas (L2 depth)
-2. KYC empty map fail-closed in production (`M-0346`)
-3. Ops audit trail polish / FIX business Reject mapping (`M-0125`)
+1. FIX ExecutionReport Reject mapping (`M-0125`)
+2. Raw CME MDP3 multicast (licensed binary UDP) — optional when vendor JSON feed unavailable
+3. Ops audit trail polish / readiness probes
 
 ## Full backlog (500+)
 

@@ -197,6 +197,11 @@ pub struct GatewayConfig {
     /// Defaults: `true` in `new()` / tests; `false` from env unless `--dev` /
     /// `SHINRAI_OG_DEV` or explicit `SHINRAI_OG_OPS_OPEN=1`.
     ops_allow_open: bool,
+    /// When true, an empty KYC map approves all subjects (dev).
+    ///
+    /// Production (`from_env`) defaults to `false` unless `SHINRAI_OG_DEV` or
+    /// `SHINRAI_OG_KYC_OPEN=1` (`M-0346`).
+    kyc_allow_open: bool,
     /// Active-passive HA via Postgres OMS leader lease.
     ha_enabled: bool,
     /// Instance id for leader lease / outbox `claimed_by`.
@@ -240,6 +245,7 @@ impl GatewayConfig {
             withdrawals_enabled: true,
             withdraw_approval_threshold_minor: None,
             ops_allow_open: true,
+            kyc_allow_open: true,
             ha_enabled: false,
             instance_id: default_instance_id(),
             ha_lease_secs: 15,
@@ -258,8 +264,9 @@ impl GatewayConfig {
             parse_deposits(std::env::var("SHINRAI_OG_DEPOSITS").ok().as_deref()),
             TokenTtl::new(access, refresh),
         );
-        // Non-dev process defaults: ops require a configured bearer.
+        // Non-dev process defaults: ops require a configured bearer; empty KYC fails closed.
         cfg.ops_allow_open = env_truthy("SHINRAI_OG_DEV") || env_truthy("SHINRAI_OG_OPS_OPEN");
+        cfg.kyc_allow_open = env_truthy("SHINRAI_OG_DEV") || env_truthy("SHINRAI_OG_KYC_OPEN");
         cfg.bootstrap_marks = parse_symbol_marks(std::env::var("SHINRAI_OG_MARKS").ok().as_deref());
         cfg.md_base_url = std::env::var("SHINRAI_OG_MD_URL")
             .ok()
@@ -370,11 +377,18 @@ impl GatewayConfig {
         self.ops_allow_open
     }
 
+    /// Whether an empty KYC map may approve all subjects.
+    #[must_use]
+    pub const fn kyc_allow_open(&self) -> bool {
+        self.kyc_allow_open
+    }
+
     /// Local paper defaults for UI smoke (`dev` / `trader` / $10k / AAPL mark).
     ///
     /// Only fills fields that are still empty so explicit env wins.
     pub fn apply_paper_dev_defaults(&mut self) {
         self.ops_allow_open = true;
+        self.kyc_allow_open = true;
         if self.static_tokens.is_empty() {
             self.static_tokens = vec![("dev".into(), "trader".into())];
         }
@@ -415,6 +429,7 @@ impl core::fmt::Debug for GatewayConfig {
             .field("venue_kind", &self.venue_kind)
             .field("ops_token_configured", &self.ops_token.is_some())
             .field("ops_allow_open", &self.ops_allow_open)
+            .field("kyc_allow_open", &self.kyc_allow_open)
             .field("risk_collar_bps", &self.risk_limits.collar_bps)
             .field(
                 "risk_max_daily_loss_minor",
@@ -574,7 +589,10 @@ impl AppState {
                 config.ops_allowlist_raw.as_deref(),
             ),
             md_client: Arc::new(crate::md_client::MdHttpClient::from_env()),
-            kyc: crate::compliance::KycGate::from_env(config.kyc_raw.as_deref()),
+            kyc: crate::compliance::KycGate::from_env(
+                config.kyc_raw.as_deref(),
+                config.kyc_allow_open,
+            ),
             approvals: Arc::new(Mutex::new(crate::compliance::ApprovalStore::new())),
             admin_override_token: config.admin_override_token.clone(),
             store_fail_hard: config.store_fail_hard,

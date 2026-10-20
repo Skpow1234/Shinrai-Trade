@@ -1,13 +1,17 @@
 //! Databento-shaped CME Globex (`GLBX.MDP3`) futures market-data adapter.
 //!
-//! Phase A uses a JSON wire (trades / mbp-1 / snapshot) that matches the
-//! gateway's Alpaca-style supervisor path. Live I/O talks to a licensed
-//! Databento-compatible endpoint when keys/URLs are set; paper mode emits the
-//! same JSON through [`FeedSupervisor`] so `ESZ5` is no longer raw synth-only.
+//! JSON wire covers trades, mbp-1 (BBO), and mbp-10 L2 (snapshot + level delta).
+//! Live I/O talks to a licensed Databento-compatible endpoint when keys/URLs are
+//! set; paper mode emits the same JSON through [`FeedSupervisor`].
+//!
+//! Raw CME MDP3 multicast (binary UDP) is **not** implemented here — use a
+//! licensed Databento (or equivalent) gateway that publishes this JSON shape.
 
 use serde_json::{json, Value};
 use shinrai_instruments::{ExternalId, InstrumentId, InstrumentMaster, PriceTicks, QuantityLots};
-use shinrai_market_data::{BookEvent, BookSnapshot, MdKind, MdRecord};
+use shinrai_market_data::{
+    BookChange, BookDelta, BookEvent, BookLevel, BookSide, BookSnapshot, MdKind, MdRecord,
+};
 
 use crate::error::ProviderError;
 use crate::vendor::{DecodedFrame, MarketDataVendor, SnapshotSpec, VendorId};
@@ -17,6 +21,8 @@ use crate::vendor::{DecodedFrame, MarketDataVendor, SnapshotSpec, VendorId};
 pub struct DatabentoGlbx {
     api_key: String,
     dataset: String,
+    /// Subscribe schema (`trades`, `mbp-1`, `mbp-10`, …).
+    schema: String,
     ws_url: String,
     rest_url: String,
     paper: bool,
@@ -29,6 +35,12 @@ impl DatabentoGlbx {
     pub const REST_DEFAULT: &'static str = "https://hist.databento.com";
     /// CME Globex MDP3 dataset id.
     pub const DATASET_GLBX: &'static str = "GLBX.MDP3";
+    /// Default subscribe schema (trades); set `mbp-10` for L2 depth.
+    pub const SCHEMA_TRADES: &'static str = "trades";
+    /// Top-of-book schema.
+    pub const SCHEMA_MBP1: &'static str = "mbp-1";
+    /// Ten-level book schema (Databento MBP-10).
+    pub const SCHEMA_MBP10: &'static str = "mbp-10";
 
     /// Licensed live vendor (API key required for remote I/O).
     #[must_use]
@@ -36,6 +48,7 @@ impl DatabentoGlbx {
         Self {
             api_key: api_key.into(),
             dataset: Self::DATASET_GLBX.into(),
+            schema: Self::SCHEMA_TRADES.into(),
             ws_url: Self::WS_DEFAULT.into(),
             rest_url: Self::REST_DEFAULT.into(),
             paper: false,
@@ -48,6 +61,7 @@ impl DatabentoGlbx {
         Self {
             api_key: String::new(),
             dataset: Self::DATASET_GLBX.into(),
+            schema: Self::SCHEMA_MBP10.into(),
             ws_url: "paper://futures".into(),
             rest_url: "paper://futures".into(),
             paper: true,
@@ -73,6 +87,13 @@ impl DatabentoGlbx {
         self
     }
 
+    /// Overrides subscribe schema (`trades`, `mbp-1`, `mbp-10`).
+    #[must_use]
+    pub fn with_schema(mut self, schema: impl Into<String>) -> Self {
+        self.schema = schema.into();
+        self
+    }
+
     /// Whether this instance is paper (no remote sockets).
     #[must_use]
     pub const fn is_paper(&self) -> bool {
@@ -83,6 +104,12 @@ impl DatabentoGlbx {
     #[must_use]
     pub fn dataset(&self) -> &str {
         &self.dataset
+    }
+
+    /// Subscribe schema.
+    #[must_use]
+    pub fn schema(&self) -> &str {
+        &self.schema
     }
 
     /// Full WebSocket URL.
@@ -103,7 +130,7 @@ impl DatabentoGlbx {
         .into_bytes()
     }
 
-    /// Paper snapshot body for supervisor recovery (no HTTP).
+    /// Paper trade-mark snapshot body for supervisor recovery (no HTTP).
     #[must_use]
     pub fn paper_snapshot_body(product_id: &str, sequence: u64, price_decimal: &str) -> Vec<u8> {
         json!({
@@ -130,6 +157,32 @@ impl DatabentoGlbx {
             "sequence": sequence,
             "price": price_decimal,
             "size": size,
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    /// Paper mbp-10 L2 snapshot around a mid price (0.25 tick grid).
+    #[must_use]
+    pub fn paper_book_body(product_id: &str, sequence: u64, mid_decimal: &str) -> Vec<u8> {
+        let mid: f64 = mid_decimal.parse().unwrap_or(5_200.0);
+        let tick = 0.25_f64;
+        let mut bids = Vec::new();
+        let mut asks = Vec::new();
+        for i in 1_u8..=10 {
+            let depth = f64::from(i);
+            let bid = ((mid - tick * depth) / tick).round() * tick;
+            let ask = ((mid + tick * depth) / tick).round() * tick;
+            let sz = i64::from(i);
+            bids.push(json!([format!("{bid:.2}"), sz]));
+            asks.push(json!([format!("{ask:.2}"), sz]));
+        }
+        json!({
+            "schema": "mbp-10",
+            "symbol": product_id,
+            "sequence": sequence,
+            "bids": bids,
+            "asks": asks,
         })
         .to_string()
         .into_bytes()
@@ -203,7 +256,7 @@ impl MarketDataVendor for DatabentoGlbx {
         json!({
             "action": "subscribe",
             "dataset": self.dataset,
-            "schema": "trades",
+            "schema": self.schema,
             "symbols": product_ids,
         })
         .to_string()
@@ -218,9 +271,14 @@ impl MarketDataVendor for DatabentoGlbx {
         if !self.api_key.is_empty() {
             headers.push(("Authorization".into(), format!("Bearer {}", self.api_key)));
         }
+        let schema = if self.schema == Self::SCHEMA_MBP10 || self.schema == Self::SCHEMA_MBP1 {
+            self.schema.as_str()
+        } else {
+            Self::SCHEMA_TRADES
+        };
         SnapshotSpec::get_with_headers(
             format!(
-                "{}/v0/timeseries.get_range?dataset={}&symbols={}&schema=trades&limit=1",
+                "{}/v0/timeseries.get_range?dataset={}&symbols={}&schema={schema}&limit=1",
                 self.rest_url, self.dataset, product_id
             ),
             headers,
@@ -293,9 +351,17 @@ impl MarketDataVendor for DatabentoGlbx {
                     ticks,
                 )))
             }
+            "mbp-10" | "mbp" | "book" | "l2" => decode_book_frame(&value, ts_logical, master),
+            "mbp-10-delta" | "l2update" | "book_delta" => {
+                decode_book_delta_frame(&value, ts_logical, master)
+            }
             "snapshot" => {
-                // Streamed snapshot treated as control; REST path uses decode_snapshot.
-                Ok(DecodedFrame::Control)
+                // Price-only recovery snapshot → record; book snapshots use mbp-10.
+                if value.get("bids").is_some() || value.get("levels").is_some() {
+                    decode_book_frame(&value, ts_logical, master)
+                } else {
+                    Ok(DecodedFrame::Control)
+                }
             }
             _ => Ok(DecodedFrame::Control),
         }
@@ -310,7 +376,13 @@ impl MarketDataVendor for DatabentoGlbx {
     ) -> Result<MdRecord, ProviderError> {
         let value: Value = serde_json::from_slice(raw).map_err(|_| ProviderError::InvalidJson)?;
         let instrument_id = Self::resolve_product(master, product_id)?;
-        let price = Self::price_from_value(&value)?;
+        let price = if let Ok(p) = Self::price_from_value(&value) {
+            p
+        } else if let Some(p) = first_book_mid(&value) {
+            p
+        } else {
+            return Err(ProviderError::MissingField("price"));
+        };
         let ticks = Self::price_ticks(master, instrument_id, &price)?;
         let seq = value
             .get("sequence")
@@ -333,21 +405,257 @@ impl MarketDataVendor for DatabentoGlbx {
         product_id: &str,
         master: &InstrumentMaster,
     ) -> Result<BookEvent, ProviderError> {
-        let instrument_id = Self::resolve_product(master, product_id)?;
-        let value: Value = serde_json::from_slice(raw).unwrap_or(Value::Null);
-        let seq = value
-            .get("sequence")
-            .and_then(json_u64_opt)
-            .unwrap_or(1)
-            .max(1);
-        Ok(BookEvent::Snapshot(BookSnapshot::new(
-            instrument_id,
-            seq,
-            ts_logical,
-            Vec::new(),
-            Vec::new(),
-        )))
+        let value: Value = serde_json::from_slice(raw).map_err(|_| ProviderError::InvalidJson)?;
+        let mut value = value;
+        if value.get("symbol").is_none() {
+            value
+                .as_object_mut()
+                .map(|o| o.insert("symbol".into(), json!(product_id)));
+        }
+        match decode_book_frame(&value, ts_logical, master)? {
+            DecodedFrame::Book(event) => Ok(event),
+            _ => Err(ProviderError::MissingField("bids|asks|levels")),
+        }
     }
+}
+
+fn decode_book_frame(
+    value: &Value,
+    ts_logical: u64,
+    master: &InstrumentMaster,
+) -> Result<DecodedFrame, ProviderError> {
+    let symbol = json_str(value, "symbol")?;
+    let instrument_id = DatabentoGlbx::resolve_product(master, symbol)?;
+    let seq = value
+        .get("sequence")
+        .and_then(json_u64_opt)
+        .unwrap_or(1)
+        .max(1);
+    // Single-level delta style on an mbp-10 channel.
+    if value.get("side").is_some() && value.get("price").is_some() && value.get("bids").is_none() {
+        return decode_book_delta_frame(value, ts_logical, master);
+    }
+    let (bids, asks) = decode_book_levels(master, instrument_id, value)?;
+    if bids.is_empty() && asks.is_empty() {
+        return Err(ProviderError::MissingField("bids|asks|levels"));
+    }
+    Ok(DecodedFrame::Book(BookEvent::Snapshot(BookSnapshot::new(
+        instrument_id,
+        seq,
+        ts_logical,
+        bids,
+        asks,
+    ))))
+}
+
+fn decode_book_delta_frame(
+    value: &Value,
+    ts_logical: u64,
+    master: &InstrumentMaster,
+) -> Result<DecodedFrame, ProviderError> {
+    let symbol = json_str(value, "symbol")?;
+    let instrument_id = DatabentoGlbx::resolve_product(master, symbol)?;
+    let seq = value.get("sequence").and_then(json_u64_opt);
+    let changes = if let Some(rows) = value.get("changes").and_then(Value::as_array) {
+        decode_changes_array(master, instrument_id, rows)?
+    } else {
+        let side = match value
+            .get("side")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_ascii_uppercase()
+            .as_str()
+        {
+            "B" | "BID" | "BUY" | "1" => BookSide::Bid,
+            "A" | "ASK" | "SELL" | "2" => BookSide::Ask,
+            _ => return Err(ProviderError::MissingField("side")),
+        };
+        let price = value
+            .get("price")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("px").and_then(Value::as_str))
+            .ok_or(ProviderError::MissingField("price"))?;
+        let instrument = master.get(instrument_id)?;
+        let ticks = instrument.price_to_ticks(price)?;
+        let qty = level_qty(instrument, value.get("size").or_else(|| value.get("sz")))?;
+        vec![BookChange::new(side, ticks, qty)]
+    };
+    Ok(DecodedFrame::Book(BookEvent::Delta(BookDelta::new(
+        instrument_id,
+        seq,
+        ts_logical,
+        changes,
+    ))))
+}
+
+fn decode_book_levels(
+    master: &InstrumentMaster,
+    instrument_id: InstrumentId,
+    value: &Value,
+) -> Result<(Vec<BookLevel>, Vec<BookLevel>), ProviderError> {
+    if value.get("levels").and_then(Value::as_array).is_some() {
+        return decode_databento_levels(master, instrument_id, value);
+    }
+    let bids = decode_side_levels(master, instrument_id, value, "bids")?;
+    let asks = decode_side_levels(master, instrument_id, value, "asks")?;
+    Ok((bids, asks))
+}
+
+fn decode_databento_levels(
+    master: &InstrumentMaster,
+    instrument_id: InstrumentId,
+    value: &Value,
+) -> Result<(Vec<BookLevel>, Vec<BookLevel>), ProviderError> {
+    let rows = value
+        .get("levels")
+        .and_then(Value::as_array)
+        .ok_or(ProviderError::MissingField("levels"))?;
+    let instrument = master.get(instrument_id)?;
+    let mut bids = Vec::new();
+    let mut asks = Vec::new();
+    for row in rows {
+        if let Some(bid_px) = row
+            .get("bid_px")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            let qty = level_qty(
+                instrument,
+                row.get("bid_sz").or_else(|| row.get("bid_size")),
+            )?;
+            if qty.lots() > 0 {
+                bids.push(BookLevel::new(instrument.price_to_ticks(bid_px)?, qty));
+            }
+        }
+        if let Some(ask_px) = row
+            .get("ask_px")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            let qty = level_qty(
+                instrument,
+                row.get("ask_sz").or_else(|| row.get("ask_size")),
+            )?;
+            if qty.lots() > 0 {
+                asks.push(BookLevel::new(instrument.price_to_ticks(ask_px)?, qty));
+            }
+        }
+    }
+    Ok((bids, asks))
+}
+
+fn decode_side_levels(
+    master: &InstrumentMaster,
+    instrument_id: InstrumentId,
+    value: &Value,
+    side: &'static str,
+) -> Result<Vec<BookLevel>, ProviderError> {
+    let Some(rows) = value.get(side).and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    let instrument = master.get(instrument_id)?;
+    let mut levels = Vec::new();
+    for row in rows {
+        let (price, qty_cell) = match row {
+            Value::Array(pair) => {
+                let price = pair
+                    .first()
+                    .and_then(Value::as_str)
+                    .ok_or(ProviderError::MissingField(side))?;
+                (price, pair.get(1))
+            }
+            Value::Object(map) => {
+                let price = map
+                    .get("price")
+                    .or_else(|| map.get("px"))
+                    .and_then(Value::as_str)
+                    .ok_or(ProviderError::MissingField(side))?;
+                (price, map.get("size").or_else(|| map.get("sz")))
+            }
+            _ => return Err(ProviderError::MissingField(side)),
+        };
+        let qty = level_qty(instrument, qty_cell)?;
+        if qty.lots() > 0 {
+            levels.push(BookLevel::new(instrument.price_to_ticks(price)?, qty));
+        }
+    }
+    Ok(levels)
+}
+
+fn decode_changes_array(
+    master: &InstrumentMaster,
+    instrument_id: InstrumentId,
+    rows: &[Value],
+) -> Result<Vec<BookChange>, ProviderError> {
+    let instrument = master.get(instrument_id)?;
+    let mut changes = Vec::new();
+    for row in rows {
+        let pair = row
+            .as_array()
+            .ok_or(ProviderError::MissingField("changes"))?;
+        let side = match pair
+            .first()
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "b" | "bid" | "buy" => BookSide::Bid,
+            "a" | "ask" | "sell" => BookSide::Ask,
+            _ => return Err(ProviderError::MissingField("side")),
+        };
+        let price = pair
+            .get(1)
+            .and_then(Value::as_str)
+            .ok_or(ProviderError::MissingField("price"))?;
+        let qty = level_qty(instrument, pair.get(2))?;
+        changes.push(BookChange::new(
+            side,
+            instrument.price_to_ticks(price)?,
+            qty,
+        ));
+    }
+    Ok(changes)
+}
+
+fn level_qty(
+    instrument: &shinrai_instruments::Instrument,
+    cell: Option<&Value>,
+) -> Result<QuantityLots, ProviderError> {
+    let Some(cell) = cell else {
+        return Ok(QuantityLots::from_lots(0));
+    };
+    if let Some(n) = json_i64_opt(cell) {
+        return Ok(QuantityLots::from_lots(n.max(0)));
+    }
+    if let Some(s) = cell.as_str() {
+        return Ok(instrument.size_to_lots(s)?);
+    }
+    Ok(QuantityLots::from_lots(0))
+}
+
+fn first_book_mid(value: &Value) -> Option<String> {
+    let bid = value
+        .get("bids")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .and_then(|row| {
+            row.as_array()
+                .and_then(|p| p.first())
+                .and_then(Value::as_str)
+                .or_else(|| row.get("price").and_then(Value::as_str))
+        })?;
+    let ask = value
+        .get("asks")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .and_then(|row| {
+            row.as_array()
+                .and_then(|p| p.first())
+                .and_then(Value::as_str)
+                .or_else(|| row.get("price").and_then(Value::as_str))
+        })?;
+    mid_decimal(bid, ask)
 }
 
 fn mid_decimal(bid: &str, ask: &str) -> Option<String> {
@@ -386,6 +694,7 @@ fn json_i64_opt(cell: &Value) -> Option<i64> {
 mod tests {
     use super::*;
     use shinrai_instruments::phase1_master;
+    use shinrai_market_data::BookEvent;
 
     #[test]
     fn decode_trade_and_bbo() {
@@ -409,6 +718,72 @@ mod tests {
     }
 
     #[test]
+    fn decode_mbp10_book_and_delta() {
+        let vendor = DatabentoGlbx::paper();
+        let master = phase1_master();
+        let book = br#"{
+            "schema":"mbp-10","symbol":"ESZ5","sequence":42,
+            "bids":[["5199.75",5],["5199.50",10]],
+            "asks":[["5200.00",3],["5200.25",8]]
+        }"#;
+        let frame = vendor.decode_stream(book, 1, &master).expect("book");
+        match frame {
+            DecodedFrame::Book(BookEvent::Snapshot(snap)) => {
+                assert_eq!(snap.seq(), 42);
+                assert_eq!(snap.bids().len(), 2);
+                assert_eq!(snap.asks().len(), 2);
+                assert_eq!(snap.bids()[0].qty().lots(), 5);
+                assert_eq!(snap.asks()[0].price().scaled(), 520_000);
+            }
+            other => panic!("expected book snapshot, got {other:?}"),
+        }
+        let delta = br#"{
+            "schema":"mbp-10-delta","symbol":"ESZ5","sequence":43,
+            "side":"B","price":"5199.75","size":0
+        }"#;
+        let frame = vendor.decode_stream(delta, 2, &master).expect("delta");
+        match frame {
+            DecodedFrame::Book(BookEvent::Delta(d)) => {
+                assert_eq!(d.seq(), Some(43));
+                assert_eq!(d.changes().len(), 1);
+                assert_eq!(d.changes()[0].qty().lots(), 0);
+            }
+            other => panic!("expected book delta, got {other:?}"),
+        }
+        let levels = br#"{
+            "schema":"mbp-10","symbol":"ESZ5","sequence":44,
+            "levels":[
+              {"bid_px":"5199.75","bid_sz":2,"ask_px":"5200.00","ask_sz":4},
+              {"bid_px":"5199.50","bid_sz":1,"ask_px":"5200.25","ask_sz":1}
+            ]
+        }"#;
+        let BookEvent::Snapshot(snap) = vendor
+            .decode_book_snapshot(levels, 3, "ESZ5", &master)
+            .expect("levels")
+        else {
+            panic!("snapshot");
+        };
+        assert_eq!(snap.bids().len(), 2);
+        assert_eq!(snap.asks().len(), 2);
+    }
+
+    #[test]
+    fn paper_book_body_has_ten_levels() {
+        let body = DatabentoGlbx::paper_book_body("ESZ5", 7, "5200.00");
+        let vendor = DatabentoGlbx::paper();
+        let master = phase1_master();
+        let BookEvent::Snapshot(snap) = vendor
+            .decode_book_snapshot(&body, 1, "ESZ5", &master)
+            .expect("paper book")
+        else {
+            panic!("snapshot");
+        };
+        assert_eq!(snap.seq(), 7);
+        assert_eq!(snap.bids().len(), 10);
+        assert_eq!(snap.asks().len(), 10);
+    }
+
+    #[test]
     fn es_fut_alias_resolves_esz5() {
         let vendor = DatabentoGlbx::paper();
         let master = phase1_master();
@@ -423,7 +798,9 @@ mod tests {
 
     #[test]
     fn decode_snapshot_and_subscribe() {
-        let vendor = DatabentoGlbx::live("KEY").with_dataset("GLBX.MDP3");
+        let vendor = DatabentoGlbx::live("KEY")
+            .with_dataset("GLBX.MDP3")
+            .with_schema("mbp-10");
         let master = phase1_master();
         let body = br#"{"schema":"snapshot","symbol":"ESZ5","sequence":7,"price":"5210.00"}"#;
         let rec = vendor
@@ -436,10 +813,12 @@ mod tests {
         assert!(sub.contains("subscribe"));
         assert!(sub.contains("ESZ5"));
         assert!(sub.contains("GLBX.MDP3"));
+        assert!(sub.contains("mbp-10"));
         let auth = String::from_utf8(vendor.auth_message()).expect("utf8");
         assert!(auth.contains("KEY"));
         let spec = vendor.snapshot_spec("ESZ5");
         assert!(spec.url().contains("GLBX.MDP3"));
+        assert!(spec.url().contains("mbp-10"));
         assert!(!spec.headers().is_empty());
     }
 
@@ -448,5 +827,6 @@ mod tests {
         let vendor = DatabentoGlbx::paper();
         let spec = vendor.snapshot_spec("ESZ5");
         assert!(spec.url().starts_with("paper://"));
+        assert_eq!(vendor.schema(), "mbp-10");
     }
 }

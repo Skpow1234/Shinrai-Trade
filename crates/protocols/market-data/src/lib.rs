@@ -3,7 +3,7 @@
 //! Sandbox vendors:
 //! - **Coinbase Exchange** public WS/REST — crypto (`BTC-USD`)
 //! - **Alpaca Markets** authenticated stock stream — equities (`AAPL`, …)
-//! - **Databento GLBX** — CME Globex futures (`ESZ5` / `ES.FUT`); paper or licensed live
+//! - **Databento GLBX** — CME Globex futures (`ESZ5` / `ES.FUT`); trades + mbp-10 L2; paper or licensed live
 //!
 //! Domain types stay vendor-agnostic. This crate maps vendor JSON onto
 //! [`shinrai_market_data::MdRecord`], keeps the raw frame for replay, and

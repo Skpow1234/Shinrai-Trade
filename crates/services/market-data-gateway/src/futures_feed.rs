@@ -33,6 +33,7 @@ pub(crate) fn spawn(
     ws_url: Option<String>,
     rest_url: Option<String>,
     dataset: Option<String>,
+    schema: Option<String>,
 ) {
     let live = api_key.as_ref().is_some_and(|k| !k.is_empty())
         && ws_url
@@ -50,6 +51,7 @@ pub(crate) fn spawn(
                 ws_url.unwrap_or_else(|| DatabentoGlbx::WS_DEFAULT.into()),
                 rest_url.unwrap_or_else(|| DatabentoGlbx::REST_DEFAULT.into()),
                 dataset.unwrap_or_else(|| DatabentoGlbx::DATASET_GLBX.into()),
+                schema.unwrap_or_else(|| DatabentoGlbx::SCHEMA_MBP10.into()),
             )
             .await
             {
@@ -57,7 +59,7 @@ pub(crate) fn spawn(
             }
         } else {
             eprintln!(
-                "shinrai-md-gateway: futures paper feed (Databento GLBX wire) products={products:?}"
+                "shinrai-md-gateway: futures paper feed (Databento GLBX mbp-10) products={products:?}"
             );
             if let Err(err) = run_paper(hub, history, master, products).await {
                 eprintln!("shinrai-md-gateway: futures paper feed stopped: {err}");
@@ -118,8 +120,13 @@ async fn run_paper(
                 scaled = (scaled + step).max(100_000);
                 seq = seq.saturating_add(1);
                 let price = format_esz_price(scaled);
-                let raw = DatabentoGlbx::paper_trade_body(product, seq, &price, 1);
                 let now = unix_logical_now();
+                // Alternate trade prints and mbp-10 L2 snapshots (fuller Databento wire).
+                let raw = if seq.is_multiple_of(3) {
+                    DatabentoGlbx::paper_book_body(product, seq, &price)
+                } else {
+                    DatabentoGlbx::paper_trade_body(product, seq, &price, 1)
+                };
                 let outcome = supervisor.ingest(&vendor, &master, now, &raw);
                 dispatch_outcome(&hub, &history, &outcome);
                 apply_paper_commands(
@@ -197,10 +204,12 @@ async fn run_live(
     ws_url: String,
     rest_url: String,
     dataset: String,
+    schema: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let vendor = DatabentoGlbx::live(api_key)
         .with_endpoints(ws_url, rest_url)
-        .with_dataset(dataset);
+        .with_dataset(dataset)
+        .with_schema(schema);
     let http = reqwest::Client::builder()
         .user_agent("shinrai-md-gateway/0.1")
         .timeout(Duration::from_secs(10))

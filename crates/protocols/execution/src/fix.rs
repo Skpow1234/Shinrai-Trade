@@ -523,8 +523,7 @@ impl FixPaperVenue {
             other => {
                 if let Some(msg_type) = other {
                     if msg_type != "A" && msg_type != "5" {
-                        let ref_seq: u64 =
-                            map.get("34").and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let ref_seq: u64 = map.get("34").and_then(|s| s.parse().ok()).unwrap_or(0);
                         let _ =
                             self.emit_session_reject(ref_seq, msg_type, "11", "Invalid MsgType");
                     }

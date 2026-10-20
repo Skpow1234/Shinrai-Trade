@@ -42,10 +42,11 @@ SHINRAI_MD_TOKENS=dev:alice \
 cargo run -p shinrai-md-gateway
 ```
 
-**CME / Databento futures** (paper publisher — same JSON wire as licensed live):
+**CME / Databento futures** (paper publisher — trades + mbp-10 L2; same JSON wire as licensed live):
 
 ```bash
 SHINRAI_MD_FUTURES=1 \
+SHINRAI_MD_FUTURES_SCHEMA=mbp-10 \
 SHINRAI_MD_PRODUCTS=ESZ5 \
 SHINRAI_MD_TOKENS=dev:alice \
 cargo run -p shinrai-md-gateway

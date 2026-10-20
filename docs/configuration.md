@@ -35,6 +35,7 @@ All knobs are environment variables. Copy `.env.example` to `.env` for local too
 | `SHINRAI_MD_FUTURES_KEY` | Licensed futures API key (falls back to `DATABENTO_API_KEY`) |
 | `SHINRAI_MD_FUTURES_WS` / `_REST` | Optional live WebSocket / REST origins (omit → paper publisher) |
 | `SHINRAI_MD_FUTURES_DATASET` | Dataset id (default `GLBX.MDP3`) |
+| `SHINRAI_MD_FUTURES_SCHEMA` | Live subscribe schema: `trades`, `mbp-1`, or `mbp-10` (default `mbp-10` for L2 depth) |
 
 Prefer `SHINRAI_MD_CLIENTS` + short-lived access tokens. `SHINRAI_MD_TOKENS` is a non-expiring bootstrap for local smoke tests only. Do not log tokens.
 
@@ -91,7 +92,8 @@ Venues that need no API key: `sim`, `sandbox`, `rest` without `SHINRAI_OG_REST_U
 | `SHINRAI_OG_FUNDS_ENABLED` | Paper deposit/withdraw APIs (default on; `0`/`false` disables) |
 | `SHINRAI_OG_WITHDRAWALS_ENABLED` | Paper withdrawals (default on) |
 | `SHINRAI_OG_WITHDRAW_APPROVAL_THRESHOLD_MINOR` | Large paper withdraw needs `X-Admin-Override` |
-| `SHINRAI_OG_KYC_STATUS` | `subject:approved|pending|rejected,...`; empty = all approved |
+| `SHINRAI_OG_KYC_STATUS` | `subject:approved|pending|rejected,...`. Empty map: all approved only with `SHINRAI_OG_DEV` / `SHINRAI_OG_KYC_OPEN`; otherwise fail-closed (pending) |
+| `SHINRAI_OG_KYC_OPEN` | `1` — allow empty KYC map to approve everyone outside `--dev` (dangerous; demos only) |
 | `SHINRAI_OG_KYC_VENDOR_URL` / `_TOKEN` / `_TIMEOUT_MS` / `_CACHE_SECS` | Optional HTTP KYC vendor (fail-closed + TTL cache) |
 | `SHINRAI_OG_AUDIT_EXPORT_HMAC_KEY` | HMAC-SHA256 key for `GET /v1/ops/audit/export` signature |
 | `SHINRAI_OG_AUDIT_EXPORT_RETENTION_SECS` | Only export audit rows newer than this window |

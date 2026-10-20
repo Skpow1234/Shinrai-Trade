@@ -318,6 +318,7 @@ Total: **800** milestones.
 ### md-protocol
 
 - **M-0246**: ~~Second vendor adapter (Alpaca/IEX/CME)~~ **done** (Alpaca equities + Databento GLBX futures paper/live)
+- **M-0246b**: ~~Databento mbp-10 L2 schemas~~ **done** (snapshot/delta decode + paper book; `SHINRAI_MD_FUTURES_SCHEMA`)
 - **M-0247**: Equity/futures live products beyond BTC-USD
 - **M-0248**: Authenticated vendor streams
 - **M-0249**: Supervisor multi-product watch lists
@@ -435,7 +436,7 @@ Total: **800** milestones.
 - **M-0343**: Trusted-proxy config for X-Forwarded-For
 - **M-0344**: IPv6 CIDR support in ops allowlist
 - **M-0345**: Fail-closed allowlist when token set
-- **M-0346**: KYC empty map fail-closed in production
+- **M-0346**: ~~KYC empty map fail-closed in production~~ **done** (empty map → pending unless `SHINRAI_OG_DEV` / `SHINRAI_OG_KYC_OPEN`)
 - **M-0347**: ~~Non-blocking KYC HTTP (no reqwest::blocking)~~ **done** (async `reqwest` + `block_on_http`)
 - **M-0348**: Dual-control log for admin overrides
 - **M-0349**: Discourage static SHINRAI_OG_TOKENS in prod mode

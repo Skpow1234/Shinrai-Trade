@@ -66,6 +66,7 @@ pub struct AppState {
     pub(crate) futures_ws: Option<String>,
     pub(crate) futures_rest: Option<String>,
     pub(crate) futures_dataset: Option<String>,
+    pub(crate) futures_schema: Option<String>,
 }
 
 /// Process configuration (tokens / secrets are not displayed).
@@ -88,6 +89,7 @@ pub struct GatewayConfig {
     futures_ws: Option<String>,
     futures_rest: Option<String>,
     futures_dataset: Option<String>,
+    futures_schema: Option<String>,
 }
 
 impl GatewayConfig {
@@ -118,6 +120,7 @@ impl GatewayConfig {
             futures_ws: None,
             futures_rest: None,
             futures_dataset: None,
+            futures_schema: None,
         }
     }
 
@@ -175,6 +178,10 @@ impl GatewayConfig {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
         cfg.futures_dataset = std::env::var("SHINRAI_MD_FUTURES_DATASET")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        cfg.futures_schema = std::env::var("SHINRAI_MD_FUTURES_SCHEMA")
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
@@ -247,6 +254,7 @@ impl core::fmt::Debug for GatewayConfig {
             .field("futures_ws", &self.futures_ws)
             .field("futures_rest", &self.futures_rest)
             .field("futures_dataset", &self.futures_dataset)
+            .field("futures_schema", &self.futures_schema)
             .finish()
     }
 }
@@ -286,6 +294,7 @@ impl AppState {
             futures_ws: config.futures_ws.clone(),
             futures_rest: config.futures_rest.clone(),
             futures_dataset: config.futures_dataset.clone(),
+            futures_schema: config.futures_schema.clone(),
         }
     }
 
@@ -444,6 +453,7 @@ impl AppState {
             self.futures_ws.clone(),
             self.futures_rest.clone(),
             self.futures_dataset.clone(),
+            self.futures_schema.clone(),
         );
     }
 }

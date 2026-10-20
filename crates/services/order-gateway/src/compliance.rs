@@ -55,23 +55,50 @@ pub trait KycProvider: Send + Sync {
     fn status(&self, subject: &str) -> KycStatus;
 }
 
-/// In-memory KYC map (subject → status). Empty map = all approved (dev default).
-#[derive(Debug, Clone, Default)]
+/// In-memory KYC map (subject → status).
+///
+/// Empty-map policy:
+/// - **fail-open** (`empty_allows_all`): everyone approved (dev / tests)
+/// - **fail-closed**: everyone pending until rows or an HTTP vendor are configured
+#[derive(Debug, Clone)]
 pub struct KycRegistry {
     by_subject: HashMap<String, KycStatus>,
+    empty_allows_all: bool,
+}
+
+impl Default for KycRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl KycRegistry {
     /// Empty registry (fail-open: unknown subjects are approved).
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            by_subject: HashMap::new(),
+            empty_allows_all: true,
+        }
+    }
+
+    /// Empty registry that rejects trading until subjects are configured.
+    #[must_use]
+    pub fn fail_closed() -> Self {
+        Self {
+            by_subject: HashMap::new(),
+            empty_allows_all: false,
+        }
     }
 
     /// Parses `subject:status,...` from `SHINRAI_OG_KYC_STATUS`.
     #[must_use]
-    pub fn from_env_str(raw: Option<&str>) -> Self {
-        let mut reg = Self::new();
+    pub fn from_env_str(raw: Option<&str>, empty_allows_all: bool) -> Self {
+        let mut reg = if empty_allows_all {
+            Self::new()
+        } else {
+            Self::fail_closed()
+        };
         let Some(raw) = raw.filter(|s| !s.is_empty()) else {
             return reg;
         };
@@ -90,14 +117,22 @@ impl KycRegistry {
         reg
     }
 
-    /// Looks up status; unknown subjects are approved when the map is empty,
-    /// otherwise pending (fail closed once any KYC rows are configured).
+    /// Whether the subject map has any rows.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.by_subject.is_empty()
+    }
+
+    /// Looks up status.
+    ///
+    /// Unknown subjects: approved only when the map is empty **and**
+    /// `empty_allows_all`; otherwise pending (fail closed).
     #[must_use]
     pub fn status(&self, subject: &str) -> KycStatus {
         if let Some(st) = self.by_subject.get(subject) {
             return *st;
         }
-        if self.by_subject.is_empty() {
+        if self.by_subject.is_empty() && self.empty_allows_all {
             KycStatus::Approved
         } else {
             KycStatus::Pending
@@ -301,14 +336,25 @@ pub struct KycGate {
 
 impl KycGate {
     /// Env registry + optional HTTP vendor.
+    ///
+    /// `empty_allows_all`: when the KYC map is empty and no HTTP vendor is set,
+    /// approve everyone (dev). Production should pass `false` so an empty map
+    /// fail-closes as pending (`M-0346`).
     #[must_use]
-    pub fn from_env(raw: Option<&str>) -> Self {
-        let registry = KycRegistry::from_env_str(raw);
+    pub fn from_env(raw: Option<&str>, empty_allows_all: bool) -> Self {
+        let registry = KycRegistry::from_env_str(raw, empty_allows_all);
         if let Some(vendor) = HttpKycVendor::from_env() {
             Self {
                 inner: Arc::new(vendor),
             }
         } else {
+            if !empty_allows_all && registry.is_empty() {
+                eprintln!(
+                    "shinrai-order-gateway: KYC map empty (fail-closed); trading blocked until \
+                     SHINRAI_OG_KYC_STATUS or SHINRAI_OG_KYC_VENDOR_URL is set \
+                     (dev: SHINRAI_OG_DEV=1 or SHINRAI_OG_KYC_OPEN=1)"
+                );
+            }
             Self {
                 inner: Arc::new(registry),
             }
@@ -448,16 +494,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_registry_approves() {
+    fn empty_registry_approves_when_fail_open() {
         let reg = KycRegistry::new();
         assert_eq!(reg.status("alice"), KycStatus::Approved);
     }
 
     #[test]
+    fn empty_registry_pending_when_fail_closed() {
+        let reg = KycRegistry::fail_closed();
+        assert_eq!(reg.status("alice"), KycStatus::Pending);
+        assert!(reg.is_empty());
+    }
+
+    #[test]
     fn configured_unknown_is_pending() {
-        let reg = KycRegistry::from_env_str(Some("alice:approved"));
+        let reg = KycRegistry::from_env_str(Some("alice:approved"), true);
         assert_eq!(reg.status("alice"), KycStatus::Approved);
         assert_eq!(reg.status("bob"), KycStatus::Pending);
+    }
+
+    #[test]
+    fn fail_closed_empty_from_env_str() {
+        let reg = KycRegistry::from_env_str(None, false);
+        assert_eq!(reg.status("trader"), KycStatus::Pending);
     }
 
     #[test]
