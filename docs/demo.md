@@ -17,6 +17,28 @@ SHINRAI_OG_DEPOSITS=1:10000 \
 cargo run -p shinrai-order-gateway
 ```
 
+## FIX over TCP (paper)
+
+Default `SHINRAI_OG_VENUE=fix` stays **in-process**. To exercise a real TCP session against the bundled paper acceptor:
+
+```bash
+SHINRAI_OG_VENUE=fix \
+SHINRAI_OG_FIX_TCP=1 \
+SHINRAI_OG_TOKENS=dev:trader \
+SHINRAI_OG_ACCOUNTS=trader:1 \
+SHINRAI_OG_DEPOSITS=1:10000 \
+cargo run -p shinrai-order-gateway
+```
+
+Or point the initiator at an external FIX 4.2 acceptor (Logon / Heartbeat / D / F / G / ER subset):
+
+```bash
+SHINRAI_OG_VENUE=fix \
+SHINRAI_OG_FIX_TCP_CONNECT=127.0.0.1:9876 \
+SHINRAI_OG_FIX_AUTO_FILL=false \
+cargo run -p shinrai-order-gateway -- --dev
+```
+
 ## Market-data WebSocket
 
 **Recommended:** client credentials + short-lived access token.

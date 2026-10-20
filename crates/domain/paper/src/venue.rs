@@ -24,7 +24,7 @@ pub enum VenueKind {
     Licensed,
     /// Alpaca paper Trading API (`/v2/orders`).
     Alpaca,
-    /// Local FIX 4.2 subset (SOH wire + in-process acceptor).
+    /// FIX 4.2 subset (SOH wire; in-process or TCP initiator).
     Fix,
 }
 
@@ -78,7 +78,9 @@ impl VenueHandle {
 
     pub(crate) fn fix(config: FixConfig) -> Self {
         let mut v = FixPaperVenue::new(config);
-        let _ = v.logon();
+        if let Err(err) = v.logon() {
+            panic!("FIX venue logon failed: {err}");
+        }
         Self::Fix(v)
     }
 

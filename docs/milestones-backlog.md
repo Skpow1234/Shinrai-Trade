@@ -21,6 +21,7 @@ Total: **800** milestones.
 - **M-dev-bind-guard**: Refuse `--dev` on non-loopback bind unless `SHINRAI_OG_DEV_ALLOW_PUBLIC=1`
 - **M-deploy-compose-secrets**: File secrets for Postgres password + ops token (`deploy/secrets/`, init scripts)
 - **M-deploy-caddy-tls**: Caddy TLS termination (`deploy/Caddyfile`, `compose.tls.yaml`, profile `tls`)
+- **M-fix-tcp**: FIX TCP initiator + loopback paper acceptor / external `TCP_CONNECT`
 
 ## Backlog
 

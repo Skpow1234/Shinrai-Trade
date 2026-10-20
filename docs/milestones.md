@@ -10,7 +10,7 @@ Delivery is tracked as **phases** in the README history and crate docs. There is
 | **2** | Read-only market-data gateway: normalize, gap/degrade, bounded WS fanout, historical bars/trades, short-lived auth | Done |
 | **3** | Paper order HTTP gateway: pre-trade risk → OMS → venue → ledger | Done |
 | **3.5+** | Postgres write-through, hydrate on restart, transactional outbox (+ optional NATS) | Done |
-| **4** | Licensed-broker paper path (Alpaca), FIX 4.2 subset (in-process), KYC/approvals/audit export | Done (with gaps) |
+| **4** | Licensed-broker paper path (Alpaca), FIX 4.2 subset (in-process + TCP), KYC/approvals/audit export | Done (with gaps) |
 | **5** | Paper deposit/withdraw/balances (ledger only, `mode: "paper"`) | Done (paper only) |
 
 ## Phase 1 — Domain core
@@ -49,11 +49,11 @@ Complete for the licensed-broker **paper** path:
 - Durable OMS + drop-copy + session cursor
 - KYC / approvals / audit export
 - Alpaca-sourced EOD position recon
-- Local FIX 4.2 subset (`SHINRAI_OG_VENUE=fix`) — SOH-delimited wire over an **in-process** acceptor
+- Local FIX 4.2 subset (`SHINRAI_OG_VENUE=fix`) — SOH-delimited wire in-process **or TCP** (`SHINRAI_OG_FIX_TCP` / `_CONNECT`)
 
 ### Known gaps (Phase 4+)
 
-- FIX: **no vendor TCP** yet (loopback / in-process only)
+- FIX TCP is a subset (Logon/HB/D/F/G/ER); no ResendRequest / sequence reset / full session recovery yet
 - Live market data: Coinbase public BTC-USD only; equities/futures on the master are not live-streamed from a licensed feed
 - Single-process OMS; no documented multi-instance leader election beyond outbox claim
 
@@ -73,14 +73,15 @@ Real custody / bank rails stay gated on regulation and licensed partners. This p
 - Refuse `--dev` on non-loopback bind unless `SHINRAI_OG_DEV_ALLOW_PUBLIC=1`
 - **Compose file secrets** for Postgres password + ops token (`deploy/secrets/`, `init-secrets`)
 - **Caddy TLS overlay** (`deploy/Caddyfile`, `compose.tls.yaml`, profile `tls`)
+- **FIX TCP**: initiator + loopback paper acceptor (`SHINRAI_OG_FIX_TCP`) or external connect (`SHINRAI_OG_FIX_TCP_CONNECT`)
 
 ## Suggested next (priority)
 
-1. FIX vendor TCP session to a real counterparty
-2. Licensed equity/futures market-data feeds
-3. Async Alpaca / non-blocking venue HTTP on the Tokio runtime
-4. Multi-instance OMS / HA story if running more than one order-gateway process
-5. Persist risk kills/limits across hydrate; collar fail-closed without marks
+1. Licensed equity/futures market-data feeds
+2. Async Alpaca / non-blocking venue HTTP on the Tokio runtime
+3. Multi-instance OMS / HA story if running more than one order-gateway process
+4. Persist risk kills/limits across hydrate; collar fail-closed without marks
+5. FIX ResendRequest / gap-fill / sequence reset completeness
 
 ## Full backlog (500+)
 

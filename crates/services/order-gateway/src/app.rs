@@ -769,7 +769,7 @@ impl AppState {
         Self::from_config(&cfg)
     }
 
-    /// Test helper with local FIX 4.2 subset venue (no TCP / no keys).
+    /// Test helper with in-process FIX 4.2 subset venue (no TCP).
     #[must_use]
     pub fn for_test_fix(token: &str, subject: &str, account: u64, deposit_major: i64) -> Self {
         let mut cfg = GatewayConfig::new(

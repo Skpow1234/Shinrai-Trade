@@ -57,7 +57,10 @@ Prefer `SHINRAI_MD_CLIENTS` + short-lived access tokens. `SHINRAI_MD_TOKENS` is 
 | `SHINRAI_OG_FIX_SENDER_COMP_ID` | FIX tag 49 (default `SHINRAI`) when `venue=fix` |
 | `SHINRAI_OG_FIX_TARGET_COMP_ID` | FIX tag 56 (default `SIM`) when `venue=fix` |
 | `SHINRAI_OG_FIX_HEARTBEAT_SECS` | Logical heartbeat interval ticks (default `5`) |
-| `SHINRAI_OG_FIX_AUTO_FILL` | Auto-fill after New ack (default `true`) |
+| `SHINRAI_OG_FIX_AUTO_FILL` | Auto-fill after New ack (default `true`; use `false` with external TCP) |
+| `SHINRAI_OG_FIX_TCP` | `1` — spawn local TCP paper acceptor + initiator session |
+| `SHINRAI_OG_FIX_TCP_ADDR` | Loopback bind/connect addr (default `127.0.0.1:19878`) |
+| `SHINRAI_OG_FIX_TCP_CONNECT` | Connect initiator to external acceptor `host:port` (no local spawn) |
 | `SHINRAI_OG_ALPACA_KEY` / `_SECRET` / `_BASE_URL` | Alpaca paper credentials when `VENUE=alpaca` |
 | `SHINRAI_OG_REST_URL` | When `VENUE=rest`, remote paper/broker base URL (local JSON venue if unset) |
 | `SHINRAI_OG_REST_TOKEN` | Optional bearer for remote REST venue |
@@ -67,7 +70,7 @@ Prefer `SHINRAI_MD_CLIENTS` + short-lived access tokens. `SHINRAI_MD_TOKENS` is 
 | `SHINRAI_OG_OPS_ALLOWLIST` | Comma-separated IPs/CIDRs (or `*`) for ops/metrics; empty = no IP filter |
 | `SHINRAI_OG_STORE_FAIL_HARD` | Fail-hard on Postgres write-through (default on; `0`/`false` = fail-soft) |
 
-Venues that need no API key (in-process): `sim`, `sandbox`, `rest` without `SHINRAI_OG_REST_URL`, `licensed`, `fix`, and `alpaca` without Alpaca credentials (local mock). Live Alpaca paper needs free keys from Alpaca.
+Venues that need no API key: `sim`, `sandbox`, `rest` without `SHINRAI_OG_REST_URL`, `licensed`, `fix` (in-process or local TCP), and `alpaca` without Alpaca credentials (local mock). Live Alpaca paper needs free keys from Alpaca.
 
 ## Order gateway — funds, KYC, audit, risk
 
