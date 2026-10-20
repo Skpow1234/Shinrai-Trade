@@ -2,6 +2,8 @@
 //!
 //! Encodes real SOH-delimited FIX for Logon / Heartbeat / `NewOrderSingle` /
 //! Cancel / Replace and consumes [`ExecutionReport`] (`35=8`) replies.
+//! Session recovery: inbound gap → `ResendRequest` (`35=2`); respond with
+//! retransmit (`43=Y`) or `SequenceReset` gap-fill (`35=4` / `123=Y`).
 //!
 //! - **In-process** (default): local acceptor in the same process (unit tests).
 //! - **TCP loopback** (`SHINRAI_OG_FIX_TCP=1`): paper acceptor thread + TCP initiator.
@@ -165,6 +167,8 @@ pub struct FixPaperVenue {
     next_wire_out: u64,
     /// Acceptor outbound msg seq (tag 34 on wire) — in-process only.
     next_wire_in: u64,
+    /// Next expected inbound MsgSeqNum from the counterparty.
+    expect_inbound_seq: u64,
     /// OMS execution-report sequence (independent of session admin msgs).
     next_report_seq: u64,
     next_venue: u64,
@@ -193,6 +197,7 @@ impl Clone for FixPaperVenue {
             session: self.session,
             next_wire_out: self.next_wire_out,
             next_wire_in: self.next_wire_in,
+            expect_inbound_seq: self.expect_inbound_seq,
             next_report_seq: self.next_report_seq,
             next_venue: self.next_venue,
             next_exec: self.next_exec,
@@ -233,6 +238,7 @@ impl FixPaperVenue {
             session: SessionId::new(1),
             next_wire_out: 1,
             next_wire_in: 1,
+            expect_inbound_seq: 1,
             next_report_seq: 1,
             next_venue: 1,
             next_exec: 1,
@@ -246,6 +252,26 @@ impl FixPaperVenue {
             tcp: None,
             tcp_acceptor: None,
         }
+    }
+
+    /// Next expected inbound MsgSeqNum (tag 34).
+    #[must_use]
+    pub const fn expect_inbound_seq(&self) -> u64 {
+        self.expect_inbound_seq
+    }
+
+    /// Sends `ResendRequest` (`35=2`) for `[begin, end]` (`end=0` ⇒ infinity).
+    ///
+    /// # Errors
+    ///
+    /// Returns disconnect / transport errors.
+    pub fn request_resend(&mut self, begin: u64, end: u64) -> Result<u64, ExecutionError> {
+        if !self.connected {
+            return Err(ExecutionError::Disconnected);
+        }
+        let begin_s = begin.to_string();
+        let end_s = end.to_string();
+        self.emit_initiator("2", &[("7", begin_s.as_str()), ("16", end_s.as_str())])
     }
 
     /// True when the initiator session is over TCP.
@@ -353,17 +379,153 @@ impl FixPaperVenue {
             let wire = self.read_tcp()?;
             self.inbound_wire.push(wire.clone());
             let map = decode_fix(&wire).map_err(ExecutionError::InvalidState)?;
-            let got = map.get("35").map_or("", String::as_str);
-            if got == expect_type {
-                return Ok(());
+            if !self.accept_inbound_seq(&map)? {
+                continue;
             }
-            if got == "8" {
-                self.ingest_execution_report(&map)?;
+            let got = map.get("35").map_or("", String::as_str);
+            match got {
+                t if t == expect_type => return Ok(()),
+                "8" => self.ingest_execution_report(&map)?,
+                "2" => self.fulfill_resend_request(&map)?,
+                "4" => self.apply_sequence_reset(&map)?,
+                _ => {}
             }
         }
         Err(ExecutionError::Transport(format!(
             "fix expected admin MsgType={expect_type}"
         )))
+    }
+
+    /// Returns `false` when the message should be skipped (dup / awaiting resend).
+    fn accept_inbound_seq(
+        &mut self,
+        map: &BTreeMap<String, String>,
+    ) -> Result<bool, ExecutionError> {
+        let seq: u64 = map
+            .get("34")
+            .and_then(|s| s.parse().ok())
+            .ok_or(ExecutionError::InvalidState("missing MsgSeqNum"))?;
+        let msg_type = map.get("35").map_or("", String::as_str);
+        // SequenceReset carries its own NewSeqNo semantics.
+        if msg_type == "4" {
+            return Ok(true);
+        }
+        if seq == self.expect_inbound_seq {
+            self.expect_inbound_seq = self.expect_inbound_seq.saturating_add(1);
+            return Ok(true);
+        }
+        if seq < self.expect_inbound_seq {
+            // Poss dup / stale — ignore.
+            return Ok(false);
+        }
+        // Gap: ask counterparty to resend from expected through infinity (incl. this msg).
+        let begin = self.expect_inbound_seq;
+        let begin_s = begin.to_string();
+        let _ = self.emit_initiator("2", &[("7", begin_s.as_str()), ("16", "0")]);
+        Ok(false)
+    }
+
+    fn fulfill_resend_request(
+        &mut self,
+        map: &BTreeMap<String, String>,
+    ) -> Result<(), ExecutionError> {
+        let begin: u64 = map
+            .get("7")
+            .and_then(|s| s.parse().ok())
+            .ok_or(ExecutionError::InvalidState("ResendRequest missing BeginSeqNo"))?;
+        let end: u64 = map.get("16").and_then(|s| s.parse().ok()).unwrap_or(0);
+        self.resend_outbound(begin, end)
+    }
+
+    /// Retransmits outbound msgs in `[begin, end]` (`end=0` ⇒ through latest).
+    ///
+    /// Missing seqs are covered with a `SequenceReset` gap-fill.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport errors when writing TCP.
+    pub fn resend_outbound(&mut self, begin: u64, end: u64) -> Result<(), ExecutionError> {
+        let end = if end == 0 {
+            self.next_wire_out.saturating_sub(1)
+        } else {
+            end
+        };
+        if begin == 0 || begin > end {
+            return Ok(());
+        }
+        let mut cursor = begin;
+        while cursor <= end {
+            if let Some(wire) = self.outbound_at_seq(cursor) {
+                let poss = with_poss_dup(&wire).map_err(ExecutionError::InvalidState)?;
+                self.write_raw_wire(&poss)?;
+                cursor = cursor.saturating_add(1);
+            } else {
+                // Gap-fill through the next stored seq or end+1.
+                let next_real = self
+                    .outbound_wire
+                    .iter()
+                    .filter_map(|w| decode_fix(w).ok()?.get("34")?.parse::<u64>().ok())
+                    .filter(|s| *s > cursor)
+                    .min()
+                    .unwrap_or(end.saturating_add(1));
+                let new_seq = next_real.min(end.saturating_add(1));
+                self.emit_sequence_reset_gap_fill(cursor, new_seq)?;
+                cursor = new_seq;
+            }
+        }
+        Ok(())
+    }
+
+    fn outbound_at_seq(&self, seq: u64) -> Option<String> {
+        self.outbound_wire.iter().find_map(|w| {
+            let map = decode_fix(w).ok()?;
+            let s: u64 = map.get("34")?.parse().ok()?;
+            (s == seq).then(|| w.clone())
+        })
+    }
+
+    fn emit_sequence_reset_gap_fill(
+        &mut self,
+        msg_seq: u64,
+        new_seq: u64,
+    ) -> Result<(), ExecutionError> {
+        let new_s = new_seq.to_string();
+        // Gap-fill uses the gap's BeginSeqNo as MsgSeqNum; do not advance next_wire_out.
+        let wire = encode_fix(
+            &self.config.sender_comp_id,
+            &self.config.target_comp_id,
+            "4",
+            msg_seq,
+            &[("123", "Y"), ("36", new_s.as_str())],
+        );
+        self.write_raw_wire(&wire)?;
+        self.outbound_wire.push(wire);
+        Ok(())
+    }
+
+    fn write_raw_wire(&mut self, wire: &str) -> Result<(), ExecutionError> {
+        if let Some(tcp) = &self.tcp {
+            let mut guard = tcp
+                .lock()
+                .map_err(|_| ExecutionError::Transport("fix mutex poisoned".into()))?;
+            write_fix_message(&mut *guard, wire)?;
+        }
+        Ok(())
+    }
+
+    fn apply_sequence_reset(
+        &mut self,
+        map: &BTreeMap<String, String>,
+    ) -> Result<(), ExecutionError> {
+        let new_seq: u64 = map
+            .get("36")
+            .and_then(|s| s.parse().ok())
+            .ok_or(ExecutionError::InvalidState("SequenceReset missing NewSeqNo"))?;
+        if new_seq == 0 {
+            return Err(ExecutionError::InvalidState("SequenceReset NewSeqNo=0"));
+        }
+        self.expect_inbound_seq = new_seq;
+        Ok(())
     }
 
     fn read_tcp(&mut self) -> Result<String, ExecutionError> {
@@ -386,9 +548,17 @@ impl FixPaperVenue {
             let wire = self.read_tcp()?;
             self.inbound_wire.push(wire.clone());
             let map = decode_fix(&wire).map_err(ExecutionError::InvalidState)?;
-            if map.get("35").map(String::as_str) == Some("8") {
-                self.ingest_execution_report(&map)?;
-                got = got.saturating_add(1);
+            if !self.accept_inbound_seq(&map)? {
+                continue;
+            }
+            match map.get("35").map(String::as_str) {
+                Some("8") => {
+                    self.ingest_execution_report(&map)?;
+                    got = got.saturating_add(1);
+                }
+                Some("2") => self.fulfill_resend_request(&map)?,
+                Some("4") => self.apply_sequence_reset(&map)?,
+                _ => {}
             }
         }
         if got >= min_reports {
@@ -693,7 +863,7 @@ impl FixPaperVenue {
         Ok(id)
     }
 
-    /// Non-blocking drain of pending TCP execution reports into the outbox.
+    /// Non-blocking drain of pending TCP messages into the outbox / session state.
     fn drain_tcp_available(&mut self) {
         let Some(tcp) = self.tcp.clone() else {
             return;
@@ -706,8 +876,20 @@ impl FixPaperVenue {
             drop(guard);
             self.inbound_wire.push(wire.clone());
             if let Ok(map) = decode_fix(&wire) {
-                if map.get("35").map(String::as_str) == Some("8") {
-                    let _ = self.ingest_execution_report(&map);
+                // Mutex must be released before accept/resend (those may write TCP).
+                if self.accept_inbound_seq(&map).unwrap_or(false) {
+                    match map.get("35").map(String::as_str) {
+                        Some("8") => {
+                            let _ = self.ingest_execution_report(&map);
+                        }
+                        Some("2") => {
+                            let _ = self.fulfill_resend_request(&map);
+                        }
+                        Some("4") => {
+                            let _ = self.apply_sequence_reset(&map);
+                        }
+                        _ => {}
+                    }
                 }
             }
             let Ok(g) = tcp.lock() else {
@@ -1031,6 +1213,7 @@ impl ExecutionVenue for FixPaperVenue {
         self.session = SessionId::new(self.session.n.saturating_add(1));
         self.next_wire_out = 1;
         self.next_wire_in = 1;
+        self.expect_inbound_seq = 1;
         self.next_report_seq = 1;
         self.history.clear();
         self.outbox.clear();
@@ -1121,6 +1304,35 @@ pub fn decode_fix(raw: &str) -> Result<BTreeMap<String, String>, &'static str> {
 
 fn fix_checksum(prefix: &str) -> u8 {
     prefix.bytes().fold(0_u8, u8::wrapping_add)
+}
+
+/// Rewrites a FIX message with `PossDupFlag=Y` (tag 43) and a fresh checksum.
+///
+/// # Errors
+///
+/// Returns a static reason when the source message cannot be decoded.
+pub fn with_poss_dup(raw: &str) -> Result<String, &'static str> {
+    let map = decode_fix(raw)?;
+    let msg_type = map.get("35").ok_or("missing MsgType")?;
+    let sender = map.get("49").ok_or("missing SenderCompID")?;
+    let target = map.get("56").ok_or("missing TargetCompID")?;
+    let seq: u64 = map
+        .get("34")
+        .and_then(|s| s.parse().ok())
+        .ok_or("missing MsgSeqNum")?;
+    const SKIP: &[&str] = &["8", "9", "35", "49", "56", "34", "52", "10", "43"];
+    let mut body: Vec<(String, String)> = vec![("43".into(), "Y".into())];
+    for (k, v) in &map {
+        if SKIP.contains(&k.as_str()) {
+            continue;
+        }
+        body.push((k.clone(), v.clone()));
+    }
+    let body_refs: Vec<(&str, &str)> = body
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    Ok(encode_fix(sender, target, msg_type, seq, &body_refs))
 }
 
 #[cfg(test)]

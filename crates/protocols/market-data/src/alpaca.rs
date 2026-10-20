@@ -87,8 +87,9 @@ impl AlpacaMarkets {
         price: f64,
     ) -> Result<PriceTicks, ProviderError> {
         let instrument = master.get(instrument_id)?;
-        // Decimal string keeps grid conversion consistent with Coinbase path.
-        let decimal = format!("{price:.6}");
+        // Format to the instrument price scale (not a fixed 6dp — equities are scale 2).
+        let scale = usize::from(instrument.tick_table().price_scale());
+        let decimal = format!("{price:.scale$}");
         Ok(instrument.price_to_ticks(&decimal)?)
     }
 }

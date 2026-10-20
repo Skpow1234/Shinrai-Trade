@@ -13,7 +13,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::error::ExecutionError;
-use crate::fix::{decode_fix, encode_fix, FixConfig};
+use crate::fix::{decode_fix, encode_fix, with_poss_dup, FixConfig};
 
 const SOH: u8 = 0x01;
 
