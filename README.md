@@ -40,6 +40,7 @@ Scripts: `./scripts/dev-ui.sh` · `.\scripts\dev-ui.ps1` · `scripts\dev-ui.cmd`
 | [Local demo](docs/demo.md) | Smoke tests and demo knobs |
 | [Testing](docs/testing.md) | Test and CI commands |
 | [Milestones](docs/milestones.md) | Phases 1–5 and known gaps |
+| [Milestones backlog](docs/milestones-backlog.md) | 800+ improvement IDs from code review |
 | [Deployment](docs/deployment.md) | Local run and deploy options |
 
 ## Layout

@@ -1,14 +1,19 @@
-# Dev backing services for Phase 3.5+ (Postgres + optional NATS).
-# Domain / gateway unit tests do not need this — only durable store / bus work.
+# Dev / local stack for Shinrai-Trade.
 #
+# Dependencies only:
 #   docker compose up -d postgres
-#   docker compose up -d postgres nats   # outbox → NATS
-#   docker compose down          # stop
-#   docker compose down -v       # stop and wipe data volume
+#   docker compose up -d postgres nats
 #
-# Connection URL (matches .env.example):
-#   postgres://shinrai:shinrai@127.0.0.1:5432/shinrai
-#   nats://127.0.0.1:4222
+# Full paper stack (build Rust binaries into images — first build is slow):
+#   docker compose --profile full up -d --build
+#
+#   MD:  http://127.0.0.1:8080/health
+#   OG:  http://127.0.0.1:8081/ui   (token: full-dev)
+#   Ops: requires SHINRAI_OG_OPS_TOKEN=compose-ops (see below)
+#
+# Tear down:
+#   docker compose --profile full down
+#   docker compose down -v
 
 services:
   postgres:
@@ -43,6 +48,57 @@ services:
       timeout: 3s
       retries: 15
       start_period: 3s
+    restart: unless-stopped
+
+  md-gateway:
+    profiles: ["full"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: md-gateway
+    image: shinrai-md-gateway:local
+    container_name: shinrai-md-gateway
+    environment:
+      SHINRAI_MD_BIND: "0.0.0.0:8080"
+      SHINRAI_MD_CLIENTS: "dev:s3cret:alice"
+      SHINRAI_MD_TOKENS: "dev:alice"
+      SHINRAI_MD_SYNTH: "1"
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  order-gateway:
+    profiles: ["full"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: order-gateway
+    image: shinrai-order-gateway:local
+    container_name: shinrai-order-gateway
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+      md-gateway:
+        condition: service_started
+    environment:
+      SHINRAI_OG_BIND: "0.0.0.0:8081"
+      SHINRAI_DATABASE_URL: "postgres://shinrai:shinrai@postgres:5432/shinrai"
+      SHINRAI_RUN_MIGRATIONS: "1"
+      SHINRAI_OG_TOKENS: "full-dev:trader"
+      SHINRAI_OG_CLIENTS: "dev:s3cret:trader"
+      SHINRAI_OG_ACCOUNTS: "trader:1"
+      SHINRAI_OG_DEPOSITS: "1:10000"
+      SHINRAI_OG_MARKS: "AAPL:10000"
+      SHINRAI_OG_MD_URL: "http://md-gateway:8080"
+      SHINRAI_OG_MD_TOKEN: "dev"
+      # Non-dev: ops fail closed without a token.
+      SHINRAI_OG_OPS_TOKEN: "compose-ops"
+      SHINRAI_OG_OPS_ALLOWLIST: "*"
+      SHINRAI_NATS_URL: "nats://nats:4222"
+    ports:
+      - "8081:8081"
     restart: unless-stopped
 
 volumes:

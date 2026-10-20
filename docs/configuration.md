@@ -58,8 +58,10 @@ Prefer `SHINRAI_MD_CLIENTS` + short-lived access tokens. `SHINRAI_MD_TOKENS` is 
 | `SHINRAI_OG_ALPACA_KEY` / `_SECRET` / `_BASE_URL` | Alpaca paper credentials when `VENUE=alpaca` |
 | `SHINRAI_OG_REST_URL` | When `VENUE=rest`, remote paper/broker base URL (local JSON venue if unset) |
 | `SHINRAI_OG_REST_TOKEN` | Optional bearer for remote REST venue |
-| `SHINRAI_OG_OPS_TOKEN` | When set, `/v1/ops*` and `/v1/metrics` require this bearer (or `?ops_token=`) |
-| `SHINRAI_OG_OPS_ALLOWLIST` | Comma-separated IPs/CIDRs (or `*`) for ops/metrics; empty = open |
+| `SHINRAI_OG_OPS_TOKEN` | Bearer for `/v1/ops*` and `/v1/metrics` (or `?ops_token=`). **Required** outside `--dev` / `SHINRAI_OG_OPS_OPEN` |
+| `SHINRAI_OG_OPS_OPEN` | `1` — allow unauthenticated ops when no ops token (dangerous; for demos only) |
+| `SHINRAI_OG_DEV_ALLOW_PUBLIC` | `1` — permit `--dev` when bind is not loopback |
+| `SHINRAI_OG_OPS_ALLOWLIST` | Comma-separated IPs/CIDRs (or `*`) for ops/metrics; empty = no IP filter |
 | `SHINRAI_OG_STORE_FAIL_HARD` | Fail-hard on Postgres write-through (default on; `0`/`false` = fail-soft) |
 
 Venues that need no API key (in-process): `sim`, `sandbox`, `rest` without `SHINRAI_OG_REST_URL`, `licensed`, `fix`, and `alpaca` without Alpaca credentials (local mock). Live Alpaca paper needs free keys from Alpaca.

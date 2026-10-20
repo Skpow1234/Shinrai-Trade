@@ -2,7 +2,9 @@
 
 Defaults: market-data gateway `127.0.0.1:8080`, order gateway `127.0.0.1:8081`.
 
-Auth for client APIs: `Authorization: Bearer <token>` or `?token=`. Prefer the header. Ops routes use `SHINRAI_OG_OPS_TOKEN` / `?ops_token=` when configured; otherwise local ops are open.
+Auth for client APIs: `Authorization: Bearer <token>` or `?token=`. Prefer the header.
+
+Ops routes (`/v1/ops*`, `/v1/metrics`): require `SHINRAI_OG_OPS_TOKEN` (header or `?ops_token=`) unless `--dev` / `SHINRAI_OG_DEV` / `SHINRAI_OG_OPS_OPEN=1`. Without a token in non-dev mode the response is **401** `ops_auth_required`.
 
 ---
 
@@ -138,7 +140,7 @@ curl -X POST "http://127.0.0.1:8081/v1/accounts/withdraw?token=dev" \
 
 ### Ops and metrics
 
-Unauthenticated locally by default. Set `SHINRAI_OG_OPS_TOKEN` to require a bearer / `?ops_token=`.
+Outside `--dev`, set `SHINRAI_OG_OPS_TOKEN` (Compose `full` uses `compose-ops`).
 
 ```bash
 curl http://127.0.0.1:8081/v1/metrics

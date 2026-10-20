@@ -11,6 +11,7 @@ Operational and reference docs for the workspace. Start with [Getting started](g
 | [Local demo](demo.md) | Smoke tests, WebSocket subscribe, demo knobs |
 | [Testing](testing.md) | Unit, integration, and CI test commands |
 | [Milestones](milestones.md) | Delivery phases (1–5) and known gaps |
+| [Milestones backlog](milestones-backlog.md) | 800+ code-derived improvement IDs |
 | [Deployment](deployment.md) | What exists today and how to run beyond localhost |
 
 Private design notes (`docs/design.md`, `docs/objectives-expanded.md`) are gitignored and are not part of this set.

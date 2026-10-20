@@ -65,12 +65,22 @@ Complete for the licensed-broker **paper** path:
 
 Real custody / bank rails stay gated on regulation and licensed partners. This phase is explicitly **not** customer-money custody.
 
-## Suggested next milestones (not scheduled in-repo)
+## Recently completed (packaging / ops)
 
-Inferred from gaps in code and docs — not an official roadmap:
+- Multi-stage `Dockerfile` for both gateways
+- `compose.yaml` `--profile full` runs Postgres, NATS, MD + order gateways
+- Non-dev ops fail-closed without `SHINRAI_OG_OPS_TOKEN` (`ops_auth_required`)
+- Refuse `--dev` on non-loopback bind unless `SHINRAI_OG_DEV_ALLOW_PUBLIC=1`
 
-1. Production deploy packaging (Dockerfile / compose for the Rust binaries, secrets, TLS)
+## Suggested next (priority)
+
+1. TLS termination example (Caddy) + compose secrets for DB password
 2. FIX vendor TCP session to a real counterparty
 3. Licensed equity/futures market-data feeds
-4. Harden ops plane (ops token + allowlist required outside `--dev`)
+4. Async Alpaca / non-blocking venue HTTP on the Tokio runtime
 5. Multi-instance OMS / HA story if running more than one order-gateway process
+6. Persist risk kills/limits across hydrate; collar fail-closed without marks
+
+## Full backlog (500+)
+
+See **[milestones-backlog.md](milestones-backlog.md)** — 800 code-derived improvement milestones (`M-0001`…) across every crate (correctness, security, venues, deploy, UX, polish).

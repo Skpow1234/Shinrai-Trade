@@ -29,9 +29,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let _telemetry = shinrai_telemetry::init("shinrai-order-gateway")?;
 
     let bind = env::var("SHINRAI_OG_BIND").unwrap_or_else(|_| "127.0.0.1:8081".into());
+    if dev && !bind_is_loopback(&bind) && !env_truthy("SHINRAI_OG_DEV_ALLOW_PUBLIC") {
+        return Err(
+            "refusing --dev / SHINRAI_OG_DEV on a non-loopback bind; \
+             use 127.0.0.1 / ::1, or set SHINRAI_OG_DEV_ALLOW_PUBLIC=1"
+                .into(),
+        );
+    }
     let mut config = GatewayConfig::from_env();
     if dev {
         config.apply_paper_dev_defaults();
+    }
+    if !config.ops_token_configured() && !config.ops_allow_open() {
+        eprintln!(
+            "shinrai-order-gateway: ops/metrics require SHINRAI_OG_OPS_TOKEN \
+             (set it, or SHINRAI_OG_OPS_OPEN=1 / --dev for local open ops)"
+        );
+    } else if !config.ops_token_configured()
+        && config.ops_allow_open()
+        && !bind_is_loopback(&bind)
+    {
+        eprintln!(
+            "shinrai-order-gateway: WARNING ops/metrics are open on a non-loopback bind; \
+             set SHINRAI_OG_OPS_TOKEN"
+        );
     }
     let mut state = AppState::from_config(&config);
 
@@ -163,4 +184,10 @@ fn env_truthy(key: &str) -> bool {
         env::var(key).ok().as_deref().map(str::trim),
         Some("1" | "true" | "TRUE" | "yes" | "YES")
     )
+}
+
+fn bind_is_loopback(bind: &str) -> bool {
+    let host = bind.rsplit_once(':').map_or(bind, |(h, _)| h);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    matches!(host, "127.0.0.1" | "localhost" | "::1" | "0:0:0:0:0:0:0:1")
 }

@@ -229,6 +229,26 @@ async fn ops_token_gates_metrics() {
 }
 
 #[tokio::test]
+async fn ops_require_auth_when_open_disabled() {
+    let app = router(AppState::for_test("x", "trader", 1, 100).with_ops_require_auth());
+    let denied = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/metrics")
+                .body(Body::empty())
+                .expect("req"),
+        )
+        .await
+        .expect("denied");
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    let body = axum::body::to_bytes(denied.into_body(), usize::MAX)
+        .await
+        .expect("bytes");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(json["code"], "ops_auth_required");
+}
+
+#[tokio::test]
 async fn ops_risk_kill_switch() {
     let app = router(AppState::for_test("risk-tok", "trader", 1, 10_000));
     let patch = app

@@ -123,6 +123,8 @@ pub struct AppState {
     pub(crate) rate_limiter: Arc<crate::rate_limit::RateLimiter>,
     /// Optional ops bearer token (when set, `/v1/ops*` and `/v1/metrics` require it).
     pub(crate) ops_token: Option<String>,
+    /// When true and `ops_token` is unset, ops/metrics stay open (dev / tests only).
+    pub(crate) ops_allow_open: bool,
     /// When non-empty, ops/metrics only from these client IPs / CIDRs.
     pub(crate) ops_allowlist: Vec<crate::ops_allowlist::AllowEntry>,
     /// Shared MD HTTP client (optional mTLS).
@@ -179,6 +181,11 @@ pub struct GatewayConfig {
     withdrawals_enabled: bool,
     /// Optional large-withdraw step-up threshold (minor units).
     withdraw_approval_threshold_minor: Option<i128>,
+    /// When true and `ops_token` is unset, ops/metrics stay open.
+    ///
+    /// Defaults: `true` in `new()` / tests; `false` from env unless `--dev` /
+    /// `SHINRAI_OG_DEV` or explicit `SHINRAI_OG_OPS_OPEN=1`.
+    ops_allow_open: bool,
 }
 
 impl GatewayConfig {
@@ -215,6 +222,7 @@ impl GatewayConfig {
             funds_enabled: true,
             withdrawals_enabled: true,
             withdraw_approval_threshold_minor: None,
+            ops_allow_open: true,
         }
     }
 
@@ -230,6 +238,8 @@ impl GatewayConfig {
             parse_deposits(std::env::var("SHINRAI_OG_DEPOSITS").ok().as_deref()),
             TokenTtl::new(access, refresh),
         );
+        // Non-dev process defaults: ops require a configured bearer.
+        cfg.ops_allow_open = env_truthy("SHINRAI_OG_DEV") || env_truthy("SHINRAI_OG_OPS_OPEN");
         cfg.bootstrap_marks = parse_symbol_marks(std::env::var("SHINRAI_OG_MARKS").ok().as_deref());
         cfg.md_base_url = std::env::var("SHINRAI_OG_MD_URL")
             .ok()
@@ -294,10 +304,23 @@ impl GatewayConfig {
         cfg
     }
 
+    /// Whether `SHINRAI_OG_OPS_TOKEN` is configured.
+    #[must_use]
+    pub const fn ops_token_configured(&self) -> bool {
+        self.ops_token.is_some()
+    }
+
+    /// Whether ops/metrics may stay open without a bearer (dev / `SHINRAI_OG_OPS_OPEN`).
+    #[must_use]
+    pub const fn ops_allow_open(&self) -> bool {
+        self.ops_allow_open
+    }
+
     /// Local paper defaults for UI smoke (`dev` / `trader` / $10k / AAPL mark).
     ///
     /// Only fills fields that are still empty so explicit env wins.
     pub fn apply_paper_dev_defaults(&mut self) {
+        self.ops_allow_open = true;
         if self.static_tokens.is_empty() {
             self.static_tokens = vec![("dev".into(), "trader".into())];
         }
@@ -337,6 +360,7 @@ impl core::fmt::Debug for GatewayConfig {
             .field("stuck_age_secs", &self.stuck_age_secs)
             .field("venue_kind", &self.venue_kind)
             .field("ops_token_configured", &self.ops_token.is_some())
+            .field("ops_allow_open", &self.ops_allow_open)
             .field("risk_collar_bps", &self.risk_limits.collar_bps)
             .field(
                 "risk_max_daily_loss_minor",
@@ -491,6 +515,7 @@ impl AppState {
             outbox_metrics: Arc::new(crate::outbox_publisher::OutboxMetrics::default()),
             rate_limiter: Arc::new(crate::rate_limit::RateLimiter::demo()),
             ops_token: config.ops_token.clone(),
+            ops_allow_open: config.ops_allow_open,
             ops_allowlist: crate::ops_allowlist::parse_allowlist(
                 config.ops_allowlist_raw.as_deref(),
             ),
@@ -680,6 +705,13 @@ impl AppState {
     #[must_use]
     pub fn with_ops_token(mut self, token: &str) -> Self {
         self.ops_token = Some(token.to_owned());
+        self
+    }
+
+    /// Fail-closed ops when no bearer is configured (non-dev production default).
+    #[must_use]
+    pub fn with_ops_require_auth(mut self) -> Self {
+        self.ops_allow_open = false;
         self
     }
 
@@ -1049,7 +1081,10 @@ pub(crate) fn extract_bearer(headers: &HeaderMap, query: &AuthQuery) -> Option<S
         .map(str::to_owned)
 }
 
-/// When `SHINRAI_OG_OPS_TOKEN` / allowlist is set, ops/metrics require auth.
+/// Ops/metrics auth: allowlist (when set) plus bearer when configured.
+///
+/// Outside `--dev` / `SHINRAI_OG_OPS_OPEN`, a missing `SHINRAI_OG_OPS_TOKEN`
+/// fails closed (`ops_auth_required`) instead of leaving ops open.
 #[allow(clippy::result_large_err)]
 pub(crate) fn require_ops_auth(
     state: &AppState,
@@ -1075,7 +1110,14 @@ pub(crate) fn require_ops_auth(
     }
 
     let Some(expected) = state.ops_token.as_deref() else {
-        return Ok(());
+        if state.ops_allow_open {
+            return Ok(());
+        }
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "type": "error", "code": "ops_auth_required" })),
+        )
+            .into_response());
     };
     let provided = headers
         .get(header::AUTHORIZATION)
