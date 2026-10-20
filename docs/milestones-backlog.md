@@ -172,7 +172,8 @@ Total: **800** milestones.
 - **M-0120**: Remove allow(dead_code) in alpaca
 - **M-0121**: EOD fetch failure fail-closed for recon
 - **M-0122**: Broker API rate-limit awareness
-- **M-0123**: FIX Drop Copy session type
+- **M-0123**: ~~FIX Drop Copy session type~~ **done** (`FixSessionKind::DropCopy` / `SHINRAI_OG_FIX_SESSION=drop_copy`)
+- **M-0123b**: ~~FIX Reject `35=3` + TestRequest `35=1`~~ **done** (initiator + paper acceptor)
 - **M-0124**: FIX Order Cancel Request full path
 - **M-0125**: FIX ExecutionReport Reject mapping
 - **M-0126**: Venue capability matrix documentation

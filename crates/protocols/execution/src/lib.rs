@@ -23,7 +23,7 @@ pub use alpaca::{
     AlpacaPositionSnap, LocalAlpacaHttp, RemoteAlpacaHttp, ALPACA_PAPER_BASE_URL,
 };
 pub use error::ExecutionError;
-pub use fix::{decode_fix, encode_fix, FixConfig, FixPaperVenue};
+pub use fix::{decode_fix, encode_fix, FixConfig, FixPaperVenue, FixSessionKind};
 pub use fix_tcp::{
     connect_fix, read_fix_message, spawn_paper_acceptor, write_fix_message, FixTcpAcceptorGuard,
 };

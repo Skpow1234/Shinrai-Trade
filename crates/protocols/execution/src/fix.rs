@@ -1,9 +1,11 @@
 //! FIX 4.2 subset venue ([`ExecutionVenue`]) — in-process or TCP initiator.
 //!
-//! Encodes real SOH-delimited FIX for Logon / Heartbeat / `NewOrderSingle` /
-//! Cancel / Replace and consumes [`ExecutionReport`] (`35=8`) replies.
+//! Encodes real SOH-delimited FIX for Logon / Heartbeat / `TestRequest` /
+//! `Reject` / `NewOrderSingle` / Cancel / Replace and consumes
+//! [`ExecutionReport`] (`35=8`) replies.
 //! Session recovery: inbound gap → `ResendRequest` (`35=2`); respond with
 //! retransmit (`43=Y`) or `SequenceReset` gap-fill (`35=4` / `123=Y`).
+//! Session kinds: order-entry (default) or drop-copy (receive ERs only).
 //!
 //! - **In-process** (default): local acceptor in the same process (unit tests).
 //! - **TCP loopback** (`SHINRAI_OG_FIX_TCP=1`): paper acceptor thread + TCP initiator.
@@ -29,6 +31,16 @@ use crate::venue::{ExecutionVenue, NewVenueOrder, VenueOrderSnapshot, VenueTrade
 const SOH: char = '\x01';
 const BEGIN_STRING: &str = "FIX.4.2";
 
+/// FIX session role (order entry vs drop-copy).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FixSessionKind {
+    /// Full order-entry session (`D` / `F` / `G` + ERs).
+    #[default]
+    OrderEntry,
+    /// Drop-copy: receive execution reports only (no order entry).
+    DropCopy,
+}
+
 /// FIX session + paper fill knobs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FixConfig {
@@ -46,6 +58,8 @@ pub struct FixConfig {
     pub tcp_listen: Option<String>,
     /// Connect initiator to this `host:port` (loopback target or external vendor).
     pub tcp_connect: Option<String>,
+    /// Order-entry vs drop-copy session.
+    pub session_kind: FixSessionKind,
 }
 
 impl Default for FixConfig {
@@ -66,6 +80,7 @@ impl FixConfig {
             tcp_loopback: false,
             tcp_listen: None,
             tcp_connect: None,
+            session_kind: FixSessionKind::OrderEntry,
         }
     }
 
@@ -73,6 +88,16 @@ impl FixConfig {
     #[must_use]
     pub fn ack_only() -> Self {
         Self {
+            auto_fill: false,
+            ..Self::local_mock()
+        }
+    }
+
+    /// Drop-copy session (receive ERs only).
+    #[must_use]
+    pub fn drop_copy() -> Self {
+        Self {
+            session_kind: FixSessionKind::DropCopy,
             auto_fill: false,
             ..Self::local_mock()
         }
@@ -87,6 +112,12 @@ impl FixConfig {
             tcp_connect: None,
             ..Self::local_mock()
         }
+    }
+
+    /// Whether this session may send order-entry messages.
+    #[must_use]
+    pub const fn is_order_entry(&self) -> bool {
+        matches!(self.session_kind, FixSessionKind::OrderEntry)
     }
 
     /// Whether this config uses a TCP initiator (loopback or external).
@@ -144,6 +175,12 @@ impl FixConfig {
             cfg.tcp_loopback = false;
             cfg.tcp_connect = Some(connect);
         }
+        if let Ok(s) = std::env::var("SHINRAI_OG_FIX_SESSION") {
+            cfg.session_kind = match s.trim().to_ascii_lowercase().as_str() {
+                "drop_copy" | "drop-copy" | "dropcopy" | "dc" => FixSessionKind::DropCopy,
+                _ => FixSessionKind::OrderEntry,
+            };
+        }
         cfg
     }
 }
@@ -175,6 +212,11 @@ pub struct FixPaperVenue {
     next_exec: u64,
     clock: u64,
     last_hb_tick: u64,
+    next_test_req: u64,
+    /// Outstanding `TestReqID` awaiting a Heartbeat echo.
+    pending_test_req_id: Option<String>,
+    /// Last session-level Reject (`35=3`) text, when any.
+    last_session_reject: Option<String>,
     inflight: HashMap<OrderId, Inflight>,
     outbox: VecDeque<ExecutionReport>,
     history: Vec<ExecutionReport>,
@@ -203,6 +245,9 @@ impl Clone for FixPaperVenue {
             next_exec: self.next_exec,
             clock: self.clock,
             last_hb_tick: self.last_hb_tick,
+            next_test_req: self.next_test_req,
+            pending_test_req_id: self.pending_test_req_id.clone(),
+            last_session_reject: self.last_session_reject.clone(),
             inflight: self.inflight.clone(),
             outbox: self.outbox.clone(),
             history: self.history.clone(),
@@ -244,6 +289,9 @@ impl FixPaperVenue {
             next_exec: 1,
             clock: 0,
             last_hb_tick: 0,
+            next_test_req: 1,
+            pending_test_req_id: None,
+            last_session_reject: None,
             inflight: HashMap::new(),
             outbox: VecDeque::new(),
             history: Vec::new(),
@@ -258,6 +306,67 @@ impl FixPaperVenue {
     #[must_use]
     pub const fn expect_inbound_seq(&self) -> u64 {
         self.expect_inbound_seq
+    }
+
+    /// Last session Reject text (`35=3` tag 58), if any.
+    #[must_use]
+    pub fn last_session_reject(&self) -> Option<&str> {
+        self.last_session_reject.as_deref()
+    }
+
+    /// Outstanding `TestReqID` awaiting Heartbeat echo.
+    #[must_use]
+    pub fn pending_test_req_id(&self) -> Option<&str> {
+        self.pending_test_req_id.as_deref()
+    }
+
+    /// Sends `TestRequest` (`35=1`) and waits for a Heartbeat echo when on TCP.
+    ///
+    /// # Errors
+    ///
+    /// Returns disconnect / transport errors.
+    pub fn send_test_request(&mut self) -> Result<String, ExecutionError> {
+        if !self.connected {
+            return Err(ExecutionError::Disconnected);
+        }
+        let id = format!("TR{}", self.next_test_req);
+        self.next_test_req = self.next_test_req.saturating_add(1);
+        self.pending_test_req_id = Some(id.clone());
+        self.emit_initiator("1", &[("112", id.as_str())])?;
+        if self.tcp.is_some() {
+            self.recv_admin("0")?;
+        } else {
+            let _ = self.emit_acceptor("0", &[("112", id.as_str())]);
+            self.pending_test_req_id = None;
+        }
+        Ok(id)
+    }
+
+    /// Emits session-level `Reject` (`35=3`).
+    ///
+    /// # Errors
+    ///
+    /// Returns transport errors when writing TCP.
+    pub fn emit_session_reject(
+        &mut self,
+        ref_seq: u64,
+        ref_msg_type: &str,
+        reason: &str,
+        text: &str,
+    ) -> Result<u64, ExecutionError> {
+        if !self.connected {
+            return Err(ExecutionError::Disconnected);
+        }
+        let seq_s = ref_seq.to_string();
+        self.emit_initiator(
+            "3",
+            &[
+                ("45", seq_s.as_str()),
+                ("372", ref_msg_type),
+                ("373", reason),
+                ("58", text),
+            ],
+        )
     }
 
     /// Sends `ResendRequest` (`35=2`) for `[begin, end]` (`end=0` ⇒ infinity).
@@ -383,17 +492,69 @@ impl FixPaperVenue {
                 continue;
             }
             let got = map.get("35").map_or("", String::as_str);
-            match got {
-                t if t == expect_type => return Ok(()),
-                "8" => self.ingest_execution_report(&map)?,
-                "2" => self.fulfill_resend_request(&map)?,
-                "4" => self.apply_sequence_reset(&map)?,
-                _ => {}
+            if got == expect_type {
+                self.dispatch_inbound_msg(&map)?;
+                return Ok(());
             }
+            self.dispatch_inbound_msg(&map)?;
         }
         Err(ExecutionError::Transport(format!(
             "fix expected admin MsgType={expect_type}"
         )))
+    }
+
+    fn dispatch_inbound_msg(
+        &mut self,
+        map: &BTreeMap<String, String>,
+    ) -> Result<(), ExecutionError> {
+        match map.get("35").map(String::as_str) {
+            Some("8") => self.ingest_execution_report(map),
+            Some("2") => self.fulfill_resend_request(map),
+            Some("4") => self.apply_sequence_reset(map),
+            Some("1") => self.reply_test_request(map),
+            Some("0") => {
+                self.note_heartbeat(map);
+                Ok(())
+            }
+            Some("3") => {
+                self.note_session_reject(map);
+                Ok(())
+            }
+            other => {
+                if let Some(msg_type) = other {
+                    if msg_type != "A" && msg_type != "5" {
+                        let ref_seq: u64 =
+                            map.get("34").and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let _ =
+                            self.emit_session_reject(ref_seq, msg_type, "11", "Invalid MsgType");
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn reply_test_request(&mut self, map: &BTreeMap<String, String>) -> Result<(), ExecutionError> {
+        let req_id = map.get("112").cloned().unwrap_or_default();
+        self.emit_initiator("0", &[("112", req_id.as_str())])?;
+        Ok(())
+    }
+
+    fn note_heartbeat(&mut self, map: &BTreeMap<String, String>) {
+        if let Some(pending) = self.pending_test_req_id.as_deref() {
+            if map.get("112").map(String::as_str) == Some(pending) {
+                self.pending_test_req_id = None;
+            }
+        }
+    }
+
+    fn note_session_reject(&mut self, map: &BTreeMap<String, String>) {
+        let text = map
+            .get("58")
+            .cloned()
+            .or_else(|| map.get("372").cloned())
+            .unwrap_or_else(|| "session reject".into());
+        self.last_session_reject = Some(text);
     }
 
     /// Returns `false` when the message should be skipped (dup / awaiting resend).
@@ -560,9 +721,14 @@ impl FixPaperVenue {
                     self.ingest_execution_report(&map)?;
                     got = got.saturating_add(1);
                 }
-                Some("2") => self.fulfill_resend_request(&map)?,
-                Some("4") => self.apply_sequence_reset(&map)?,
-                _ => {}
+                Some("3") => {
+                    self.note_session_reject(&map);
+                    return Err(ExecutionError::InvalidState("session reject"));
+                }
+                other => {
+                    let _ = other;
+                    self.dispatch_inbound_msg(&map)?;
+                }
             }
         }
         if got >= min_reports {
@@ -882,18 +1048,7 @@ impl FixPaperVenue {
             if let Ok(map) = decode_fix(&wire) {
                 // Mutex must be released before accept/resend (those may write TCP).
                 if self.accept_inbound_seq(&map).unwrap_or(false) {
-                    match map.get("35").map(String::as_str) {
-                        Some("8") => {
-                            let _ = self.ingest_execution_report(&map);
-                        }
-                        Some("2") => {
-                            let _ = self.fulfill_resend_request(&map);
-                        }
-                        Some("4") => {
-                            let _ = self.apply_sequence_reset(&map);
-                        }
-                        _ => {}
-                    }
+                    let _ = self.dispatch_inbound_msg(&map);
                 }
             }
             let Ok(g) = tcp.lock() else {
@@ -911,6 +1066,11 @@ impl ExecutionVenue for FixPaperVenue {
     fn submit(&mut self, order: &NewVenueOrder) -> Result<(), ExecutionError> {
         if !self.connected {
             return Err(ExecutionError::Disconnected);
+        }
+        if !self.config.is_order_entry() && self.tcp.is_none() {
+            return Err(ExecutionError::InvalidState(
+                "drop copy session is receive-only",
+            ));
         }
         if order.qty.lots() <= 0 || order.price.scaled() <= 0 {
             return Err(ExecutionError::InvalidQuantity);
@@ -941,6 +1101,14 @@ impl ExecutionVenue for FixPaperVenue {
                 ("59", tif_s),
             ],
         )?;
+
+        if !self.config.is_order_entry() {
+            // Drop-copy TCP acceptor replies with session Reject.
+            let _ = self.recv_execution_reports(1);
+            return Err(ExecutionError::InvalidState(
+                "drop copy session is receive-only",
+            ));
+        }
 
         if self.tcp.is_some() {
             // Seed inflight so ER ingest can attach; acceptor assigns venue id.
@@ -1024,6 +1192,11 @@ impl ExecutionVenue for FixPaperVenue {
         if !self.connected {
             return Err(ExecutionError::Disconnected);
         }
+        if !self.config.is_order_entry() {
+            return Err(ExecutionError::InvalidState(
+                "drop copy session is receive-only",
+            ));
+        }
         let Some(row) = self.inflight.get(&order_id).cloned() else {
             return Err(ExecutionError::UnknownOrder { id: order_id });
         };
@@ -1082,6 +1255,11 @@ impl ExecutionVenue for FixPaperVenue {
     ) -> Result<(), ExecutionError> {
         if !self.connected {
             return Err(ExecutionError::Disconnected);
+        }
+        if !self.config.is_order_entry() {
+            return Err(ExecutionError::InvalidState(
+                "drop copy session is receive-only",
+            ));
         }
         if new_qty.lots() <= 0 || new_price.scaled() <= 0 {
             return Err(ExecutionError::InvalidQuantity);
@@ -1223,6 +1401,8 @@ impl ExecutionVenue for FixPaperVenue {
         self.outbox.clear();
         self.outbound_wire.clear();
         self.inbound_wire.clear();
+        self.pending_test_req_id = None;
+        self.last_session_reject = None;
         if self.logon().is_err() {
             // Fall back to in-process session markers so OMS reconnect tests stay usable.
             self.connected = true;
@@ -1504,6 +1684,107 @@ mod tests {
         let map = decode_fix(gap).expect("decode");
         assert_eq!(map.get("34").map(String::as_str), Some("2"));
         assert_eq!(map.get("36").map(String::as_str), Some("4"));
+    }
+
+    #[test]
+    fn test_request_echoes_heartbeat() {
+        let mut v = FixPaperVenue::local_mock();
+        let id = v.send_test_request().expect("test request");
+        assert!(id.starts_with("TR"));
+        assert!(v.pending_test_req_id().is_none());
+        assert!(v
+            .outbound_wire()
+            .iter()
+            .any(|m| m.contains("35=1") && m.contains(&format!("112={id}"))));
+        assert!(v
+            .inbound_wire()
+            .iter()
+            .any(|m| m.contains("35=0") && m.contains(&format!("112={id}"))));
+    }
+
+    #[test]
+    fn session_reject_emits_ref_fields() {
+        let mut v = FixPaperVenue::local_mock();
+        v.emit_session_reject(7, "D", "11", "Invalid MsgType")
+            .expect("reject");
+        let wire = v
+            .outbound_wire()
+            .iter()
+            .rev()
+            .find(|m| m.contains("35=3"))
+            .expect("reject wire");
+        let map = decode_fix(wire).expect("decode");
+        assert_eq!(map.get("45").map(String::as_str), Some("7"));
+        assert_eq!(map.get("372").map(String::as_str), Some("D"));
+        assert_eq!(map.get("373").map(String::as_str), Some("11"));
+    }
+
+    #[test]
+    fn drop_copy_in_process_rejects_order_entry() {
+        let mut v = FixPaperVenue::new(FixConfig::drop_copy());
+        v.logon().expect("logon");
+        let err = v
+            .submit(&NewVenueOrder {
+                order_id: OrderId::from_u64(1),
+                instrument_id: InstrumentId::from_u64(1),
+                side: Side::Buy,
+                qty: QuantityLots::from_lots(1),
+                price: PriceTicks::from_scaled(100),
+                tif: TimeInForce::Gtc,
+            })
+            .expect_err("drop copy");
+        assert_eq!(
+            err,
+            ExecutionError::InvalidState("drop copy session is receive-only")
+        );
+        // Drop-copy may still ingest injected ERs.
+        v.inject(ExecutionReport::new(
+            OrderId::from_u64(1),
+            VenueOrderId::new("FIX-1").expect("vid"),
+            None,
+            ExecType::New,
+            QuantityLots::from_lots(1),
+            PriceTicks::from_scaled(100),
+            SessionId::new(1),
+            1,
+        ));
+        assert_eq!(v.poll().len(), 1);
+    }
+
+    #[test]
+    fn tcp_test_request_and_drop_copy_reject() {
+        let mut v = FixPaperVenue::new(FixConfig::tcp_loopback_ephemeral());
+        v.logon().expect("tcp logon");
+        let id = v.send_test_request().expect("test req");
+        assert!(v.pending_test_req_id().is_none());
+        assert!(v
+            .inbound_wire()
+            .iter()
+            .any(|m| m.contains("35=0") && m.contains(&format!("112={id}"))));
+
+        let mut dc = FixConfig::tcp_loopback_ephemeral();
+        dc.session_kind = FixSessionKind::DropCopy;
+        let mut drop = FixPaperVenue::new(dc);
+        drop.logon().expect("dc logon");
+        let err = drop
+            .submit(&NewVenueOrder {
+                order_id: OrderId::from_u64(2),
+                instrument_id: InstrumentId::from_u64(1),
+                side: Side::Buy,
+                qty: QuantityLots::from_lots(1),
+                price: PriceTicks::from_scaled(100),
+                tif: TimeInForce::Gtc,
+            })
+            .expect_err("dc submit");
+        assert_eq!(
+            err,
+            ExecutionError::InvalidState("drop copy session is receive-only")
+        );
+        assert!(
+            drop.last_session_reject().is_some()
+                || drop.inbound_wire().iter().any(|m| m.contains("35=3")),
+            "expected session Reject on drop-copy order entry"
+        );
     }
 
     #[test]

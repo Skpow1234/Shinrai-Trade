@@ -66,6 +66,7 @@ Prefer `SHINRAI_MD_CLIENTS` + short-lived access tokens. `SHINRAI_MD_TOKENS` is 
 | `SHINRAI_OG_FIX_TARGET_COMP_ID` | FIX tag 56 (default `SIM`) when `venue=fix` |
 | `SHINRAI_OG_FIX_HEARTBEAT_SECS` | Logical heartbeat interval ticks (default `5`) |
 | `SHINRAI_OG_FIX_AUTO_FILL` | Auto-fill after New ack (default `true`; use `false` with external TCP) |
+| `SHINRAI_OG_FIX_SESSION` | `order_entry` (default) or `drop_copy` — drop-copy is receive-only (Rejects `D`/`F`/`G`) |
 | `SHINRAI_OG_FIX_TCP` | `1` — spawn local TCP paper acceptor + initiator session |
 | `SHINRAI_OG_FIX_TCP_ADDR` | Loopback bind/connect addr (default `127.0.0.1:19878`) |
 | `SHINRAI_OG_FIX_TCP_CONNECT` | Connect initiator to external acceptor `host:port` (no local spawn) |

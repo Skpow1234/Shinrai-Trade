@@ -66,7 +66,7 @@ SHINRAI_OG_DEPOSITS=1:10000 \
 cargo run -p shinrai-order-gateway
 ```
 
-Or point the initiator at an external FIX 4.2 acceptor (Logon / Heartbeat / D / F / G / ER / ResendRequest / SequenceReset subset):
+Or point the initiator at an external FIX 4.2 acceptor (Logon / Heartbeat / TestRequest / Reject / D / F / G / ER / ResendRequest / SequenceReset subset). Use `SHINRAI_OG_FIX_SESSION=drop_copy` for a receive-only drop-copy session:
 
 ```bash
 SHINRAI_OG_VENUE=fix \

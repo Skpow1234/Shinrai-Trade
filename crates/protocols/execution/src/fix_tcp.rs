@@ -235,7 +235,25 @@ fn dispatch_inbound(
             false
         }
         "0" => {
-            let _ = send_acceptor(stream, config, next_out, outbound, "0", &[]);
+            // Heartbeat — echo TestReqID when present.
+            if let Some(req) = map.get("112") {
+                let _ = send_acceptor(
+                    stream,
+                    config,
+                    next_out,
+                    outbound,
+                    "0",
+                    &[("112", req.as_str())],
+                );
+            } else {
+                let _ = send_acceptor(stream, config, next_out, outbound, "0", &[]);
+            }
+            false
+        }
+        "1" => {
+            // TestRequest → Heartbeat with matching TestReqID.
+            let req = map.get("112").map_or("", String::as_str);
+            let _ = send_acceptor(stream, config, next_out, outbound, "0", &[("112", req)]);
             false
         }
         "5" => {
@@ -244,6 +262,19 @@ fn dispatch_inbound(
         }
         "2" => {
             let _ = handle_resend_request(stream, config, next_out, outbound, map);
+            false
+        }
+        "3" => false, // ignore inbound Reject
+        "D" | "F" | "G" if !config.is_order_entry() => {
+            let _ = send_session_reject(
+                stream,
+                config,
+                next_out,
+                outbound,
+                map,
+                "11",
+                "drop copy session rejects order entry",
+            );
             false
         }
         "D" => {
@@ -260,8 +291,45 @@ fn dispatch_inbound(
             let _ = handle_replace(stream, config, next_out, outbound, working, map);
             false
         }
-        _ => false,
+        _ => {
+            let _ = send_session_reject(
+                stream,
+                config,
+                next_out,
+                outbound,
+                map,
+                "11",
+                "Invalid MsgType",
+            );
+            false
+        }
     }
+}
+
+fn send_session_reject(
+    stream: &mut TcpStream,
+    config: &FixConfig,
+    next_out: &mut u64,
+    outbound: &mut Vec<(u64, String)>,
+    map: &std::collections::BTreeMap<String, String>,
+    reason: &str,
+    text: &str,
+) -> Result<(), ExecutionError> {
+    let ref_seq = map.get("34").map_or("0", String::as_str);
+    let ref_type = map.get("35").map_or("?", String::as_str);
+    send_acceptor(
+        stream,
+        config,
+        next_out,
+        outbound,
+        "3",
+        &[
+            ("45", ref_seq),
+            ("372", ref_type),
+            ("373", reason),
+            ("58", text),
+        ],
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -359,7 +427,15 @@ fn handle_new(
     let side = map.get("54").cloned().unwrap_or_else(|| "1".into());
     let tif = map.get("59").map_or("1", String::as_str);
     if qty <= 0 || px <= 0 || cl_ord.is_empty() {
-        return Ok(());
+        return send_session_reject(
+            stream,
+            config,
+            next_out,
+            outbound,
+            map,
+            "1",
+            "Required tag missing",
+        );
     }
     if tif == "4" && !config.auto_fill {
         let venue = format!("FIX-{next_venue}");
