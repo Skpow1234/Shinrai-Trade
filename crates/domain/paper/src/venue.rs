@@ -303,9 +303,15 @@ impl VenueHandle {
             Self::Alpaca(s) => {
                 s.restore_working(order.id(), order.order_qty(), order.price(), cum, venue_id)
             }
-            Self::Fix(s) => {
-                s.restore_working(order.id(), order.order_qty(), order.price(), cum, venue_id)
-            }
+            Self::Fix(s) => s.restore_working(
+                order.id(),
+                order.instrument_id(),
+                order.side(),
+                order.order_qty(),
+                order.price(),
+                cum,
+                venue_id,
+            ),
         }
     }
 }

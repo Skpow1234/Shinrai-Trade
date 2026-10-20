@@ -19,7 +19,7 @@ use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use shinrai_instruments::{PriceTicks, QuantityLots};
+use shinrai_instruments::{InstrumentId, PriceTicks, QuantityLots};
 use shinrai_orders::{ExecId, OrderId, Side, TimeInForce, VenueOrderId};
 
 use crate::error::ExecutionError;
@@ -190,11 +190,16 @@ impl FixConfig {
 #[derive(Debug, Clone)]
 struct Inflight {
     venue_order_id: VenueOrderId,
+    instrument_id: InstrumentId,
+    side: Side,
     order_qty: i64,
     cum_qty: i64,
     price: PriceTicks,
     canceled: bool,
 }
+
+/// Deterministic `TransactTime` (tag 60) for paper FIX (matches header tag 52).
+const FIX_TRANSACT_TIME: &str = "20200101-00:00:00.000";
 
 /// Wire-shaped FIX paper venue (in-process or TCP initiator).
 #[derive(Debug)]
@@ -746,6 +751,7 @@ impl FixPaperVenue {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn ingest_execution_report(
         &mut self,
         map: &BTreeMap<String, String>,
@@ -804,8 +810,16 @@ impl FixPaperVenue {
             self.inflight.remove(&order_id);
         }
         if matches!(exec_type, ExecType::New | ExecType::Replaced) {
+            let side = match map.get("54").map(String::as_str) {
+                Some("2") => Side::Sell,
+                _ => Side::Buy,
+            };
+            let instrument_id =
+                InstrumentId::from_u64(map.get("55").and_then(|s| s.parse().ok()).unwrap_or(0));
             self.inflight.entry(order_id).or_insert_with(|| Inflight {
                 venue_order_id: venue_order_id.clone(),
+                instrument_id,
+                side,
                 order_qty: map
                     .get("151")
                     .and_then(|s| s.parse::<i64>().ok())
@@ -926,9 +940,12 @@ impl FixPaperVenue {
     /// # Errors
     ///
     /// Returns quantity / identifier errors.
+    #[allow(clippy::too_many_arguments)]
     pub fn restore_working(
         &mut self,
         order_id: OrderId,
+        instrument_id: InstrumentId,
+        side: Side,
         order_qty: QuantityLots,
         price: PriceTicks,
         cum_qty: i64,
@@ -949,6 +966,8 @@ impl FixPaperVenue {
             order_id,
             Inflight {
                 venue_order_id,
+                instrument_id,
+                side,
                 order_qty: order_qty.lots(),
                 cum_qty,
                 price,
@@ -997,7 +1016,7 @@ impl FixPaperVenue {
         seq
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn push_report_from_er(
         &mut self,
         order_id: OrderId,
@@ -1017,13 +1036,20 @@ impl FixPaperVenue {
         if let ExecType::CancelReject { reason } = &exec_type {
             let cxl_id = format!("cxl-{cl_ord}");
             let code = cxl_rej_reason_code(reason).to_string();
-            let ord_status = if leaves <= 0 && cum > 0 { "2" } else { "0" };
+            let ord_status = if leaves <= 0 && cum > 0 {
+                "2"
+            } else if reason.to_ascii_lowercase().contains("unknown") {
+                "8"
+            } else {
+                "0"
+            };
             let body = [
                 ("37", venue.as_str()),
                 ("11", cxl_id.as_str()),
                 ("41", cl_ord.as_str()),
                 ("39", ord_status),
                 ("102", code.as_str()),
+                ("434", "1"), // CxlRejResponseTo=OrderCancelRequest
                 ("58", reason.as_str()),
             ];
             let _ = self.emit_acceptor("9", &body);
@@ -1213,6 +1239,8 @@ impl ExecutionVenue for FixPaperVenue {
                 order.order_id,
                 Inflight {
                     venue_order_id: venue_order_id.clone(),
+                    instrument_id: order.instrument_id,
+                    side: order.side,
                     order_qty: order.qty.lots(),
                     cum_qty: 0,
                     price: order.price,
@@ -1245,6 +1273,8 @@ impl ExecutionVenue for FixPaperVenue {
             order.order_id,
             Inflight {
                 venue_order_id: venue_order_id.clone(),
+                instrument_id: order.instrument_id,
+                side: order.side,
                 order_qty: order.qty.lots(),
                 cum_qty: 0,
                 price: order.price,
@@ -1300,7 +1330,24 @@ impl ExecutionVenue for FixPaperVenue {
         let cl_ord = order_id.get().to_string();
         let cxl_id = format!("cxl-{cl_ord}");
         let venue = row.venue_order_id.as_str().to_string();
-        self.emit_initiator("F", &[("11", &cxl_id), ("41", &cl_ord), ("37", &venue)])?;
+        let side_s = match row.side {
+            Side::Buy => "1",
+            Side::Sell => "2",
+        };
+        let symbol = row.instrument_id.get().to_string();
+        let qty_s = row.order_qty.to_string();
+        self.emit_initiator(
+            "F",
+            &[
+                ("11", &cxl_id),
+                ("41", &cl_ord),
+                ("37", &venue),
+                ("54", side_s),
+                ("55", &symbol),
+                ("38", &qty_s),
+                ("60", FIX_TRANSACT_TIME),
+            ],
+        )?;
 
         if self.tcp.is_some() {
             self.recv_execution_reports(1)?;
@@ -1308,7 +1355,20 @@ impl ExecutionVenue for FixPaperVenue {
         }
 
         if row.canceled {
-            return Err(ExecutionError::InvalidState("already canceled"));
+            self.push_report_from_er(
+                order_id,
+                row.venue_order_id,
+                None,
+                ExecType::CancelReject {
+                    reason: "already canceled".into(),
+                },
+                QuantityLots::from_lots(0),
+                row.price,
+                row.order_qty - row.cum_qty,
+                row.cum_qty,
+                row.side,
+            )?;
+            return Ok(());
         }
         let leaves = row.order_qty - row.cum_qty;
         if leaves <= 0 {
@@ -1323,7 +1383,7 @@ impl ExecutionVenue for FixPaperVenue {
                 row.price,
                 0,
                 row.cum_qty,
-                Side::Buy,
+                row.side,
             )?;
             return Ok(());
         }
@@ -1339,7 +1399,7 @@ impl ExecutionVenue for FixPaperVenue {
             row.price,
             0,
             row.cum_qty,
-            Side::Buy,
+            row.side,
         )?;
         Ok(())
     }
@@ -1558,7 +1618,7 @@ fn ord_rej_reason_code(reason: &str) -> &'static str {
 /// Maps a cancel-reject reason string to FIX `CxlRejReason` (tag 102).
 fn cxl_rej_reason_code(reason: &str) -> &'static str {
     let r = reason.to_ascii_lowercase();
-    if r.contains("already filled") || r.contains("too late") {
+    if r.contains("already filled") || r.contains("too late") || r.contains("already canceled") {
         "0" // Too late to cancel
     } else if r.contains("unknown") {
         "1"
@@ -1663,7 +1723,6 @@ pub fn with_poss_dup(raw: &str) -> Result<String, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shinrai_instruments::InstrumentId;
     use shinrai_orders::TimeInForce;
 
     #[test]
@@ -1723,7 +1782,86 @@ mod tests {
         assert!(reports
             .iter()
             .any(|r| matches!(r.exec_type(), ExecType::Canceled)));
-        assert!(v.outbound_wire().iter().any(|m| m.contains("35=F")));
+        let cxl = v
+            .outbound_wire()
+            .iter()
+            .rev()
+            .find(|m| m.contains("35=F"))
+            .expect("OrderCancelRequest");
+        assert!(cxl.contains("11=cxl-3"));
+        assert!(cxl.contains("41=3"));
+        assert!(cxl.contains("54=1"));
+        assert!(cxl.contains("55=1"));
+        assert!(cxl.contains("38=2"));
+        assert!(cxl.contains("60=20200101-00:00:00.000"));
+    }
+
+    #[test]
+    fn sell_cancel_preserves_side_on_wire() {
+        let mut v = FixPaperVenue::new(FixConfig::ack_only());
+        v.logon().expect("logon");
+        v.submit(&NewVenueOrder {
+            order_id: OrderId::from_u64(4),
+            instrument_id: InstrumentId::from_u64(42),
+            side: Side::Sell,
+            qty: QuantityLots::from_lots(3),
+            price: PriceTicks::from_scaled(100),
+            tif: TimeInForce::Gtc,
+        })
+        .expect("submit");
+        let _ = v.poll();
+        v.cancel(OrderId::from_u64(4)).expect("cxl");
+        let reports = v.poll();
+        assert!(reports
+            .iter()
+            .any(|r| matches!(r.exec_type(), ExecType::Canceled)));
+        let cxl = v
+            .outbound_wire()
+            .iter()
+            .rev()
+            .find(|m| m.contains("35=F"))
+            .expect("OrderCancelRequest");
+        assert!(cxl.contains("54=2"));
+        assert!(cxl.contains("55=42"));
+        assert!(cxl.contains("38=3"));
+        let er = v
+            .inbound_wire()
+            .iter()
+            .rev()
+            .find(|m| m.contains("150=4"))
+            .expect("Canceled ER");
+        assert!(er.contains("54=2"));
+    }
+
+    #[test]
+    fn cancel_twice_emits_cancel_reject() {
+        let mut v = FixPaperVenue::new(FixConfig::ack_only());
+        v.logon().expect("logon");
+        v.submit(&NewVenueOrder {
+            order_id: OrderId::from_u64(5),
+            instrument_id: InstrumentId::from_u64(1),
+            side: Side::Buy,
+            qty: QuantityLots::from_lots(1),
+            price: PriceTicks::from_scaled(100),
+            tif: TimeInForce::Gtc,
+        })
+        .expect("submit");
+        let _ = v.poll();
+        v.cancel(OrderId::from_u64(5)).expect("cxl1");
+        let _ = v.poll();
+        v.cancel(OrderId::from_u64(5)).expect("cxl2");
+        let reports = v.poll();
+        assert!(
+            reports.iter().any(|r| matches!(
+                r.exec_type(),
+                ExecType::CancelReject { reason } if reason == "already canceled"
+            )),
+            "missing CancelReject: {reports:?}"
+        );
+        assert!(v
+            .inbound_wire()
+            .iter()
+            .any(|m| m.contains("35=9") && m.contains("102=0") && m.contains("434=1")));
     }
 
     #[test]
@@ -1784,6 +1922,7 @@ mod tests {
             .find(|m| m.contains("35=9"))
             .expect("OrderCancelReject");
         assert!(wire.contains("102=0"));
+        assert!(wire.contains("434=1"));
         assert!(wire.contains("58=already filled"));
         assert!(!wire.contains("150=8"));
     }
@@ -1991,6 +2130,43 @@ mod tests {
                 || drop.inbound_wire().iter().any(|m| m.contains("35=3")),
             "expected session Reject on drop-copy order entry"
         );
+    }
+
+    #[test]
+    fn tcp_cancel_unknown_emits_cancel_reject() {
+        let mut v = FixPaperVenue::new(FixConfig::tcp_loopback_ephemeral());
+        v.logon().expect("tcp logon");
+        // Hydrate initiator only — acceptor has no working order.
+        v.restore_working(
+            OrderId::from_u64(99),
+            InstrumentId::from_u64(7),
+            Side::Sell,
+            QuantityLots::from_lots(2),
+            PriceTicks::from_scaled(100),
+            0,
+            VenueOrderId::new("FIX-X").ok(),
+        )
+        .expect("restore");
+        v.cancel(OrderId::from_u64(99)).expect("cxl");
+        let reports = v.poll();
+        assert!(
+            reports.iter().any(|r| matches!(
+                r.exec_type(),
+                ExecType::CancelReject { reason } if reason == "unknown order"
+            )),
+            "missing CancelReject: {reports:?}"
+        );
+        let cxl = v
+            .outbound_wire()
+            .iter()
+            .rev()
+            .find(|m| m.contains("35=F"))
+            .expect("OrderCancelRequest");
+        assert!(cxl.contains("54=2") && cxl.contains("55=7") && cxl.contains("38=2"));
+        assert!(v
+            .inbound_wire()
+            .iter()
+            .any(|m| m.contains("35=9") && m.contains("102=1") && m.contains("434=1")));
     }
 
     #[test]

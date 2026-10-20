@@ -335,6 +335,7 @@ fn send_session_reject(
 #[derive(Debug, Clone)]
 struct Working {
     venue_order_id: String,
+    symbol: String,
     order_qty: i64,
     cum_qty: i64,
     price: i64,
@@ -425,6 +426,7 @@ fn handle_new(
     let qty: i64 = map.get("38").and_then(|s| s.parse().ok()).unwrap_or(0);
     let px: i64 = map.get("44").and_then(|s| s.parse().ok()).unwrap_or(0);
     let side = map.get("54").cloned().unwrap_or_else(|| "1".into());
+    let symbol = map.get("55").cloned().unwrap_or_default();
     let tif = map.get("59").map_or("1", String::as_str);
     if qty <= 0 || px <= 0 || cl_ord.is_empty() {
         return send_session_reject(
@@ -461,6 +463,7 @@ fn handle_new(
         cl_ord.clone(),
         Working {
             venue_order_id: venue.clone(),
+            symbol,
             order_qty: qty,
             cum_qty: 0,
             price: px,
@@ -527,19 +530,54 @@ fn handle_cancel(
     map: &std::collections::BTreeMap<String, String>,
 ) -> Result<(), ExecutionError> {
     let orig = map.get("41").cloned().unwrap_or_default();
+    let cxl = map
+        .get("11")
+        .cloned()
+        .unwrap_or_else(|| format!("cxl-{orig}"));
     let Some(row) = working.get_mut(&orig) else {
-        return Ok(());
+        let venue = map.get("37").cloned().unwrap_or_else(|| "NONE".into());
+        return send_acceptor(
+            stream,
+            config,
+            next_out,
+            outbound,
+            "9",
+            &[
+                ("37", venue.as_str()),
+                ("11", cxl.as_str()),
+                ("41", orig.as_str()),
+                ("39", "8"),  // OrdStatus=Rejected (unknown)
+                ("102", "1"), // Unknown order
+                ("434", "1"),
+                ("58", "unknown order"),
+            ],
+        );
     };
     let leaves = row.order_qty - row.cum_qty;
     let venue = row.venue_order_id.clone();
+    let symbol = row.symbol.clone();
     let side = row.side.clone();
     let cum = row.cum_qty.to_string();
     let px = row.price.to_string();
+    if row.canceled {
+        return send_acceptor(
+            stream,
+            config,
+            next_out,
+            outbound,
+            "9",
+            &[
+                ("37", venue.as_str()),
+                ("11", cxl.as_str()),
+                ("41", orig.as_str()),
+                ("39", "4"),  // OrdStatus=Canceled
+                ("102", "0"), // Too late to cancel
+                ("434", "1"),
+                ("58", "already canceled"),
+            ],
+        );
+    }
     if leaves <= 0 {
-        let cxl = map
-            .get("11")
-            .cloned()
-            .unwrap_or_else(|| format!("cxl-{orig}"));
         return send_acceptor(
             stream,
             config,
@@ -552,6 +590,7 @@ fn handle_cancel(
                 ("41", orig.as_str()),
                 ("39", "2"),  // OrdStatus=Filled
                 ("102", "0"), // Too late to cancel
+                ("434", "1"),
                 ("58", "already filled"),
             ],
         );
@@ -567,6 +606,7 @@ fn handle_cancel(
         &[
             ("37", venue.as_str()),
             ("11", orig.as_str()),
+            ("55", symbol.as_str()),
             ("150", "4"),
             ("39", "4"),
             ("54", side.as_str()),

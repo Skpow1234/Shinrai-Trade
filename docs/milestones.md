@@ -86,12 +86,13 @@ Real custody / bank rails stay gated on regulation and licensed partners. This p
 - **Risk ops audit**: `risk_ops_audit` + `GET /v1/ops/risk-audit` for every ops risk mutation (and system persist-fail kills / approval overrides)
 - **KYC fail-closed**: empty `SHINRAI_OG_KYC_STATUS` blocks trading outside `--dev` / `SHINRAI_OG_KYC_OPEN` (`M-0346`)
 - **FIX business Reject**: ER Reject `150=8` + `OrdRejReason`/`Text`; CancelReject as `35=9` + `CxlRejReason` (`M-0125`)
+- **FIX Order Cancel Request**: full `35=F` (Side/Symbol/OrderQty/TransactTime); unknown/dup/filled → `35=9` (`M-0124`)
 
 ## Suggested next (priority)
 
-1. Raw CME MDP3 multicast (licensed binary UDP) — optional when vendor JSON feed unavailable
-2. Ops audit trail polish / readiness probes
-3. FIX Order Cancel Request full path (`M-0124`)
+1. Ops audit trail polish / readiness probes
+2. Raw CME MDP3 multicast stub (licensed binary UDP) — optional when Databento JSON unavailable
+3. CME iLink adapter stub (`M-0132`)
 
 ## Full backlog (500+)
 
