@@ -603,6 +603,12 @@ impl AppState {
         self.oms_leader.store(leader, Ordering::Relaxed);
     }
 
+    /// Shared leader flag for background tasks (outbox publisher).
+    #[must_use]
+    pub fn oms_leader_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.oms_leader)
+    }
+
     /// Attaches a Postgres pool for write-through after trading mutations.
     pub async fn attach_store(&mut self, pool: StorePool) {
         if let Ok(orders) = shinrai_store::list_orders(&pool).await {

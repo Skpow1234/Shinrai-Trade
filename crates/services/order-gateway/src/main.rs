@@ -14,6 +14,7 @@ use shinrai_order_gateway::{router, run_leader_heartbeat, AppState, GatewayConfi
 use shinrai_store::{connect_from_env, migrate, StoreError};
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
@@ -91,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     .unwrap_or(1_000);
                 let sink = build_event_sink().await?;
                 let kind = sink.kind();
-                let leader_flag = state.oms_leader.clone();
+                let leader_flag = state.oms_leader_flag();
                 let ha = state.ha_enabled();
                 tokio::spawn(shinrai_order_gateway::run_outbox_publisher(
                     pool,
